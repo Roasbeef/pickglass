@@ -1,0 +1,15 @@
+name = "pickglass"
+version = "0.1.0"
+licences = ["Apache-2.0"]
+description = "A BEAM runtime inspector and performance and trace viewer, written in Gleam."
+target = "erlang"
+
+gleam = ">= 1.18.0"
+
+repository = { type = "github", user = "Roasbeef", repo = "pickglass" }
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
