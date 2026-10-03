@@ -1,0 +1,88 @@
+# Pickglass CI — the per-PR path.
+#
+# Two jobs, and they are not interchangeable. `check` runs `make check`, the
+# full gate (format, warning-free build, tests, lint, doc-check), and is
+# exactly what a developer runs locally. `release` runs `make release
+# release-smoke` and proves the self-contained release builds from a clean
+# checkout and boots with no `erl` on PATH, which no other job can show.
+#
+# The toolchain pins are Loom's, copied rather than floated: a floating
+# toolchain turns a green build into a coin flip, and a red run should mean
+# "the code broke". Bumping a version is a deliberate edit that changes every
+# job at once. The action versions are Loom's SHAs too.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run's answer stale.
+# `main` is exempt: every commit that lands there gets its own verdict.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Exact, never floating. 1.19.0-rc2 is a release candidate, above the
+  # `gleam >= 1.18.0` floor every gleam.toml declares; it becomes "1.19.0"
+  # when that ships. 29.0.5 is the OTP the tree is developed against (the
+  # floor is 29). rebar3 is needed by the release job's relx assembly.
+  GLEAM_VERSION: "1.19.0-rc2"
+  OTP_VERSION: "29.0.5"
+  REBAR3_VERSION: "3.27.0"
+
+jobs:
+  check:
+    name: check (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+          version-type: strict
+
+      - name: Download dependencies
+        run: make deps
+
+      - name: Full gate
+        run: make check
+
+  release:
+    name: release (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+          version-type: strict
+
+      - name: Download dependencies
+        run: make deps
+
+      # The smoke is the point: it boots the artifact with a PATH that has no
+      # erl, so a release that quietly leaned on the runner's Erlang fails
+      # here instead of on a user's machine.
+      - name: Build the self-contained release and boot it without Erlang
+        run: make release release-smoke
