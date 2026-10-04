@@ -1,7 +1,10 @@
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
-import pickglass/cli.{Attach, AttachOptions, ProbeOptions, ShowBanner, ShowHelp}
+import pickglass/cli.{
+  Attach, AttachOptions, Open, OpenOptions, ProbeOptions, ShowBanner, ShowHelp,
+  View, ViewOptions,
+}
 import pickglass_core/identity
 import pickglass_core/owner
 import pickglass_core/wire
@@ -14,14 +17,20 @@ pub fn no_arguments_print_the_banner_test() {
 
 pub fn attach_options_parse_test() {
   assert cli.parse(["attach"])
-    == Ok(Attach(AttachOptions(None, None, None, None)))
+    == Ok(Attach(AttachOptions(None, None, None, None, None)))
   assert cli.parse([
       "attach", "--state-dir", "/s", "--pid", "42", "--agent-ebin", "/e",
     ])
-    == Ok(Attach(AttachOptions(Some("/s"), Some(42), Some("/e"), None)))
+    == Ok(Attach(AttachOptions(Some("/s"), Some(42), Some("/e"), None, None)))
   assert cli.parse(["attach", "--probe-counters", "lists", "--seconds", "5"])
     == Ok(
-      Attach(AttachOptions(None, None, None, Some(ProbeOptions("lists", 5)))),
+      Attach(AttachOptions(
+        None,
+        None,
+        None,
+        Some(ProbeOptions("lists", 5)),
+        None,
+      )),
     )
 }
 
@@ -112,4 +121,32 @@ pub fn the_report_names_unknown_owners_and_truncation_test() {
   assert string.contains(text, "unknown")
   assert string.contains(text, "session:s1 (worker)")
   assert list.length(string.split(text, "\n")) > 8
+}
+
+pub fn once_and_open_and_view_parse_test() {
+  assert cli.parse(["attach", "--once", "--out", "cut.pgcap"])
+    == Ok(Attach(AttachOptions(None, None, None, None, Some("cut.pgcap"))))
+  assert cli.parse(["open", "--pid", "7", "--port", "8080", "--cadence", "5"])
+    == Ok(Open(OpenOptions(None, Some(7), None, Some(8080), None, Some(5))))
+  assert cli.parse(["view", "cut.pgcap", "--port", "9000"])
+    == Ok(View(ViewOptions("cut.pgcap", Some(9000))))
+}
+
+pub fn malformed_open_and_view_are_errors_test() {
+  assert is_error(cli.parse(["open", "--port", "0"]))
+  assert is_error(cli.parse(["open", "--cadence", "0"]))
+  assert is_error(cli.parse(["open", "--frob"]))
+  assert is_error(cli.parse(["view"]))
+  assert is_error(cli.parse(["view", "--port", "1"]))
+  assert is_error(
+    cli.parse([
+      "attach",
+      "--out",
+      "x",
+      "--probe-counters",
+      "m",
+      "--seconds",
+      "5",
+    ]),
+  )
 }

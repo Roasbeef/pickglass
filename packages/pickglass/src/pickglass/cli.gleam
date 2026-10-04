@@ -1,5 +1,7 @@
 //// The command line: parsing, running and printing.
 ////
+//// `pickglass open` and `pickglass view` start the host (`serve` runs them),
+//// and `pickglass attach --once --out` writes one capture (`once` runs it).
 //// `pickglass attach` joins a profiled Loom daemon, prints what the agent
 //// reports, and detaches. `pickglass attach --probe-counters MODULE
 //// --seconds N` also runs a counters probe over every process for N seconds
@@ -40,6 +42,33 @@ pub type Command {
 
   /// Attach and report.
   Attach(AttachOptions)
+
+  /// Attach to a target and serve the pages.
+  Open(OpenOptions)
+
+  /// Serve the pages over a capture file, with no target.
+  View(ViewOptions)
+}
+
+/// Options of `pickglass open`.
+pub type OpenOptions {
+  OpenOptions(
+    state_dir: Option(String),
+    pid: Option(Int),
+    agent_ebin: Option(String),
+    /// The port to listen on, or `None` for any free one.
+    port: Option(Int),
+    /// Where captures saved from a page are written, or `None` for the
+    /// current directory.
+    save_dir: Option(String),
+    /// Seconds between collection passes, or `None` for two.
+    cadence_s: Option(Int),
+  )
+}
+
+/// Options of `pickglass view`.
+pub type ViewOptions {
+  ViewOptions(file: String, port: Option(Int))
 }
 
 /// Options of `pickglass attach`.
@@ -49,6 +78,8 @@ pub type AttachOptions {
     pid: Option(Int),
     agent_ebin: Option(String),
     probe: Option(ProbeOptions),
+    /// With `--once`, the file to write one capture to.
+    once: Option(String),
   )
 }
 
@@ -59,14 +90,19 @@ pub type ProbeOptions {
 
 /// The usage text.
 pub const usage =
-  "usage: pickglass attach [--state-dir DIR] [--pid PID]
-                        [--agent-ebin DIR]
+  "usage: pickglass open [--state-dir DIR] [--pid PID] [--agent-ebin DIR]
+                      [--port N] [--save-dir DIR] [--cadence SECONDS]
+       pickglass view FILE [--port N]
+       pickglass attach [--state-dir DIR] [--pid PID] [--agent-ebin DIR]
                         [--probe-counters MODULE --seconds N]
+       pickglass attach --once --out FILE [--state-dir DIR] [--pid PID]
 
-Attach to a profiled Loom daemon (loomd --profile), print memory, the top
-processes and the owner totals, and detach. The state directory defaults to
-~/.loom. With --probe-counters, also run a counters probe over every process
-for N seconds and print the functions that spent the most time."
+open attaches to a profiled Loom daemon (loomd --profile), serves the pages
+on 127.0.0.1 and prints a single-use URL. view serves the pages over a
+capture file with no target. attach prints memory, the top processes and the
+owner totals and detaches; with --once --out it writes one capture and
+detaches; with --probe-counters it also runs a counters probe over every
+process for N seconds. The state directory defaults to ~/.loom."
 
 /// Parse arguments.
 ///
@@ -74,14 +110,27 @@ for N seconds and print the functions that spent the most time."
 ///
 /// ```gleam
 /// cli.parse(["attach", "--pid", "123"])
-/// // -> Ok(Attach(AttachOptions(None, Some(123), None, None)))
+/// // -> Ok(Attach(AttachOptions(None, Some(123), None, None, None)))
 /// ```
 pub fn parse(arguments: List(String)) -> Result(Command, String) {
   case arguments {
     [] -> Ok(ShowBanner)
     ["--help"] | ["-h"] | ["help"] -> Ok(ShowHelp)
     ["attach", ..rest] ->
-      parse_attach(rest, AttachOptions(None, None, None, None), None, None)
+      parse_attach(
+        rest,
+        AttachOptions(None, None, None, None, None),
+        None,
+        None,
+      )
+    ["open", ..rest] ->
+      parse_open(rest, OpenOptions(None, None, None, None, None, None))
+    ["view", file, ..rest] ->
+      case string.starts_with(file, "-") {
+        True -> Error("view needs a capture file")
+        False -> parse_view(rest, ViewOptions(file, None))
+      }
+    ["view"] -> Error("view needs a capture file")
     [other, ..] -> Error("unknown command: " <> other)
   }
 }
@@ -119,6 +168,14 @@ fn parse_attach(
           )
         _ -> Error("--pid must be a positive integer")
       }
+    ["--out", value, ..rest] ->
+      parse_attach(
+        rest,
+        AttachOptions(..options, once: Some(value)),
+        module,
+        seconds,
+      )
+    ["--once", ..rest] -> parse_attach(rest, options, module, seconds)
     ["--probe-counters", value, ..rest] ->
       parse_attach(rest, options, Some(value), seconds)
     ["--seconds", value, ..rest] ->
@@ -138,6 +195,7 @@ fn finish_attach(
 ) -> Result(Command, String) {
   case module, seconds {
     None, None -> Ok(Attach(options))
+    _, _ if options.once != None -> Error("--once --out takes no probe options")
     Some(name), Some(count) ->
       Ok(Attach(
         AttachOptions(..options, probe: Some(ProbeOptions(name, count))),
@@ -145,6 +203,81 @@ fn finish_attach(
     Some(_), None -> Error("--probe-counters needs --seconds")
     None, Some(_) -> Error("--seconds needs --probe-counters")
   }
+}
+
+fn parse_open(
+  arguments: List(String),
+  options: OpenOptions,
+) -> Result(Command, String) {
+  case arguments {
+    [] -> Ok(Open(options))
+    ["--state-dir", value, ..rest] ->
+      parse_open(rest, OpenOptions(..options, state_dir: Some(value)))
+    ["--agent-ebin", value, ..rest] ->
+      parse_open(rest, OpenOptions(..options, agent_ebin: Some(value)))
+    ["--save-dir", value, ..rest] ->
+      parse_open(rest, OpenOptions(..options, save_dir: Some(value)))
+    ["--pid", value, ..rest] ->
+      case int.parse(value) {
+        Ok(pid) if pid > 0 ->
+          parse_open(rest, OpenOptions(..options, pid: Some(pid)))
+        _ -> Error("--pid must be a positive integer")
+      }
+    ["--port", value, ..rest] ->
+      case int.parse(value) {
+        Ok(port) if port >= 1 && port <= 65_535 ->
+          parse_open(rest, OpenOptions(..options, port: Some(port)))
+        _ -> Error("--port must be between 1 and 65535")
+      }
+    ["--cadence", value, ..rest] ->
+      case int.parse(value) {
+        Ok(seconds) if seconds >= 1 && seconds <= 3600 ->
+          parse_open(rest, OpenOptions(..options, cadence_s: Some(seconds)))
+        _ -> Error("--cadence must be between 1 and 3600 seconds")
+      }
+    [flag, ..] -> Error("unknown or incomplete option: " <> flag)
+  }
+}
+
+fn parse_view(
+  arguments: List(String),
+  options: ViewOptions,
+) -> Result(Command, String) {
+  case arguments {
+    [] -> Ok(View(options))
+    ["--port", value, ..rest] ->
+      case int.parse(value) {
+        Ok(port) if port >= 1 && port <= 65_535 ->
+          parse_view(rest, ViewOptions(..options, port: Some(port)))
+        _ -> Error("--port must be between 1 and 65535")
+      }
+    [flag, ..] -> Error("unknown or incomplete option: " <> flag)
+  }
+}
+
+/// Discover the target and attach to it. The state directory defaults to
+/// `~/.loom`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// cli.connect(None, None, None)
+/// ```
+pub fn connect(
+  state_dir: Option(String),
+  pid: Option(Int),
+  agent_ebin: Option(String),
+) -> Result(#(discover.Target, Session), String) {
+  use state_dir <- result.try(state_directory(state_dir))
+  use target <- result.try(
+    discover.find(state_dir, pid) |> result.map_error(describe_discovery),
+  )
+  use session <- result.map(attach.attach(
+    target,
+    option.to_result(agent_ebin, Nil),
+  ))
+
+  #(target, session)
 }
 
 /// Run an attach command and return the process exit status.
@@ -171,14 +304,10 @@ pub fn run_attach(options: AttachOptions) -> Int {
 }
 
 fn attach_and_report(options: AttachOptions) -> Result(String, String) {
-  use state_dir <- result.try(state_directory(options.state_dir))
-  use target <- result.try(
-    discover.find(state_dir, options.pid)
-    |> result.map_error(describe_discovery),
-  )
-  use session <- result.try(attach.attach(
-    target,
-    option.to_result(options.agent_ebin, Nil),
+  use #(_, session) <- result.try(connect(
+    options.state_dir,
+    options.pid,
+    options.agent_ebin,
   ))
 
   // Detach runs whether or not the requests succeed, so an error never

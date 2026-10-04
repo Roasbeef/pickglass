@@ -12,8 +12,11 @@
 
 import argv
 import gleam/io
+import gleam/option.{Some}
 import pickglass/cli
 import pickglass/internal/ffi_os
+import pickglass/once
+import pickglass/serve
 
 /// The package version, kept equal to the `version` in `gleam.toml`.
 /// `make release-smoke` fails when the two drift, so a release can never
@@ -54,7 +57,19 @@ pub fn main() -> Nil {
   case cli.parse(argv.load().arguments) {
     Ok(cli.ShowBanner) -> io.println(banner())
     Ok(cli.ShowHelp) -> io.println(cli.usage)
+    Ok(cli.Attach(cli.AttachOptions(once: Some(out), ..) as options)) ->
+      ffi_os.halt(
+        once.run(once.Request(
+          state_dir: options.state_dir,
+          pid: options.pid,
+          agent_ebin: options.agent_ebin,
+          out:,
+          version:,
+        )),
+      )
     Ok(cli.Attach(options)) -> ffi_os.halt(cli.run_attach(options))
+    Ok(cli.Open(options)) -> ffi_os.halt(serve.run_open(options, version))
+    Ok(cli.View(options)) -> ffi_os.halt(serve.run_view(options))
     Error(message) -> {
       io.println_error("pickglass: " <> message)
       io.println_error(cli.usage)

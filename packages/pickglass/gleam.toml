@@ -16,6 +16,7 @@ weft = ">= 0.4.5 and < 1.0.0"
 simplifile = ">= 2.0.0 and < 3.0.0"
 argv = ">= 1.0.0 and < 2.0.0"
 pickglass_core = { path = "../core" }
+pickglass_web = { path = "../web" }
 mist = ">= 6.0.3 and < 7.0.0"
 lustre = "== 5.7.1"
 gleam_crypto = ">= 1.6.0 and < 2.0.0"
