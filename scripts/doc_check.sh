@@ -27,9 +27,10 @@
 # decides is which findings fail the build (D2, loom docs/design-notes/
 # four-decisions.md). A finding is an error only when all three hold:
 #
-#   * The document is not under docs/review/. Review documents record
-#     what a reviewer saw at a commit; re-pinning them to today's tree
-#     would falsify the record. They stay in the warning census, where
+#   * The document is not under docs/review/ or docs/research/. Review
+#     documents record what a reviewer saw at a commit, and research
+#     documents cite external source trees (pprof, OTP) by path.
+#     Re-pinning either to today's tree would falsify the record. They stay in the warning census, where
 #     their drift is information about how far the tree has moved.
 #   * The citation is backticked. Backticks are how these documents
 #     already separate "a real path in this tree" from prose, and bare
@@ -255,8 +256,9 @@ function report(sev, msg) {
 END {
 	for (d = 1; d <= ndocs; d++) {
 		doc = docs[d]
-		# Review documents are historical records: checked, never gated.
-		gated = (doc !~ /^docs\/review\//)
+		# Review and research documents are historical records: checked,
+		# never gated. Research cites external source trees by path.
+		gated = (doc !~ /^docs\/(review|research)\//)
 		lineno = 0
 		while ((getline line < doc) > 0) {
 			lineno++
