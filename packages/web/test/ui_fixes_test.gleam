@@ -33,7 +33,7 @@ import pickglass_web/msg
 import pickglass_web/page
 import pickglass_web/timeline_model
 import pickglass_web/view/compare
-import pickglass_web/view/overview
+import pickglass_web/view/overview as overview_view
 import pickglass_web/view/probes
 import pickglass_web/view/profile as profile_view
 import pickglass_web/view/shell
@@ -572,7 +572,7 @@ pub fn the_owners_that_moved_most_are_ranked_by_size_of_change_test() {
     model.OwnerMover(label: "e", delta: Known(40)),
   ]
 
-  overview.top_movers(movers)
+  overview_view.top_movers(movers)
   |> list.map(fn(mover) { mover.label })
   |> should.equal(["b", "e", "a"])
 
@@ -660,4 +660,27 @@ pub fn the_strip_offers_detach_only_while_attached_with_the_grant_test() {
     "data-test-id=\"detach\"",
   )
   |> should.be_false
+}
+
+pub fn an_unreadable_anon_column_becomes_one_note_and_a_negative_gap_says_why_test() {
+  let overview = fixture.overview()
+  let roles =
+    list.map(overview.roles.body, fn(role) {
+      model.OsRole(..role, anon: measure.Missing(measure.UnsupportedOnPlatform))
+    })
+  let negative =
+    list.map(overview.layers.body, fn(row) {
+      model.LayerRow(..row, value: Known(-5), derivation: model.Derived("x"))
+    })
+  let data =
+    model.OverviewModel(
+      ..overview,
+      roles: model.Panel(..overview.roles, body: roles),
+      layers: model.Panel(..overview.layers, body: negative),
+    )
+  let html = element.to_string(overview_view.view(data, None, [], ""))
+
+  string.contains(html, "unsupported_on_platform") |> should.be_false
+  string.contains(html, "not readable on this platform") |> should.be_true
+  string.contains(html, "Negative: the carriers are reserved") |> should.be_true
 }

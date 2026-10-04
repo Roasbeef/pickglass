@@ -21,6 +21,7 @@
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
@@ -258,6 +259,7 @@ fn layer_row(row: LayerRow, peak: Int) -> Element(Msg) {
         [
           element.text(row.label),
           html.span([attribute.class("tag")], [element.text("derived")]),
+          negative_note(row),
         ],
       )
   }
@@ -268,6 +270,21 @@ fn layer_row(row: LayerRow, peak: Int) -> Element(Msg) {
     ui.delta(row.delta, unit.Bytes),
     html.td([attribute.class("bar-cell")], [layer_bar(row, peak)]),
   ])
+}
+
+// A gap that comes out below zero reads as an error, so the row says why it
+// is not one: the upper layer counts pages the OS has charged, the lower
+// counts address space the allocators reserved, and reserved is not resident.
+fn negative_note(row: LayerRow) -> Element(Msg) {
+  case row.value {
+    Known(value:) if value < 0 ->
+      html.small([attribute.class("band")], [
+        element.text(
+          " Negative: the carriers are reserved address space, and the resident set counts only pages the OS has charged. On macOS reserved pages can be untouched or compressed, so the carriers can exceed the resident set.",
+        ),
+      ])
+    _ -> element.none()
+  }
 }
 
 // Indentation is a class from a closed set, not a computed style.
@@ -350,7 +367,12 @@ fn count_tile(tile: CountTile) -> Element(Msg) {
   ])
 }
 
+// The anonymous column is dropped, with one note, when no row has a reading
+// because the platform has no such figure. Seventeen rows each saying so
+// repeat one fact.
 fn roles_panel(data: OverviewModel) -> Element(Msg) {
+  let anon = list.any(data.roles.body, fn(role) { anon_readable(role) })
+
   ui.panel(
     title: "OS processes by role",
     info: data.roles.info,
@@ -358,39 +380,76 @@ fn roles_panel(data: OverviewModel) -> Element(Msg) {
     body: [
       html.table([attribute.class("tbl")], [
         html.thead([], [
-          html.tr([], [
-            ui.th("role", None),
-            ui.th_num("os pid", None),
-            ui.th_num("RSS", None),
-            ui.th_num("anon", None),
-            ui.th("", None),
-          ]),
+          html.tr(
+            [],
+            list.flatten([
+              [
+                ui.th("role", None),
+                ui.th_num("os pid", None),
+                ui.th_num("RSS", None),
+              ],
+              case anon {
+                True -> [ui.th_num("anon", None)]
+                False -> []
+              },
+              [ui.th("", None)],
+            ]),
+          ),
         ]),
-        html.tbody([], list.map(data.roles.body, role_row)),
+        html.tbody(
+          [],
+          list.map(data.roles.body, fn(role) { role_row(role, anon) }),
+        ),
       ]),
+      case anon {
+        True -> element.none()
+        False ->
+          ui.note(
+            "The anonymous part of the resident set is not readable on this platform, so it is not listed.",
+          )
+      },
     ],
   )
 }
 
-fn role_row(role: OsRole) -> Element(Msg) {
-  html.tr([], [
-    html.td([attribute.class("role-name")], [element.text(role.role)]),
-    html.td([attribute.class("num mono")], [
-      element.text(int.to_string(role.os.pid)),
+fn anon_readable(role: OsRole) -> Bool {
+  role.anon != measure.Missing(measure.UnsupportedOnPlatform)
+}
+
+fn role_row(role: OsRole, anon: Bool) -> Element(Msg) {
+  html.tr(
+    [],
+    list.flatten([
+      [
+        html.td([attribute.class("role-name")], [element.text(role.role)]),
+        html.td([attribute.class("num mono")], [
+          element.text(int.to_string(role.os.pid)),
+        ]),
+        ui.num(role.rss, unit.Bytes),
+      ],
+      case anon {
+        True -> [ui.num(role.anon, unit.Bytes)]
+        False -> []
+      },
+      [
+        html.td([attribute.class("note-cell")], [
+          element.text(
+            [role.note, start_note(role.os.start)]
+            |> list.filter(fn(part) { part != "" })
+            |> string.join(" · "),
+          ),
+        ]),
+      ],
     ]),
-    ui.num(role.rss, unit.Bytes),
-    ui.num(role.anon, unit.Bytes),
-    html.td([attribute.class("note-cell")], [
-      element.text(role.note <> start_note(role.os.start)),
-    ]),
-  ])
+  )
 }
 
 fn start_note(start: identity.StartIdentity) -> String {
   case start {
     identity.PreciseStart(_) -> ""
-    identity.CoarseStart(_) -> " · start time coarse"
-    identity.UnreadableStart -> " · start time unreadable"
+    // The row's note already says so, once.
+    identity.CoarseStart(_) -> ""
+    identity.UnreadableStart -> "start time unreadable"
   }
 }
 
