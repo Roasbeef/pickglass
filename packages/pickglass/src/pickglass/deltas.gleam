@@ -83,18 +83,25 @@ pub fn target_rss(observation: Observation) -> Measurement {
   }
 }
 
-/// Whether an observation's census listed every process it scanned.
+/// Whether an observation's census listed every process it scanned. The walk
+/// must have finished, and the rows must be as many as the processes scanned:
+/// the agent lists only its top rows, so a node with more processes than that
+/// has a census that scanned everything and lists a part.
 pub fn census_complete(observation: Observation) -> Bool {
   case observation.census {
-    Ok(census) -> census.coverage.stop == wire.WalkFinished
+    Ok(census) ->
+      census.coverage.stop == wire.WalkFinished
+      && list.length(census.rows) == census.coverage.scanned
     Error(_) -> False
   }
 }
 
 /// The heap capacity change of an owner row by label, from the owners
 /// model built for the baseline census and the one built for the current
-/// census. `baseline_complete` says whether an owner absent from the
-/// baseline model was truly absent.
+/// census. An owner's heap in a model is the sum over the rows its census
+/// listed. When either census listed only its top rows, the two sums cover
+/// different sets of processes, whether the owner is absent from one side or
+/// present on both, so no change is claimed.
 ///
 /// ## Examples
 ///
@@ -111,21 +118,24 @@ pub fn owner_heap(
 
   fn(label) {
     case reading(now, label), reading(before, label), completeness {
-      Known(after), Known(before), _ -> Known(after - before)
-      Known(after), Missing(_), BaselineComplete -> Known(after)
-      Known(_), Missing(_), BaselineTopRows -> Missing(measure.BudgetExhausted)
+      Known(after), Known(before), BothComplete -> Known(after - before)
+      Known(after), Missing(_), BothComplete -> Known(after)
+      Known(_), Known(_), TopRowsOnly | Known(_), Missing(_), TopRowsOnly ->
+        Missing(measure.BudgetExhausted)
       _, _, _ -> Missing(measure.DecodeFailed)
     }
   }
 }
 
-/// Whether the baseline census listed everything it scanned.
+/// Whether the two censuses an owner change compares listed everything they
+/// scanned.
 pub type Completeness {
-  /// An owner it does not show was not there.
-  BaselineComplete
+  /// Both did. An owner one of them does not show was not there.
+  BothComplete
 
-  /// An owner it does not show may have been below the cut.
-  BaselineTopRows
+  /// At least one listed only its top rows, so an owner it does not show may
+  /// have been below the cut, and one it shows may be missing processes.
+  TopRowsOnly
 }
 
 // The heap capacity of every owner row of a page, by the label an owners

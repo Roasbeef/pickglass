@@ -818,9 +818,12 @@ fn with_changes(
       None,
       fn(_) { NotApplicable },
     )
-  let completeness = case deltas.census_complete(earlier) {
-    True -> deltas.BaselineComplete
-    False -> deltas.BaselineTopRows
+  let completeness = case
+    deltas.census_complete(earlier),
+    deltas.census_complete(newest)
+  {
+    True, True -> deltas.BothComplete
+    _, _ -> deltas.TopRowsOnly
   }
 
   owners_builder.build(

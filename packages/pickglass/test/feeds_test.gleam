@@ -250,6 +250,77 @@ pub fn an_owner_the_baseline_could_not_have_listed_has_no_baseline_test() {
   assert session.delta == Missing(measure.BudgetExhausted)
 }
 
+// A census whose walk finished but which lists only its top rows: five
+// hundred processes scanned, the rows of `census` listed.
+fn top_rows_only(
+  observation: observation.Observation,
+) -> observation.Observation {
+  let assert Ok(census) = observation.census
+
+  Observation(
+    ..observation,
+    census: Ok(
+      wire.CensusSnapshot(
+        ..census,
+        coverage: wire.CensusCoverage(
+          scanned: 500,
+          total: 500,
+          stop: wire.WalkFinished,
+          elapsed_ms: 1,
+        ),
+      ),
+    ),
+  )
+}
+
+fn session_delta(
+  after: observation.Observation,
+  before: observation.Observation,
+) -> measure.Measurement {
+  let mark = marks.take(capture.Checkpoint("c", 0, 1500), Some(before))
+  let page =
+    owners_of(feeds.feeds_for(
+      feeds.Owners,
+      feeds.Inputs(..inputs([after, before]), marks: [mark]),
+    ))
+  let assert Ok(session) =
+    list.find(page.rows, fn(row) { row.label == "session:s1" })
+
+  session.delta
+}
+
+pub fn a_finished_walk_that_listed_only_top_rows_is_not_a_complete_baseline_test() {
+  // The owner is absent from the baseline's top rows because it was below
+  // the cut, not because it was not there.
+  let before =
+    top_rows_only(
+      Observation(
+        ..growing(0, 1000, 16_000),
+        census: Ok(
+          fixture.census([fixture.row("<0.11.0>", 4000, wire.Unlabelled)]),
+        ),
+      ),
+    )
+
+  assert session_delta(growing(1, 3000, 48_000), before)
+    == Missing(measure.BudgetExhausted)
+}
+
+pub fn an_owner_listed_on_both_sides_of_a_cut_census_has_no_change_test() {
+  // Both sides list the owner, but each sums a different part of its
+  // processes, so their difference is not a change.
+  assert session_delta(
+      top_rows_only(growing(1, 3000, 48_000)),
+      growing(0, 1000, 16_000),
+    )
+    == Missing(measure.BudgetExhausted)
+  assert session_delta(
+      growing(1, 3000, 48_000),
+      top_rows_only(growing(0, 1000, 16_000)),
+    )
+    == Missing(measure.BudgetExhausted)
+}
+
 pub fn the_movers_feed_names_the_checkpoint_and_the_owners_test() {
   let before = growing(0, 1000, 16_000)
   let after = growing(1, 3000, 48_000)
