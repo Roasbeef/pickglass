@@ -73,7 +73,7 @@ fn incarnation(strip: StripModel) -> Element(msg) {
     ],
     [
       element.text(
-        "inc "
+        "incarnation "
         <> string.slice(inc.node_digest, 0, 4)
         <> " · os "
         <> int.to_string(strip.os.pid)
@@ -119,7 +119,9 @@ fn observer_meter(strip: StripModel) -> Element(msg) {
           attribute.title("observer effect: " <> observer.note),
         ],
         [
-          html.span([attribute.class("meter-label")], [element.text("effect")]),
+          html.span([attribute.class("meter-label")], [
+            element.text("observer cost"),
+          ]),
           svg.svg([svg_util.view_box(60, 8), attribute.class("meter-bar")], [
             svg.rect([
               svg_util.num("width", 60),

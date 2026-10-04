@@ -40,14 +40,86 @@ import pickglass_web/msg.{type Msg}
 import pickglass_web/view/ui
 import pickglass_web/wire
 
-/// Draw the overview.
-pub fn view(data: OverviewModel) -> Element(Msg) {
+/// Draw the overview. The layers come first because the page answers where
+/// the memory went; the counts follow the panels that explain a change. The
+/// movers panel waits for its own feed and is absent until it arrives.
+pub fn view(
+  data: OverviewModel,
+  movers: Option(model.OwnerMovers),
+) -> Element(Msg) {
   html.div([attribute.class("grid overview")], [
     layers_panel(data),
     schedulers_panel(data),
+    movers_panel(movers),
     counts_panel(data),
     roles_panel(data),
   ])
+}
+
+/// The most owners the movers panel lists.
+pub const max_movers: Int = 5
+
+/// The owners to list: the largest absolute change first, at most
+/// `max_movers`, with unknown changes left out because a word has no size to
+/// rank by.
+///
+/// ## Examples
+///
+/// ```gleam
+/// overview.top_movers([OwnerMover("a", Known(1)), OwnerMover("b", Known(-9))])
+/// // -> [OwnerMover("b", Known(-9)), OwnerMover("a", Known(1))]
+/// ```
+pub fn top_movers(rows: List(model.OwnerMover)) -> List(model.OwnerMover) {
+  rows
+  |> list.filter(fn(row) {
+    case row.delta {
+      Known(value:) -> value != 0
+      _ -> False
+    }
+  })
+  |> list.sort(fn(a, b) { int.compare(magnitude(b.delta), magnitude(a.delta)) })
+  |> list.take(max_movers)
+}
+
+fn magnitude(delta: Measurement) -> Int {
+  case delta {
+    Known(value:) -> int.absolute_value(value)
+    _ -> 0
+  }
+}
+
+fn movers_panel(movers: Option(model.OwnerMovers)) -> Element(Msg) {
+  case movers {
+    None -> element.none()
+    Some(data) ->
+      html.section([attribute.class("panel movers")], [
+        html.header([attribute.class("panel-bar")], [
+          html.h2([], [element.text("Largest change by owner")]),
+          html.span([attribute.class("chip")], [
+            element.text("heap capacity since " <> data.since),
+          ]),
+        ]),
+        html.div([attribute.class("panel-body")], [
+          case top_movers(data.rows) {
+            [] -> ui.note("No owner's heap capacity moved.")
+            rows ->
+              html.table([attribute.class("tbl")], [
+                html.tbody(
+                  [],
+                  list.map(rows, fn(row) {
+                    html.tr([], [
+                      html.td([attribute.class("owner-label")], [
+                        element.text(row.label),
+                      ]),
+                      ui.delta(row.delta, unit.Bytes),
+                    ])
+                  }),
+                ),
+              ])
+          },
+        ]),
+      ])
+  }
 }
 
 fn layers_panel(data: OverviewModel) -> Element(Msg) {

@@ -100,10 +100,33 @@ pub fn meta(info: PanelInfo) -> Element(msg) {
   html.p([attribute.class("panel-meta")], [
     seg("meta-seg meta-source", info.source),
     seg("meta-seg", info.method),
-    seg("meta-seg", interval_text(info)),
+    seg(interval_class(info), interval_text(info)),
     seg("meta-seg", coverage_text(info.coverage)),
     seg(outcome_class, truncation_text(info.coverage.outcome)),
   ])
+}
+
+/// Whether the interval achieved is slower than the one requested by more
+/// than half again: 1.5 times the requested interval or more.
+///
+/// ## Examples
+///
+/// ```gleam
+/// ui.cadence_missed(measure.EveryMs(1000), Some(1600))
+/// // -> True
+/// ```
+pub fn cadence_missed(cadence: measure.Cadence, achieved: Option(Int)) -> Bool {
+  case cadence, achieved {
+    measure.EveryMs(interval_ms:), Some(actual) -> actual * 2 >= interval_ms * 3
+    measure.EveryMs(_), None | measure.OneShot, _ -> False
+  }
+}
+
+fn interval_class(info: PanelInfo) -> String {
+  case cadence_missed(info.cadence, info.achieved_ms) {
+    True -> "meta-seg meta-cut"
+    False -> "meta-seg"
+  }
 }
 
 fn seg(class: String, text: String) -> Element(msg) {
@@ -150,6 +173,19 @@ pub fn num(m: Measurement, unit u: Unit) -> Element(msg) {
 /// A numeric cell for a signed change.
 pub fn delta(m: Measurement, unit u: Unit) -> Element(msg) {
   html.td([attribute.class(delta_class(m))], [element.text(fmt.signed(m, u))])
+}
+
+/// A numeric cell for a signed change that carries no direction: the same
+/// figure as `delta`, in plain ink.
+pub fn delta_plain(m: Measurement, unit u: Unit) -> Element(msg) {
+  html.td([attribute.class(plain_class(m))], [element.text(fmt.signed(m, u))])
+}
+
+fn plain_class(m: Measurement) -> String {
+  case m {
+    measure.Known(_) -> "num delta"
+    _ -> "num delta word"
+  }
 }
 
 fn cell_class(m: Measurement) -> String {

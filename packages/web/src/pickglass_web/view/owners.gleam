@@ -63,6 +63,12 @@ pub fn view(
 ) -> Element(Msg) {
   let rows = visible(data.rows, ui_state)
   let all = list.append(rows, [data.unknown])
+  let tail = case data.remainder {
+    model.NoRemainder -> []
+    model.Remainder(..) -> [
+      #("remainder/row", remainder_row(data.remainder)),
+    ]
+  }
 
   let body_rows =
     list.flat_map(all, fn(row) {
@@ -84,6 +90,7 @@ pub fn view(
 
       [heading, ..children]
     })
+    |> list.append(tail)
 
   ui.panel(
     title: "Memory by owner",
@@ -96,7 +103,10 @@ pub fn view(
       ]),
       ui.note(
         "≈ marks a column whose rows overlap; it has no group total. "
-        <> "Δ is heap capacity against the chosen checkpoint.",
+        <> "Δ is the difference of the row's heap capacity between the "
+        <> "chosen checkpoint and now, taken over the row's whole group, so "
+        <> "it includes processes that started or exited in between and the "
+        <> "rows beneath a group need not add to it.",
       ),
       ui.note(labelled_text(data.labelled)),
     ],
@@ -104,9 +114,11 @@ pub fn view(
 }
 
 fn labelled_text(counts: #(Int, Int)) -> String {
-  "labels read on "
+  "Labels read on "
   <> fmt.count(counts.0)
-  <> " processes; "
+  <> " of the "
+  <> fmt.count(counts.0 + counts.1)
+  <> " processes listed; "
   <> fmt.count(counts.1)
   <> " carried none."
 }
@@ -182,7 +194,7 @@ fn opened(ui_state: UiState, row: Key) -> Visibility {
 fn group_row(row: OwnerRow, ui_state: UiState) -> Element(Msg) {
   let class = case row.kind {
     model.OwnerGroup -> "group"
-    model.RoleGroup -> "group role"
+    model.RoleGroup -> "group role-row"
     model.UnknownGroup -> "group unknown"
   }
 
@@ -204,6 +216,30 @@ fn group_row(row: OwnerRow, ui_state: UiState) -> Element(Msg) {
     ui.num(row.reductions, unit.Reductions),
     ui.no_total(binary_why),
   ])
+}
+
+// The processes the agent counted but did not list. It is drawn from the
+// aggregate, so only the two figures the aggregate carries are numbers; the
+// rest say they were not measured for these processes.
+fn remainder_row(remainder: model.Remainder) -> Element(Msg) {
+  case remainder {
+    model.NoRemainder -> element.none()
+    model.Remainder(procs:, heap_cap:) ->
+      html.tr([attribute.class("group remainder")], [
+        html.td([attribute.class("owner-cell depth-0")], [
+          html.span([attribute.class("twisty twisty-none")], []),
+          html.span([attribute.class("owner-label")], [
+            element.text("other, not in the listed owners"),
+          ]),
+        ]),
+        ui.num(procs, unit.Count),
+        ui.num(heap_cap, unit.Bytes),
+        ui.num(measure.NotApplicable, unit.Bytes),
+        ui.num(measure.NotApplicable, unit.Count),
+        ui.num(measure.NotApplicable, unit.Reductions),
+        ui.no_total(binary_why),
+      ])
+  }
 }
 
 // A total over members some of which were unread is a lower bound, and the

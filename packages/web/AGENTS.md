@@ -17,6 +17,15 @@ is built by no handler. `Ui(UiEvent)` changes page-local view state
 names a request such as `RequestPin(Key)`, `PlanProbe(ProbeDraft)` or
 `ConfirmPlan(Key)`; it carries no authority.
 
+Two requests name a selection or a process and nothing else:
+`AddFilterAt(kind, frame)` ("Focus here", "Show from here" on a flame box or
+graph node) and `PlanProbeFor(process)` (the detail page's "Plan probe…").
+The viewer turns the first into a chain step with `view/profile.step_at`,
+which builds an exact-match pattern from the function it holds, so no function
+name travels from the browser. `Feed` also has `FedOwnerMovers`, a separate
+feed for the overview's "largest change by owner" list. `Ui(SelectReading)`
+selects a timeline bar or span.
+
 `key.Key` is the only name a browser event may carry: 1 to 64 characters from
 a closed alphabet, issued by the viewer for rows, boxes, nodes, plans and
 checkpoints. Pids, module names and function names never travel from the
@@ -74,6 +83,15 @@ that passed `app.update`'s membership check. Viewer to page: `Fed` messages.
   action needs; the viewer still re-checks.
 - Chart element counts are bounded by core's layouts (`max_boxes`, the 80
   node graph); the views add none.
+- The profile's root total is not a field: `view/profile.root_total` reads it
+  from the first chain step (or the profile), and the header's sampled-stacks
+  coverage is written from it, so the two cannot disagree.
+- A comparison that blocks a verdict gives no direction anywhere: the figures'
+  change is plain ink and the differential flame is one colour
+  (`chart/flame.Withheld`).
+- A counters probe sends no trace message; `policy.Counting` is its
+  perturbation class, its plan says "calls counted", and its history row has
+  `n/a` for events and collector reductions.
 - A request is only a request: the page says it is pending and never shows
   the outcome as done until the viewer feeds new data.
 

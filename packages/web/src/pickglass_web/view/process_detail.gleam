@@ -35,6 +35,7 @@ import pickglass_web/chart/spark
 import pickglass_web/fmt
 import pickglass_web/model.{type Counter, type Evidence, type ProcessDetailModel}
 import pickglass_web/msg.{type Msg}
+import pickglass_web/page.{type Links}
 import pickglass_web/view/ui
 import pickglass_web/wire
 
@@ -42,11 +43,12 @@ import pickglass_web/wire
 pub fn view(
   data: ProcessDetailModel,
   grants: List(Capability),
+  links: Links,
 ) -> Element(Msg) {
   html.div([attribute.class("stack")], [
     header(data, grants),
     html.div([attribute.class("grid two")], [
-      ownership_panel(data),
+      ownership_panel(data, links),
       evidence_panel(data),
     ]),
     ui.panel(title: "Counters", info: data.info, controls: [], body: [
@@ -77,7 +79,7 @@ fn header(data: ProcessDetailModel, grants: List(Capability)) -> Element(Msg) {
     html.div([attribute.class("detail-title")], [
       html.h2([attribute.class("mono")], [element.text(data.pid_text)]),
       html.span([attribute.class("muted")], [
-        element.text("birth " <> data.birth),
+        element.text("birth seq " <> data.birth),
       ]),
       life,
       pin,
@@ -115,7 +117,16 @@ fn actions(
     _, _, _ -> []
   }
 
-  [pin_button, ..list.append(gc, summary)]
+  // A probe is planned from the Probes page, so this only carries the
+  // process there; it plans nothing and needs the capability to plan one.
+  let probe = case list.contains(grants, policy.Profile) {
+    True -> [
+      button("Plan probe…", "btn", msg.Ask(msg.PlanProbeFor(data.key))),
+    ]
+    False -> []
+  }
+
+  [pin_button, ..list.flatten([probe, gc, summary])]
 }
 
 fn button(label: String, class: String, message: Msg) -> Element(Msg) {
@@ -129,10 +140,28 @@ fn button(label: String, class: String, message: Msg) -> Element(Msg) {
   )
 }
 
-fn ownership_panel(data: ProcessDetailModel) -> Element(Msg) {
+fn ownership_panel(data: ProcessDetailModel, links: Links) -> Element(Msg) {
   ui.plain_panel(title: "Ownership", body: [
     ownership_body(data.attribution),
+    owner_link(data.attribution, links),
     lineage(data.successor),
+  ])
+}
+
+// The way back to the group this process belongs to. It is a plain link to
+// the Owners page, where the group is one row, so nothing in the address is
+// built from the owner's name.
+fn owner_link(attribution: owner.Attribution, links: Links) -> Element(Msg) {
+  let text = case attribution {
+    owner.Attributed(winner:, ..) ->
+      "All processes of " <> owner.path_to_string(winner.path) <> " on Owners"
+    owner.Unattributed -> "The unknown group on Owners"
+  }
+
+  html.p([attribute.class("owner-back")], [
+    html.a([attribute.href(page.href(links, page.Owners))], [
+      element.text(text),
+    ]),
   ])
 }
 
@@ -193,7 +222,7 @@ fn lineage(successor: Option(model.Successor)) -> Element(Msg) {
       html.p([attribute.class("lineage")], [
         html.strong([], [element.text("Successor of ")]),
         element.text(
-          "birth "
+          "birth seq "
           <> previous.predecessor
           <> ", exited "
           <> previous.exited

@@ -50,9 +50,14 @@ pub fn the_gc_button_needs_the_perturb_capability_test() {
   let data = fixture.process_detail()
 
   let with_perturb =
-    element.to_string(process_detail.view(data, policy.all_capabilities))
+    element.to_string(process_detail.view(
+      data,
+      policy.all_capabilities,
+      page.Files,
+    ))
 
-  let without = element.to_string(process_detail.view(data, [policy.Observe]))
+  let without =
+    element.to_string(process_detail.view(data, [policy.Observe], page.Files))
 
   string.contains(with_perturb, "Plan targeted GC") |> should.be_true
   string.contains(without, "Plan targeted GC") |> should.be_false

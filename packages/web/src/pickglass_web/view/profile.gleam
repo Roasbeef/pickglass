@@ -17,10 +17,14 @@
 //// icicle, graph or peek. The page says so and offers Top and Source; it does
 //// not draw an empty picture.
 ////
-//// ## Reading order
+//// ## Flow
 ////
-//// `view` draws the header, the chain (`chain_panel`), the tab bar and the
-//// open tab's body; each tab has a function of its own.
+//// `view` draws the header (`header`), the chain (`chain_panel`), the tab bar
+//// (`tab_bar`) and the open tab's body (`tab_body`), which hands the work to
+//// `flame_tab`, `graph_tab`, `peek_tab`, `top_tab` or `source_tab`. The
+//// profile's one total comes from `root_total`; a selection becomes a chain
+//// step through `step_at`; and `search_text` and `peek_note` write the
+//// sentences under the flame and Peek.
 
 import gleam/dict
 import gleam/float
@@ -28,6 +32,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
@@ -37,6 +42,7 @@ import pickglass_core/analysis/top
 import pickglass_core/analysis/transform.{type StepReport}
 import pickglass_core/layout/dag
 import pickglass_core/layout/flame
+import pickglass_core/measure
 import pickglass_core/profile
 import pickglass_core/unit.{type Unit}
 import pickglass_web/chart/call_graph
@@ -51,6 +57,96 @@ import pickglass_web/wire
 
 /// The most rows the Top and Source tabs draw.
 pub const max_table_rows: Int = 100
+
+/// The total of the profile's column before any step of the chain.
+///
+/// This is the one number the header's coverage and the chain's root chip
+/// both read. For sampled stacks it is the number of samples collected.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.root_total(data)
+/// // -> 10708
+/// ```
+pub fn root_total(data: ProfileModel) -> Int {
+  case data.chain {
+    [first, ..] -> first.total_before
+    [] -> profile.total(data.profile, data.column)
+  }
+}
+
+/// The chain step a "focus here" or "show from here" request stands for: the
+/// kind of step, with a pattern that matches exactly the function behind the
+/// selected box or node and nothing else. The viewer calls this with the
+/// profile it holds, so the browser names a key and never a function.
+///
+/// The root box and a key the profile does not draw give `Error(Nil)`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.step_at(data, msg.FocusFilter, key)
+/// // -> Ok(transform.Focus(pattern: "^loom@runtime@keeper:handle/2$"))
+/// ```
+pub fn step_at(
+  data: ProfileModel,
+  kind: msg.FilterKind,
+  selected: Key,
+) -> Result(transform.Step, Nil) {
+  use id <- result.try(function_at(data, selected))
+
+  let exact = "^" <> escape(profile.name_of(data.profile, id)) <> "$"
+
+  Ok(case kind {
+    msg.FocusFilter -> transform.Focus(pattern: exact)
+    msg.IgnoreFilter -> transform.Ignore(pattern: exact)
+    msg.ShowFromFilter -> transform.ShowFrom(pattern: exact)
+    msg.HideFilter -> transform.Hide(pattern: exact)
+    msg.ShowFilter -> transform.Show(pattern: exact)
+  })
+}
+
+// The function id behind a box key or a node key, if the page draws it.
+fn function_at(data: ProfileModel, selected: Key) -> Result(Int, Nil) {
+  case data.stacks {
+    model.NoStacks(..) -> Error(Nil)
+    model.HasStacks(layout:, dag: placed, ..) -> {
+      let by_box =
+        list.find_map(layout.boxes, fn(box) {
+          case flame_chart.box_key(box) == selected, box.frame {
+            True, flame.Function(id:) -> Ok(id)
+            _, _ -> Error(Nil)
+          }
+        })
+
+      case by_box {
+        Ok(id) -> Ok(id)
+        Error(Nil) ->
+          list.find_map(placed.nodes, fn(node) {
+            case call_graph.node_key(node.function) == selected {
+              True -> Ok(node.function)
+              False -> Error(Nil)
+            }
+          })
+      }
+    }
+  }
+}
+
+// Each character the pattern language treats as an operator is written with
+// a backslash, so a name is matched as the text it is.
+fn escape(text: String) -> String {
+  text
+  |> string.to_graphemes
+  |> list.map(fn(grapheme) {
+    case string.contains(".*+?|\\^$()[]{}", grapheme) {
+      True -> "\\" <> grapheme
+      False -> grapheme
+    }
+  })
+  |> string.concat
+}
 
 /// Draw the profile page.
 pub fn view(data: ProfileModel, ui_state: UiState) -> Element(Msg) {
@@ -86,12 +182,29 @@ fn header(data: ProfileModel) -> Element(Msg) {
         export_button("Chrome trace", msg.AsChromeTrace),
       ]),
     ]),
-    ui.meta(h.info),
+    ui.meta(achieved_from_profile(data)),
     html.ul(
       [attribute.class("caveats")],
       list.map(h.caveats, fn(text) { html.li([], [element.text(text)]) }),
     ),
   ])
+}
+
+// For sampled stacks the number of samples collected is the profile's own
+// total, so the coverage segment is written from `root_total` and a host
+// that reports a different count cannot show two figures on one page.
+fn achieved_from_profile(data: ProfileModel) -> model.PanelInfo {
+  let info = data.header.info
+
+  case data.header.source {
+    profile.SampledStacks(..) ->
+      model.PanelInfo(
+        ..info,
+        coverage: measure.Coverage(..info.coverage, achieved: root_total(data)),
+      )
+    profile.TracedCalls | profile.TracedCounters | profile.AllocationCounts ->
+      info
+  }
 }
 
 fn export_button(label: String, choice: msg.ExportChoice) -> Element(Msg) {
@@ -123,7 +236,7 @@ fn chain_panel(data: ProfileModel, ui_state: UiState, u: Unit) -> Element(Msg) {
       html.li([attribute.class("crumb crumb-root")], [
         html.span([attribute.class("crumb-name")], [element.text("all")]),
         html.span([attribute.class("crumb-total num")], [
-          element.text(fmt.known(data.total_before, u)),
+          element.text(fmt.known(root_total(data), u)),
         ]),
       ]),
       ..list.index_map(data.chain, fn(report, index) { crumb(report, index, u) })
@@ -380,8 +493,8 @@ fn tab_body(data: ProfileModel, ui_state: UiState, u: Unit) -> Element(Msg) {
       flame_tab(data, layout, flame_chart.RootAbove, ui_state, u)
     model.HasStacks(graph: g, dag: placed, ..), msg.GraphTab ->
       graph_tab(data, g, placed, ui_state, u)
-    model.HasStacks(peeks:, dag: placed, ..), msg.PeekTab ->
-      peek_tab(data, peeks, placed, ui_state, u)
+    model.HasStacks(graph: g, peeks:, dag: placed, ..), msg.PeekTab ->
+      peek_tab(data, g, peeks, placed, ui_state, u)
     model.NoStacks(source:), msg.PeekTab
     | model.NoStacks(source:), msg.FlameTab
     | model.NoStacks(source:), msg.IcicleTab
@@ -420,7 +533,7 @@ fn flame_tab(
   let name_of = fn(id) { profile.name_of(profile_data, id) }
 
   html.div([], [
-    search_box(ui_state),
+    search_box(ui_state, layout, name_of, u),
     html.div([attribute.class("graph-frame")], [
       flame_chart.view(
         layout:,
@@ -429,19 +542,71 @@ fn flame_tab(
         unit: u,
         selected: ui_state.selected,
         search: ui_state.search,
+        verdict: flame_chart.Directed,
         on_select: fn(box) { msg.Ui(msg.SelectBox(box)) },
       ),
     ]),
     selection(layout, name_of, ui_state.selected, u),
     ui.note(
       "Width is a share of the profile's value, not of time. "
-      <> int.to_string(layout.omitted_boxes)
-      <> " boxes narrower than the minimum were folded into their parents.",
+      <> omitted_text(layout.omitted_boxes)
+      <> " than the minimum were folded into their parents. "
+      <> "The synthetic root that holds every sample is not drawn.",
     ),
   ])
 }
 
-fn search_box(ui_state: UiState) -> Element(Msg) {
+/// What the search text matches, written for the line under the box.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.search_text(flame.SearchSummary(boxes: 24, value: 334, total: 1070), unit.Count)
+/// // -> "24 boxes, 31.2% of the value (334)"
+/// ```
+pub fn search_text(summary: flame_chart.SearchSummary, u: Unit) -> String {
+  case summary.boxes {
+    0 -> "No box matches."
+    1 ->
+      "1 box, "
+      <> fmt.share(summary.value, of: summary.total)
+      <> " of the value ("
+      <> fmt.known(summary.value, u)
+      <> ")"
+    n ->
+      int.to_string(n)
+      <> " boxes, "
+      <> fmt.share(summary.value, of: summary.total)
+      <> " of the value ("
+      <> fmt.known(summary.value, u)
+      <> ")"
+  }
+}
+
+fn omitted_text(count: Int) -> String {
+  case count {
+    1 -> "1 box narrower"
+    n -> int.to_string(n) <> " boxes narrower"
+  }
+}
+
+fn search_box(
+  ui_state: UiState,
+  layout: flame.Layout,
+  name_of: fn(Int) -> String,
+  u: Unit,
+) -> Element(Msg) {
+  let matched = case ui_state.search {
+    "" -> element.none()
+    needle ->
+      html.span([attribute.class("search-result")], [
+        element.text(search_text(
+          flame_chart.search_summary(layout, name_of, needle),
+          u,
+        )),
+      ])
+  }
+
   html.div([attribute.class("search")], [
     html.input([
       attribute.class("text mono"),
@@ -458,6 +623,7 @@ fn search_box(ui_state: UiState) -> Element(Msg) {
       ],
       [element.text("Clear selection")],
     ),
+    matched,
   ])
 }
 
@@ -490,10 +656,36 @@ fn selection(
           <> ") · self "
           <> fmt.known(box.self, u),
         ),
+        focus_buttons(flame_chart.box_key(box)),
       ])
     }
     Error(Nil) -> ui.note("Click a box to select it.")
   }
+}
+
+// Two requests that add a chain step on the selected function. They carry
+// the selection's key and nothing else; the viewer finds the function.
+fn focus_buttons(selected: Key) -> Element(Msg) {
+  html.span([attribute.class("selection-actions")], [
+    html.button(
+      [
+        attribute.class("btn btn-small"),
+        attribute.type_("button"),
+        attribute.title("Keep only the samples that pass through this function"),
+        wire.click(msg.Ask(msg.AddFilterAt(msg.FocusFilter, selected))),
+      ],
+      [element.text("Focus here")],
+    ),
+    html.button(
+      [
+        attribute.class("btn btn-small"),
+        attribute.type_("button"),
+        attribute.title("Start every stack at this function"),
+        wire.click(msg.Ask(msg.AddFilterAt(msg.ShowFromFilter, selected))),
+      ],
+      [element.text("Show from here")],
+    ),
+  ])
 }
 
 // ------------------------------------------------------------ graph
@@ -519,6 +711,7 @@ fn graph_tab(
         on_select: fn(node) { msg.Ui(msg.SelectNode(node)) },
       ),
     ]),
+    node_selection(placed, name_of, g.total, ui_state.selected, u),
     ui.note(
       "Showing "
       <> int.to_string(list.length(g.nodes))
@@ -530,15 +723,56 @@ fn graph_tab(
       <> int.to_string(g.dropped_edges)
       <> " edges were pruned. A dotted edge stands for removed functions "
       <> "between its ends. Text size follows flat value; shade follows "
-      <> "cumulative share.",
+      <> "cumulative share. Each box shows flat, then cumulative, with their "
+      <> "shares of the total; an edge shows its weight when that is at least "
+      <> "2% of the total.",
     ),
   ])
+}
+
+// The persistent line for the Graph tab, the counterpart of the flame's: the
+// numbers hover text carries are also here, where a touch screen or a
+// screenshot can read them.
+fn node_selection(
+  placed: dag.Layout,
+  name_of: fn(Int) -> String,
+  total: Int,
+  selected: Option(Key),
+  u: Unit,
+) -> Element(Msg) {
+  let chosen =
+    list.find(placed.nodes, fn(node) {
+      Some(call_graph.node_key(node.function)) == selected
+    })
+
+  case chosen {
+    Ok(node) ->
+      html.p([attribute.class("selection")], [
+        html.strong([attribute.class("mono")], [
+          element.text(name_of(node.function)),
+        ]),
+        element.text(
+          "  flat "
+          <> fmt.known(node.flat, u)
+          <> " ("
+          <> fmt.share(node.flat, of: total)
+          <> ") · cum "
+          <> fmt.known(node.cum, u)
+          <> " ("
+          <> fmt.share(node.cum, of: total)
+          <> ")",
+        ),
+        focus_buttons(call_graph.node_key(node.function)),
+      ])
+    Error(Nil) -> ui.note("Click a node to select it.")
+  }
 }
 
 // ------------------------------------------------------------ peek
 
 fn peek_tab(
   data: ProfileModel,
+  g: graph.Graph,
   peeks: List(peek.Peek),
   placed: dag.Layout,
   ui_state: UiState,
@@ -579,7 +813,30 @@ fn peek_tab(
           html.h3([], [element.text("Callees")]),
           links_table(entry.callees, name_of, u),
         ]),
+        ui.note(peek_note(g)),
       ])
+  }
+}
+
+/// What Peek says about where its lists come from. They are the edges of the
+/// trimmed graph the Graph tab draws, so a function can have more callers or
+/// callees in the full profile than are listed here.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.peek_note(g)
+/// // -> "Callers and callees are those of the Graph tab ..."
+/// ```
+pub fn peek_note(g: graph.Graph) -> String {
+  let base = "Callers and callees are those of the Graph tab's graph. "
+
+  case g.dropped_nodes + g.dropped_edges {
+    0 -> base <> "Nothing was pruned from it, so these lists are complete."
+    pruned ->
+      base
+      <> int.to_string(pruned)
+      <> " nodes or edges were pruned from it, so the full profile may have more."
   }
 }
 
@@ -589,7 +846,7 @@ fn links_table(
   u: Unit,
 ) -> Element(Msg) {
   case links {
-    [] -> ui.note("none")
+    [] -> ui.note("none in the drawn graph")
     _ ->
       html.table([attribute.class("tbl compact")], [
         html.tbody(
@@ -728,7 +985,7 @@ fn source_tab(data: ProfileModel, u: Unit) -> Element(Msg) {
         html.tr([], [
           ui.th("function", None),
           ui.th("location", None),
-          ui.th("line", None),
+          ui.th("precision", None),
           ui.th_num("flat", None),
         ]),
       ]),
@@ -775,7 +1032,7 @@ fn source_row(
       element.text(profile.function_name(function)),
     ]),
     html.td([attribute.class("mono")], [element.text(location)]),
-    html.td([attribute.class("muted")], [element.text(precision)]),
+    html.td([], [ui.badge("muted", precision)]),
     html.td([attribute.class("num")], [flat]),
   ])
 }

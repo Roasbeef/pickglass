@@ -16,8 +16,12 @@
 //// cannot claim a direction core would withhold, and a missing reading on
 //// either side has no verdict at all.
 ////
-//// If both captures carry stacks, a differential flame follows: red for a
-//// regression, green for an improvement, from core's merged layout.
+//// If both captures carry stacks, a differential flame follows, from core's
+//// merged layout: red for a regression, blue for an improvement. A figure's
+//// change and the flame's colours are a statement of direction too, so they
+//// follow the same rule as the verdict column: where the verdict is withheld
+//// the change is written in plain ink and the flame is one neutral colour.
+//// Width still shows how large the change is.
 ////
 //// ## Reading order
 ////
@@ -50,7 +54,7 @@ pub fn view(data: CompareModel) -> Element(Msg) {
   html.div([attribute.class("stack")], [
     match_panel(data, comparability),
     figures_panel(data, comparability),
-    diff_panel(data),
+    diff_panel(data, comparability),
   ])
 }
 
@@ -67,7 +71,8 @@ fn match_panel(
         "block",
         "MISMATCH: "
           <> string.join(list.map(fields, provenance.field_name), ", ")
-          <> " block a verdict",
+          <> verb(list.length(fields), " blocks", " block")
+          <> " a verdict",
       )
   }
 
@@ -149,45 +154,68 @@ fn field_value(field: Field, p: Provenance) -> String {
   }
 }
 
-// What each kind of column may say, so a withheld verdict is explained once
-// at the top and not only on each row.
-fn verdict_summary(comparability: Comparability) -> Element(Msg) {
+/// What each kind of column may say, written as one sentence so a withheld
+/// verdict is explained once at the top and not only on each row.
+///
+/// ## Examples
+///
+/// ```gleam
+/// compare.verdict_text(comparability)
+/// // -> "No figure gets a direction: the workload differs. The build
+/// //     difference is expected."
+/// ```
+pub fn verdict_text(comparability: Comparability) -> String {
   let kinds = [
-    #("levels (gauges)", measure.Gauge),
+    #("levels", measure.Gauge),
     #("counters", measure.Counter),
     #("rates and deltas", measure.DeltaOverInterval),
   ]
 
-  html.p([attribute.class("verdict-summary")], [
-    element.text("A direction of change is allowed for: "),
-    element.text(
-      kinds
-      |> list.filter(fn(kind) {
-        provenance.verdict_for(comparability, kind.1)
-        == provenance.DirectionAllowed
-      })
-      |> list.map(fn(kind) { kind.0 })
-      |> join_or_none,
-    ),
-    element.text(". Withheld for: "),
-    element.text(
-      kinds
-      |> list.filter(fn(kind) {
-        provenance.verdict_for(comparability, kind.1)
-        != provenance.DirectionAllowed
-      })
-      |> list.map(fn(kind) { kind.0 })
-      |> join_or_none,
-    ),
-    element.text("."),
-  ])
+  let allowed =
+    list.filter(kinds, fn(kind) {
+      provenance.verdict_for(comparability, kind.1)
+      == provenance.DirectionAllowed
+    })
+
+  let blocking =
+    provenance.blocking_fields(comparability)
+    |> list.map(provenance.field_name)
+
+  let expected =
+    comparability.fields
+    |> list.filter(fn(entry) { entry.1 == provenance.DiffersExpected })
+    |> list.map(fn(entry) { provenance.field_name(entry.0) })
+
+  let sentence = case allowed, blocking {
+    _, [] -> "Every figure may be given a direction."
+
+    [], _ ->
+      "No figure gets a direction: the "
+      <> string.join(blocking, ", ")
+      <> verb(list.length(blocking), " differs.", " differ.")
+
+    _, _ ->
+      "Directions are given for "
+      <> string.join(list.map(allowed, fn(kind) { kind.0 }), ", ")
+      <> " only: the "
+      <> string.join(blocking, ", ")
+      <> verb(list.length(blocking), " differs.", " differ.")
+  }
+
+  case expected {
+    [] -> sentence
+    _ ->
+      sentence
+      <> " The "
+      <> string.join(expected, ", ")
+      <> " difference is expected."
+  }
 }
 
-fn join_or_none(parts: List(String)) -> String {
-  case parts {
-    [] -> "nothing"
-    _ -> string.join(parts, ", ")
-  }
+fn verdict_summary(comparability: Comparability) -> Element(Msg) {
+  html.p([attribute.class("verdict-summary")], [
+    element.text(verdict_text(comparability)),
+  ])
 }
 
 fn figures_panel(
@@ -218,9 +246,21 @@ fn figure_row(row: CompareRow, comparability: Comparability) -> Element(Msg) {
     html.td([], [element.text(row.label)]),
     ui.num(row.baseline, unit: row.unit),
     ui.num(row.candidate, unit: row.unit),
-    ui.delta(change(row.baseline, row.candidate), unit: row.unit),
+    change_cell(row, comparability),
     html.td([], [verdict_cell(row, comparability)]),
   ])
+}
+
+// The change is coloured only where core allows a direction for this kind of
+// column. Otherwise it is the same figure in plain ink, so the cell does not
+// say "worse" while the verdict beside it says nothing may be said.
+fn change_cell(row: CompareRow, comparability: Comparability) -> Element(Msg) {
+  let moved = change(row.baseline, row.candidate)
+
+  case provenance.verdict_for(comparability, row.kind) {
+    provenance.DirectionAllowed -> ui.delta(moved, unit: row.unit)
+    provenance.DirectionWithheld(..) -> ui.delta_plain(moved, unit: row.unit)
+  }
 }
 
 // The change is a difference of two known readings; with either absent it
@@ -259,7 +299,10 @@ fn verdict_cell(row: CompareRow, comparability: Comparability) -> Element(Msg) {
   }
 }
 
-fn diff_panel(data: CompareModel) -> Element(Msg) {
+fn diff_panel(
+  data: CompareModel,
+  comparability: Comparability,
+) -> Element(Msg) {
   case data.diff {
     None ->
       ui.plain_panel(title: "Differential flame", body: [
@@ -271,6 +314,15 @@ fn diff_panel(data: CompareModel) -> Element(Msg) {
       let merged = diff.profile
       let name_of = fn(id) { profile.name_of(merged, id) }
 
+      let blocking =
+        provenance.blocking_fields(comparability)
+        |> list.map(provenance.field_name)
+
+      let verdict = case blocking {
+        [] -> flame_chart.Directed
+        _ -> flame_chart.Withheld
+      }
+
       ui.plain_panel(title: "Differential flame", body: [
         html.div([attribute.class("graph-frame")], [
           flame_chart.view(
@@ -280,15 +332,45 @@ fn diff_panel(data: CompareModel) -> Element(Msg) {
             unit: unit.Count,
             selected: None,
             search: "",
+            verdict:,
             on_select: fn(box) { msg.Ui(msg.SelectBox(box)) },
           ),
         ]),
-        html.p([attribute.class("legend-inline")], [
-          ui.badge("up", "red: grew since the baseline"),
-          ui.badge("down", "green: shrank"),
-          ui.badge("muted", "grey: unchanged"),
-        ]),
+        legend(blocking),
       ])
     }
+  }
+}
+
+// The colour key, or the statement that there is no colour to key.
+fn legend(blocking: List(String)) -> Element(Msg) {
+  case blocking {
+    [] ->
+      html.p([attribute.class("legend-inline")], [
+        ui.badge("up", "red: grew since the baseline"),
+        ui.badge("down", "blue: shrank"),
+        ui.badge("muted", "grey: unchanged"),
+      ])
+    fields ->
+      html.p([attribute.class("legend-inline")], [
+        ui.badge(
+          "block",
+          "withheld: "
+            <> string.join(fields, ", ")
+            <> verb(list.length(fields), " differs", " differ"),
+        ),
+        ui.note(
+          "Boxes are one colour because the captures are not comparable. "
+          <> "Width is the size of the change, not its direction.",
+        ),
+      ])
+  }
+}
+
+// The verb form that agrees with how many fields the sentence names.
+fn verb(count: Int, singular: String, plural: String) -> String {
+  case count {
+    1 -> singular
+    _ -> plural
   }
 }

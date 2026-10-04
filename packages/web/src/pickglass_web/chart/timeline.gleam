@@ -12,6 +12,17 @@
 //// number of events lost in its hover text, so a quiet stretch cannot be
 //// mistaken for an idle one.
 ////
+//// A counter track has no vertical axis of its own, so the track prints its
+//// peak at the right edge ("peak 7.8%"): the tallest bar is that figure, and
+//// every other bar is read against it. A track whose readings are all
+//// missing says so instead. The time axis counts in seconds when the window
+//// is a second or longer and in milliseconds otherwise, never both, so its
+//// labels read in one unit.
+////
+//// Every reading and span carries a click handler with a key of its own, and
+//// `describe` writes the line the page shows for the chosen one, so the
+//// numbers hover text carries are on the page too.
+////
 //// The drawing is bounded by the model: one rectangle per step and per
 //// span, and the viewer already limits both when it builds the model.
 ////
@@ -22,18 +33,24 @@
 
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/svg
+import lustre/event
 import pickglass_core/measure.{type Measurement, Known}
 import pickglass_core/unit.{type Unit}
 import pickglass_web/chart/svg_util
 import pickglass_web/fmt
+import pickglass_web/key.{type Key}
 import pickglass_web/model.{type CoverageGap, type Span, type Step, type Track}
 
 const label_width: Int = 170
 
 const plot_width: Int = 1000
+
+/// Room to the right of the plot for each track's peak.
+const peak_width: Int = 96
 
 const row_height: Int = 40
 
@@ -44,6 +61,8 @@ pub fn view(
   window_ms window_ms: Int,
   tracks tracks: List(Track),
   gaps gaps: List(CoverageGap),
+  selected selected: Option(Key),
+  on_select on_select: fn(Key) -> msg,
 ) -> Element(msg) {
   let window = int.max(window_ms, 1)
   let plot_height = list.length(tracks) * row_height
@@ -51,14 +70,14 @@ pub fn view(
 
   let rows =
     list.index_map(tracks, fn(track, index) {
-      track_group(track, index * row_height, window)
+      track_group(track, index, window, selected, on_select)
     })
 
   let bands = list.map(gaps, fn(gap) { gap_band(gap, window, plot_height) })
 
   svg.svg(
     [
-      svg_util.view_box(label_width + plot_width + 8, total_height),
+      svg_util.view_box(label_width + plot_width + peak_width, total_height),
       attribute.class("graph timeline"),
       attribute.attribute("role", "img"),
       attribute.attribute("aria-label", "Timeline"),
@@ -103,19 +122,150 @@ fn w_of(ms: Int, window: Int) -> Int {
   int.max(ms * plot_width / window, 1)
 }
 
-fn track_group(track: Track, y: Int, window: Int) -> Element(msg) {
+/// The key a click on reading or span `item` of track `track` carries.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline.item_key(2, 5)
+/// // -> a key spelled "t2.5"
+/// ```
+pub fn item_key(track: Int, item: Int) -> Key {
+  key.make("t" <> int.to_string(track) <> "." <> int.to_string(item))
+}
+
+fn track_group(
+  track: Track,
+  index: Int,
+  window: Int,
+  selected: Option(Key),
+  on_select: fn(Key) -> msg,
+) -> Element(msg) {
+  let y = index * row_height
+
   case track {
     model.CounterTrack(label:, unit: u, steps:) ->
       svg.g([attribute.class("track")], [
         track_label(label, y),
-        ..counter_steps(steps, u, y, window)
+        peak_label(steps, u, y),
+        ..counter_steps(steps, u, index, window, selected, on_select)
       ])
 
     model.SpanTrack(label:, spans:) ->
       svg.g([attribute.class("track")], [
         track_label(label, y),
-        ..list.map(spans, fn(span) { span_bar(span, y, window) })
+        ..list.index_map(spans, fn(span, position) {
+          span_bar(span, index, position, window, selected, on_select)
+        })
       ])
+  }
+}
+
+/// The tallest known reading of a track, or nothing when none was read.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline.peak_of(steps)
+/// // -> Some(780)
+/// ```
+pub fn peak_of(steps: List(Step)) -> Option(Int) {
+  list.fold(steps, None, fn(best, step) {
+    case step.value, best {
+      Known(value:), Some(most) -> Some(int.max(most, value))
+      Known(value:), None -> Some(value)
+      _, _ -> best
+    }
+  })
+}
+
+/// The text at a track's right edge: its peak in its unit, or the statement
+/// that nothing was read.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline.peak_text(steps, unit.Count)
+/// // -> "peak 7"
+/// ```
+pub fn peak_text(steps: List(Step), u: Unit) -> String {
+  case peak_of(steps) {
+    Some(value) -> "peak " <> fmt.known(value, u)
+    None -> "no reading"
+  }
+}
+
+fn peak_label(steps: List(Step), u: Unit, y: Int) -> Element(msg) {
+  svg.text(
+    [
+      svg_util.num("x", label_width + plot_width + 8),
+      svg_util.num("y", y + row_height / 2 + 4),
+      attribute.class("peak-label"),
+    ],
+    peak_text(steps, u),
+  )
+}
+
+/// The line the page shows for a chosen reading or span: the track, when it
+/// was, and its value, with the width of time a reading stands for.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline.describe(tracks, timeline.item_key(0, 3))
+/// // -> Ok("scheduler util · +6 s · 70.0% (reading stands for 2.00 s)")
+/// ```
+pub fn describe(tracks: List(Track), chosen: Key) -> Result(String, Nil) {
+  tracks
+  |> list.index_map(fn(track, index) { #(index, track) })
+  |> list.find_map(fn(entry) {
+    let #(index, track) = entry
+
+    case track {
+      model.CounterTrack(label:, unit: u, steps:) ->
+        steps
+        |> list.index_map(fn(step, position) { #(position, step) })
+        |> list.find_map(fn(item) {
+          case item_key(index, item.0) == chosen {
+            True ->
+              Ok(
+                label
+                <> " · +"
+                <> seconds_text(item.1.at_ms)
+                <> " · "
+                <> step_title(item.1.value, u, item.1.width_ms),
+              )
+            False -> Error(Nil)
+          }
+        })
+
+      model.SpanTrack(label:, spans:) ->
+        spans
+        |> list.index_map(fn(span, position) { #(position, span) })
+        |> list.find_map(fn(item) {
+          case item_key(index, item.0) == chosen {
+            True ->
+              Ok(
+                label
+                <> " · "
+                <> item.1.label
+                <> " · +"
+                <> seconds_text(item.1.at_ms)
+                <> " for "
+                <> fmt.duration_ms(item.1.length_ms),
+              )
+            False -> Error(Nil)
+          }
+        })
+    }
+  })
+}
+
+/// Whether a key names a reading or span of these tracks.
+pub fn knows(tracks: List(Track), chosen: Key) -> Bool {
+  case describe(tracks, chosen) {
+    Ok(_) -> True
+    Error(Nil) -> False
   }
 }
 
@@ -135,18 +285,34 @@ fn track_label(label: String, y: Int) -> Element(msg) {
 fn counter_steps(
   steps: List(Step),
   u: Unit,
-  y: Int,
+  track: Int,
   window: Int,
+  selected: Option(Key),
+  on_select: fn(Key) -> msg,
 ) -> List(Element(msg)) {
-  let peak =
-    list.fold(steps, 1, fn(best, step) {
-      case step.value {
-        Known(value:) -> int.max(best, value)
-        _ -> best
-      }
-    })
+  let peak = int.max(option.unwrap(peak_of(steps), 1), 1)
 
-  list.map(steps, fn(step) { step_bar(step, u, y, window, peak) })
+  list.index_map(steps, fn(step, position) {
+    let id = item_key(track, position)
+
+    step_bar(step, u, track * row_height, window, peak)
+    |> clickable(id, selected, on_select)
+  })
+}
+
+// A group with the item's click handler, marked when it is the chosen one.
+fn clickable(
+  inner: Element(msg),
+  id: Key,
+  selected: Option(Key),
+  on_select: fn(Key) -> msg,
+) -> Element(msg) {
+  let chosen = case selected {
+    Some(current) if current == id -> attribute.class("reading sel")
+    Some(_) | None -> attribute.class("reading")
+  }
+
+  svg.g([chosen, event.on_click(on_select(id))], [inner])
 }
 
 fn step_bar(
@@ -196,10 +362,23 @@ fn with_title(inner: Element(msg), text: String) -> Element(msg) {
   svg.g([], [svg.title([], [element.text(text)]), inner])
 }
 
-fn span_bar(span: Span, y: Int, window: Int) -> Element(msg) {
+fn span_bar(
+  span: Span,
+  track: Int,
+  position: Int,
+  window: Int,
+  selected: Option(Key),
+  on_select: fn(Key) -> msg,
+) -> Element(msg) {
+  let y = track * row_height
   let x = x_of(span.at_ms, window)
   let width = w_of(span.length_ms, window)
 
+  span_group(span, x, y, width)
+  |> clickable(item_key(track, position), selected, on_select)
+}
+
+fn span_group(span: Span, x: Int, y: Int, width: Int) -> Element(msg) {
   svg.g([attribute.class("span")], [
     svg.title([], [
       element.text(span.label <> " · " <> fmt.duration_ms(span.length_ms)),
@@ -246,6 +425,45 @@ fn gap_band(gap: CoverageGap, window: Int, plot_height: Int) -> Element(msg) {
   ])
 }
 
+/// A tick offset written in one unit for the whole axis: seconds when the
+/// window is a second or longer, milliseconds when it is shorter. A tick
+/// never switches unit by its own size, which is what made "+0 ms" sit
+/// beside "+12.0 s".
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline.axis_text(0, window: 60_000)
+/// // -> "0 s"
+///
+/// timeline.axis_text(12_000, window: 60_000)
+/// // -> "12 s"
+///
+/// timeline.axis_text(400, window: 800)
+/// // -> "400 ms"
+/// ```
+pub fn axis_text(ms: Int, window window: Int) -> String {
+  case window < 1000 {
+    True -> int.to_string(ms) <> " ms"
+    False -> seconds_text(ms)
+  }
+}
+
+/// A time offset in seconds with a tenth when it is not whole.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline.seconds_text(2500)
+/// // -> "2.5 s"
+/// ```
+pub fn seconds_text(ms: Int) -> String {
+  case ms % 1000 / 100 {
+    0 -> int.to_string(ms / 1000) <> " s"
+    tenth -> int.to_string(ms / 1000) <> "." <> int.to_string(tenth) <> " s"
+  }
+}
+
 // Five ticks across the window, labelled in the window's own offsets.
 fn axis(window: Int, plot_height: Int) -> Element(msg) {
   let ticks =
@@ -268,7 +486,7 @@ fn axis(window: Int, plot_height: Int) -> Element(msg) {
             attribute.attribute("text-anchor", "middle"),
             attribute.class("tick-label"),
           ],
-          "+" <> fmt.duration_ms(ms),
+          "+" <> axis_text(ms, window:),
         ),
       ])
     })

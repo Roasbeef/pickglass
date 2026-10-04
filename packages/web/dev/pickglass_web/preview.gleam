@@ -36,6 +36,7 @@ import lustre/element/html
 import pickglass_web/app.{type Model}
 import pickglass_web/chart/call_graph
 import pickglass_web/chart/flame as flame_chart
+import pickglass_web/chart/timeline as timeline_chart
 import pickglass_web/fixture
 import pickglass_web/key
 import pickglass_web/model
@@ -248,8 +249,10 @@ fn entries() -> List(Entry) {
     Entry(
       "timeline.html",
       "Timeline",
-      "steps, spans and a coverage gap",
-      base(page.Timeline),
+      "steps, spans, peaks and a coverage gap",
+      drive(base(page.Timeline), [
+        msg.Ui(msg.SelectReading(timeline_chart.item_key(0, 4))),
+      ]),
     ),
     Entry(
       "compare.html",

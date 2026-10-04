@@ -37,7 +37,7 @@ pub fn the_strip_carries_the_capability_banner_and_observer_meter_test() {
   string.contains(html, "Attached: full trust") |> should.be_true
   string.contains(html, "meter") |> should.be_true
   string.contains(html, "1 probe running") |> should.be_true
-  string.contains(html, "inc 7f3a") |> should.be_true
+  string.contains(html, "incarnation 7f3a") |> should.be_true
 }
 
 pub fn every_data_panel_has_the_title_bar_line_test() {
@@ -45,7 +45,7 @@ pub fn every_data_panel_has_the_title_bar_line_test() {
 
   string.contains(html, "meta-source") |> should.be_true
   string.contains(html, "every 10.0 s (actual 10.0 s)") |> should.be_true
-  string.contains(html, "3,412 of 3,412 processes") |> should.be_true
+  string.contains(html, "14 of 3,412 processes") |> should.be_true
   string.contains(html, "truncated: top_k_limit") |> should.be_true
 }
 
@@ -74,7 +74,10 @@ pub fn the_probe_plan_states_scope_cost_perturbation_and_what_it_does_not_prove_
   let html = support.html_of(page.Probes)
 
   string.contains(html, "Scope") |> should.be_true
-  string.contains(html, "4,000 to 22,000 events") |> should.be_true
+  string.contains(html, "4,000 to 22,000 calls counted") |> should.be_true
+  string.contains(html, "no trace message is sent") |> should.be_true
+  string.contains(html, "every traced event") |> should.be_false
+  string.contains(html, "time remaining") |> should.be_true
   string.contains(html, "Perturbation") |> should.be_true
   string.contains(html, "Does not prove") |> should.be_true
   string.contains(html, "Confirm and run") |> should.be_true

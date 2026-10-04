@@ -204,6 +204,32 @@ pub fn known(value: Int, in u: Unit) -> String {
   }
 }
 
+/// Write a total in its unit's natural scale, marked as a lower bound when
+/// rows were missing. It is `measure.render_total` with the figure scaled,
+/// so a byte total reads "1.19 GiB" and not a long integer.
+///
+/// ## Examples
+///
+/// ```gleam
+/// fmt.total(Total(value: 3 * 1024 * 1024, known: 3, missing: 0, not_applicable: 0), unit.Bytes)
+/// // -> "3.00 MiB"
+/// ```
+pub fn total(total: measure.Total, in u: Unit) -> String {
+  let value = known(total.value, u)
+
+  case total.missing {
+    0 -> value
+    missing ->
+      "at least "
+      <> value
+      <> " ("
+      <> int.to_string(total.known)
+      <> " of "
+      <> int.to_string(total.known + missing)
+      <> " rows known)"
+  }
+}
+
 /// Write a measurement: a known value in its scale, or the word that
 /// `measure.render` gives for an absent one. A missing value is never
 /// written as a number.

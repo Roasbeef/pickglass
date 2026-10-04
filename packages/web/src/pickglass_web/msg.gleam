@@ -50,6 +50,9 @@ pub type Feed {
   /// The overview page.
   FedOverview(model.OverviewModel)
 
+  /// The owners that moved most, shown on the overview when it arrives.
+  FedOwnerMovers(model.OwnerMovers)
+
   /// The owners page.
   FedOwners(model.OwnersModel)
 
@@ -173,6 +176,9 @@ pub type UiEvent {
   /// Select a node in the call graph.
   SelectNode(Key)
 
+  /// Select a reading or span on the timeline.
+  SelectReading(Key)
+
   /// Clear the selection.
   ClearSelection
 
@@ -245,6 +251,17 @@ pub type Request {
 
   /// Add a step to the transform chain.
   AddFilter(kind: FilterKind, pattern: String)
+
+  /// Add a step to the transform chain on the function behind a selected
+  /// box or node. The key is the viewer's; the viewer builds the pattern
+  /// from the function it holds, so no function name travels from the
+  /// browser.
+  AddFilterAt(kind: FilterKind, frame: Key)
+
+  /// Open the probe form with this process as its target. The detail page
+  /// sends it from "Plan probe…"; the viewer opens the Probes page and
+  /// pre-fills the form's target. It plans nothing.
+  PlanProbeFor(process: Key)
 
   /// Drop every chain step from this index on.
   TruncateChain(from: Int)

@@ -74,7 +74,36 @@ pub fn build(
     checkpoints:,
     baseline:,
     labelled: #(list.length(census) - unlabelled, unlabelled),
+    remainder: model.NoRemainder,
   )
+}
+
+/// Record what the owner rows leave out.
+///
+/// The agent returns the top K groups by heap capacity and, separately, the
+/// node's process count and the heap of everything it did not list. The
+/// remainder row is that difference, so a reader never mistakes the listed
+/// rows for the whole node. A `procs` of zero means nothing is left out and
+/// the row is not drawn.
+///
+/// ## Examples
+///
+/// ```gleam
+/// owners.with_remainder(page, procs: 3398, heap_cap: Known(41 * mib))
+/// ```
+pub fn with_remainder(
+  page: OwnersModel,
+  procs procs: Int,
+  heap_cap heap_cap: Measurement,
+) -> OwnersModel {
+  case procs > 0 {
+    True ->
+      model.OwnersModel(
+        ..page,
+        remainder: model.Remainder(procs: Known(procs), heap_cap:),
+      )
+    False -> model.OwnersModel(..page, remainder: model.NoRemainder)
+  }
 }
 
 // Larger heap first; a row with no known capacity sorts last.

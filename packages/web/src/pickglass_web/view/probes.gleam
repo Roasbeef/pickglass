@@ -39,6 +39,40 @@ import pickglass_web/state.{type UiState}
 import pickglass_web/view/ui
 import pickglass_web/wire
 
+/// How a probe's estimate is worded. A counters probe has no events, so its
+/// estimate counts calls the VM will tally and bounds the one snapshot; a
+/// tracing probe has events the collector must receive.
+///
+/// ## Examples
+///
+/// ```gleam
+/// cost_text(policy.Counting, estimate, 30_000)
+/// // -> "about 4,000 to 22,000 calls counted ..."
+/// ```
+pub fn cost_text(
+  level: policy.Perturbation,
+  estimate: policy.Estimate,
+  stops_after_ms: Int,
+) -> String {
+  let span =
+    fmt.count(estimate.events_low) <> " to " <> fmt.count(estimate.events_high)
+  let tail =
+    " · "
+    <> fmt.duration_ms(estimate.wall_ms)
+    <> " · stops after "
+    <> fmt.duration_ms(stops_after_ms)
+
+  case level {
+    policy.Counting ->
+      span
+      <> " calls counted, no events sent · snapshot at most "
+      <> fmt.bytes(estimate.bytes_high)
+      <> tail
+    policy.Passive | policy.Polling | policy.Tracing | policy.ForcedGc ->
+      span <> " events · at most " <> fmt.bytes(estimate.bytes_high) <> tail
+  }
+}
+
 /// The title of a probe kind.
 pub fn kind_title(kind: policy.ProbeKind) -> String {
   case kind {
@@ -52,8 +86,9 @@ pub fn kind_title(kind: policy.ProbeKind) -> String {
 fn kind_action(kind: policy.ProbeKind) -> String {
   case kind {
     policy.Counters ->
-      "Counts calls and measures call time and memory for the matched "
-      <> "functions in the targets, in a trace session of its own."
+      "Counts calls and measures call time for the matched functions in the "
+      <> "targets, in a trace session of its own. No trace message is sent; "
+      <> "the VM keeps the counters and one snapshot is read at the end."
     policy.Sampling ->
       "Reads the current stack of each target at a fixed rate and merges "
       <> "the stacks into a profile."
@@ -82,11 +117,16 @@ fn does_not_prove(kind: policy.ProbeKind) -> String {
   }
 }
 
-fn perturbation_text(level: policy.Perturbation) -> String {
+/// What a perturbation class means for the target, in one phrase.
+pub fn perturbation_text(level: policy.Perturbation) -> String {
   case level {
     policy.Passive -> "none: reads only"
     policy.Polling -> "light: periodic reads of process information"
-    policy.Tracing -> "moderate: every traced call emits an event"
+    policy.Counting ->
+      "light: the VM counts calls and call time in the matched functions; "
+      <> "no trace message is sent"
+    policy.Tracing ->
+      "moderate: every traced event is sent to a collector process"
     policy.ForcedGc -> "intrusive: the process is stopped for the collection"
   }
 }
@@ -280,17 +320,11 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
         html.dd([], [element.text(kind_action(card.kind))]),
         html.dt([], [element.text("Cost")]),
         html.dd([attribute.class("num")], [
-          element.text(
-            fmt.count(estimate.events_low)
-            <> " to "
-            <> fmt.count(estimate.events_high)
-            <> " events · at most "
-            <> fmt.bytes(estimate.bytes_high)
-            <> " · "
-            <> fmt.duration_ms(estimate.wall_ms)
-            <> " · stops after "
-            <> fmt.duration_ms(scope.duration_ms),
-          ),
+          element.text(cost_text(
+            policy.plan_perturbation(card.plan),
+            estimate,
+            scope.duration_ms,
+          )),
         ]),
         html.dt([], [element.text("Perturbation")]),
         html.dd([], [
@@ -336,6 +370,13 @@ fn active_panel(data: ProbesModel) -> Element(Msg) {
       [] -> ui.note("No probe is running.")
       probes ->
         html.table([attribute.class("tbl")], [
+          html.thead([], [
+            html.tr([], [
+              ui.th("probe", None),
+              ui.th_num("time remaining", None),
+              ui.th("", None),
+            ]),
+          ]),
           html.tbody(
             [],
             list.map(probes, fn(probe) {
@@ -383,8 +424,16 @@ fn history_panel(data: ProbesModel) -> Element(Msg) {
         html.tr([], [
           ui.th("probe", None),
           ui.th("outcome", None),
-          ui.th_num("events", None),
-          ui.th_num("collector reductions", None),
+          ui.th_num(
+            "events",
+            Some(
+              "trace messages the collector received; a counters probe sends none",
+            ),
+          ),
+          ui.th_num(
+            "collector reductions",
+            Some("work done by the collector, not CPU time"),
+          ),
           ui.th_num("bytes", None),
           ui.th_num("wall", None),
         ]),

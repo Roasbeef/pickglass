@@ -36,6 +36,7 @@ import pickglass_core/analysis/pattern
 import pickglass_core/policy
 import pickglass_web/chart/call_graph
 import pickglass_web/chart/flame as flame_chart
+import pickglass_web/chart/timeline as timeline_chart
 import pickglass_web/key.{type Key}
 import pickglass_web/model
 import pickglass_web/msg.{type Feed, type Msg, type Request}
@@ -90,6 +91,8 @@ pub type Model {
     strip: Loadable(model.StripModel),
     /// The overview data.
     overview: Loadable(model.OverviewModel),
+    /// The owners that moved most, for the overview.
+    movers: Loadable(model.OwnerMovers),
     /// The owners data.
     owners: Loadable(model.OwnersModel),
     /// The processes data.
@@ -135,6 +138,7 @@ pub fn init(start: Start) -> Model {
       links: start.links,
       strip: Waiting,
       overview: Waiting,
+      movers: Waiting,
       owners: Waiting,
       processes: Waiting,
       process_detail: Waiting,
@@ -173,6 +177,7 @@ fn store(model: Model, feed: Feed) -> Model {
   case feed {
     msg.FedStrip(data) -> Model(..model, strip: Ready(data))
     msg.FedOverview(data) -> Model(..model, overview: Ready(data))
+    msg.FedOwnerMovers(data) -> Model(..model, movers: Ready(data))
     msg.FedOwners(data) -> Model(..model, owners: Ready(data))
     msg.FedProcesses(data) -> Model(..model, processes: Ready(data))
     msg.FedProcessDetail(data) -> Model(..model, process_detail: Ready(data))
@@ -225,6 +230,12 @@ fn ui_event(
       case node_known(model, node) {
         True -> with_ui(model, state.UiState(..current, selected: Some(node)))
         False -> refuse(model, "That function is not in the drawn graph.")
+      }
+
+    msg.SelectReading(item) ->
+      case reading_known(model, item) {
+        True -> with_ui(model, state.UiState(..current, selected: Some(item)))
+        False -> refuse(model, "That reading is not on the timeline.")
       }
 
     msg.ClearSelection ->
@@ -406,6 +417,8 @@ pub fn describe(request: Request) -> String {
     msg.SortProcesses(_) -> "sort the processes"
     msg.MovePage(_) -> "move the window"
     msg.AddFilter(..) -> "add a filter step"
+    msg.AddFilterAt(..) -> "add a filter step on the selected function"
+    msg.PlanProbeFor(_) -> "open the probe form for this process"
     msg.TruncateChain(_) -> "remove filter steps"
     msg.ExportProfile(_) -> "export the profile"
   }
@@ -438,6 +451,12 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
         "That checkpoint is not offered.",
       )
     msg.PlanProbe(draft) -> check_draft(model, draft)
+    msg.PlanProbeFor(process) ->
+      require(
+        process_known(model, process),
+        "That process is not on this page.",
+      )
+    msg.AddFilterAt(kind:, frame:) -> check_filter_at(model, kind, frame)
     msg.TruncateChain(from:) -> check_chain_index(model, from)
     msg.TakeCheckpoint -> Ok(Nil)
     msg.SortProcesses(_) -> Ok(Nil)
@@ -471,6 +490,23 @@ fn check_draft(model: Model, draft: msg.ProbeDraft) -> Result(Nil, String) {
   case list.all(draft.targets, fn(target) { target_known(model, target) }) {
     True -> Ok(Nil)
     False -> Error("A target in that plan is not offered.")
+  }
+}
+
+// A "focus here" names a key; it passes only when the profile on the page
+// draws a function behind it, which is also what the viewer will look up.
+fn check_filter_at(
+  model: Model,
+  kind: msg.FilterKind,
+  frame: Key,
+) -> Result(Nil, String) {
+  case model.profile {
+    Ready(data) ->
+      case profile.step_at(data, kind, frame) {
+        Ok(_) -> Ok(Nil)
+        Error(Nil) -> Error("That is not a function in the drawn profile.")
+      }
+    Waiting -> Error("There is no profile to change.")
   }
 }
 
@@ -590,6 +626,13 @@ fn box_known(model: Model, box: Key) -> Bool {
   in_profile || in_diff
 }
 
+fn reading_known(model: Model, item: Key) -> Bool {
+  case model.timeline {
+    Ready(data) -> timeline_chart.knows(data.tracks, item)
+    Waiting -> False
+  }
+}
+
 fn node_known(model: Model, node: Key) -> Bool {
   case model.profile {
     Ready(data) -> {
@@ -669,7 +712,13 @@ fn grants(model: Model) -> List(policy.Capability) {
 
 fn page_body(model: Model) -> Element(Msg) {
   case model.page {
-    page.Overview -> loaded("Overview", model.overview, overview.view)
+    page.Overview ->
+      loaded("Overview", model.overview, fn(data) {
+        overview.view(data, case model.movers {
+          Ready(movers) -> Some(movers)
+          Waiting -> None
+        })
+      })
     page.Owners ->
       loaded("Owners", model.owners, fn(data) {
         owners.view(data, model.ui, model.links)
@@ -680,7 +729,7 @@ fn page_body(model: Model) -> Element(Msg) {
       })
     page.ProcessDetail ->
       loaded("Process", model.process_detail, fn(data) {
-        process_detail.view(data, grants(model))
+        process_detail.view(data, grants(model), model.links)
       })
     page.Memory -> loaded("Memory", model.memory, memory.view)
     page.Supervision ->
@@ -691,7 +740,10 @@ fn page_body(model: Model) -> Element(Msg) {
       loaded("Probes", model.probes, fn(data) { probes.view(data, model.ui) })
     page.Profile ->
       loaded("Profile", model.profile, fn(data) { profile.view(data, model.ui) })
-    page.Timeline -> loaded("Timeline", model.timeline, timeline.view)
+    page.Timeline ->
+      loaded("Timeline", model.timeline, fn(data) {
+        timeline.view(data, model.ui)
+      })
     page.Compare -> loaded("Compare", model.compare, compare.view)
     page.Audit -> loaded("Audit", model.audit, audit.view)
   }

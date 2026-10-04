@@ -17,7 +17,7 @@
 //// `view` draws the chart from `chart/timeline` and a table of gaps.
 
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
@@ -26,10 +26,11 @@ import pickglass_web/chart/timeline as timeline_chart
 import pickglass_web/fmt
 import pickglass_web/model.{type CoverageGap, type TimelineModel}
 import pickglass_web/msg.{type Msg}
+import pickglass_web/state.{type UiState}
 import pickglass_web/view/ui
 
 /// Draw the timeline page.
-pub fn view(data: TimelineModel) -> Element(Msg) {
+pub fn view(data: TimelineModel, ui_state: UiState) -> Element(Msg) {
   ui.panel(
     title: "Timeline · window " <> fmt.duration_ms(data.window_ms),
     info: data.info,
@@ -42,8 +43,11 @@ pub fn view(data: TimelineModel) -> Element(Msg) {
           window_ms: data.window_ms,
           tracks: data.tracks,
           gaps: data.gaps,
+          selected: ui_state.selected,
+          on_select: fn(item) { msg.Ui(msg.SelectReading(item)) },
         ),
       ]),
+      selection_line(data, ui_state),
       gap_list(data.gaps),
       ui.note(
         "Counters read by polling are known only at their readings: each bar "
@@ -52,6 +56,20 @@ pub fn view(data: TimelineModel) -> Element(Msg) {
       ),
     ],
   )
+}
+
+// The persistent line for the chosen reading or span, the counterpart of the
+// flame's selection line.
+fn selection_line(data: TimelineModel, ui_state: UiState) -> Element(Msg) {
+  let described = case ui_state.selected {
+    Some(chosen) -> timeline_chart.describe(data.tracks, chosen)
+    None -> Error(Nil)
+  }
+
+  case described {
+    Ok(text) -> html.p([attribute.class("selection")], [element.text(text)])
+    Error(Nil) -> ui.note("Click a bar to read its value.")
+  }
 }
 
 fn gap_list(gaps: List(CoverageGap)) -> Element(Msg) {

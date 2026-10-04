@@ -206,6 +206,29 @@ pub type LayerRow {
   )
 }
 
+/// One owner and how far its heap capacity moved since the checkpoint.
+pub type OwnerMover {
+  OwnerMover(
+    /// The owner path, rendered.
+    label: String,
+    /// The change of heap capacity since the checkpoint, or the word for why
+    /// it is unknown.
+    delta: Measurement,
+  )
+}
+
+/// The owners whose heap capacity moved most since the checkpoint, fed beside
+/// the overview. It is a separate feed so the overview's own model does not
+/// grow every time the page learns to say more.
+pub type OwnerMovers {
+  OwnerMovers(
+    /// The checkpoint the changes are against.
+    since: String,
+    /// The owners, in any order; the page sorts and cuts.
+    rows: List(OwnerMover),
+  )
+}
+
 /// A labelled count with an optional limit, such as atoms used of the table
 /// size.
 pub type CountTile {
@@ -370,6 +393,24 @@ pub type OwnerRow {
   )
 }
 
+/// The processes the owner rows do not list. The agent keeps only the top K
+/// owner groups by heap capacity but counts every process, so the page can say
+/// how much sits outside the rows instead of letting the rows read as the
+/// whole node.
+pub type Remainder {
+  /// Every process the census counted is in a row above.
+  NoRemainder
+
+  /// Processes outside the listed rows, with the heap they hold when the
+  /// agent's aggregate carried it.
+  Remainder(
+    /// How many processes are outside the rows.
+    procs: Measurement,
+    /// Their heap capacity, or the word for why it was not read.
+    heap_cap: Measurement,
+  )
+}
+
 /// The owners page.
 pub type OwnersModel {
   OwnersModel(
@@ -385,6 +426,8 @@ pub type OwnersModel {
     baseline: Option(CheckpointRef),
     /// How many processes carried a label and how many did not.
     labelled: #(Int, Int),
+    /// What lies outside the rows, from the agent's per-owner aggregate.
+    remainder: Remainder,
   )
 }
 
@@ -624,7 +667,10 @@ pub type ProfileHeader {
   )
 }
 
-/// The profile page, with every view's layout already computed.
+/// The profile page, with every view's layout already computed. The total
+/// before any step is not a field: `view/profile.root_total` reads it from the
+/// first step's report, or from the profile when the chain is empty, so the
+/// header and the chain's root chip cannot disagree.
 pub type ProfileModel {
   ProfileModel(
     /// The header.
@@ -635,8 +681,6 @@ pub type ProfileModel {
     column: profile.Column,
     /// The transform chain, one report per step.
     chain: List(transform.StepReport),
-    /// The profile's total before any step.
-    total_before: Int,
     /// The views that need call stacks, or the reason there are none.
     stacks: Stacks,
     /// The Top table.

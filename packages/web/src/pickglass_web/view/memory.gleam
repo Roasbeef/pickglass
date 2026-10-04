@@ -26,6 +26,7 @@ import lustre/element.{type Element}
 import lustre/element/html
 import pickglass_core/measure
 import pickglass_core/unit
+import pickglass_web/fmt
 import pickglass_web/model.{type CategoryRow, type MemoryModel, type Panel}
 import pickglass_web/msg.{type Msg}
 import pickglass_web/view/ui
@@ -86,8 +87,7 @@ fn total_row(rows: List(CategoryRow)) -> Element(Msg) {
       list.map(additive, fn(r) { r.value }),
     )
   {
-    Ok(total) ->
-      "Sum of additive rows: " <> measure.render_total(total, unit.Bytes)
+    Ok(total) -> "Sum of additive rows: " <> fmt.total(total, unit.Bytes)
     Error(measure.NothingKnown) -> "No sum: no additive row was read."
     Error(measure.OverlappingRows(why:)) -> "No sum: " <> why
     Error(measure.RatioDoesNotAdd) -> "No sum: ratios do not add."

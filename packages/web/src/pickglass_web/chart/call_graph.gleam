@@ -4,9 +4,17 @@
 //// polyline through the layers, so this module draws what it is given: a
 //// rectangle and a label per node, a polyline per edge. Following pprof,
 //// a node's text size comes from its flat value (the layout computed
-//// `font_size`), its fill from its cumulative share of the total, an edge's
-//// width from its weight, and a residual edge, one that stands for removed
-//// nodes between its ends, is dotted.
+//// `font_size`, never below 11), its fill from its cumulative share of the
+//// total, an edge's width from its weight, and a residual edge, one that
+//// stands for removed nodes between its ends, is dotted. A node has two
+//// lines, the name and then "flat (x%) · cum (y%)", as in pprof. An edge
+//// whose weight is at least `label_share_permille` of the total carries its
+//// weight as text at its midpoint, so a width never has to be read off by
+//// eye.
+////
+//// The drawing has the size of its coordinate space, not the width of the
+//// page. The page puts it in a scrolling frame, so a wide graph is scrolled
+//// at natural size and the text is never shrunk to fit.
 ////
 //// The layout is bounded by the graph's own node cap of 80, so the element
 //// count is bounded without a limit here. Every node has a click handler
@@ -35,6 +43,10 @@ const svg_namespace: String = "http://www.w3.org/2000/svg"
 
 const margin: Int = 12
 
+/// An edge is labelled with its weight when the weight is at least this many
+/// thousandths of the profile total.
+pub const label_share_permille: Int = 20
+
 /// The key a click on the node for `function` carries.
 ///
 /// ## Examples
@@ -62,7 +74,7 @@ pub fn view(
 
   let edges =
     list.index_map(layout.edges, fn(edge, index) {
-      #(edge_key(edge, index), edge_element(edge))
+      #(edge_key(edge, index), edge_element(edge, total, u))
     })
 
   let nodes =
@@ -73,8 +85,13 @@ pub fn view(
       )
     })
 
+  let width = max_x - min_x + 2 * margin
+  let height = max_y - min_y + 2 * margin
+
   svg.svg(
     [
+      svg_util.num("width", width),
+      svg_util.num("height", height),
       attribute.attribute(
         "viewBox",
         int.to_string(min_x - margin)
@@ -156,7 +173,64 @@ fn edge_key(edge: PlacedEdge, index: Int) -> String {
   <> int.to_string(edge.to)
 }
 
-fn edge_element(edge: PlacedEdge) -> Element(msg) {
+/// Whether an edge of this weight is labelled.
+///
+/// ## Examples
+///
+/// ```gleam
+/// call_graph.labelled(weight: 50, of: 1000)
+/// // -> True
+///
+/// call_graph.labelled(weight: 5, of: 1000)
+/// // -> False
+/// ```
+pub fn labelled(weight weight: Int, of total: Int) -> Bool {
+  total > 0 && weight * 1000 >= total * label_share_permille
+}
+
+// An edge is its line and, when it is heavy enough to be worth reading, a
+// weight at the middle of its path.
+fn edge_element(edge: PlacedEdge, total: Int, u: Unit) -> Element(msg) {
+  svg.g([], [edge_line(edge), edge_label(edge, total, u)])
+}
+
+fn edge_label(edge: PlacedEdge, total: Int, u: Unit) -> Element(msg) {
+  case labelled(weight: edge.weight, of: total), midpoint(edge.points) {
+    True, Ok(#(x, y)) ->
+      svg.text(
+        [
+          svg_util.num("x", x + 4),
+          svg_util.num("y", y),
+          attribute.class("edge-label"),
+        ],
+        fmt.known(edge.weight, u),
+      )
+    _, _ -> element.none()
+  }
+}
+
+// The point halfway along the path's vertex list: the middle vertex of an odd
+// count, or the middle of the middle segment of an even one.
+fn midpoint(points: List(#(Int, Int))) -> Result(#(Int, Int), Nil) {
+  let count = list.length(points)
+  let at = fn(index) { list.first(list.drop(points, index)) }
+
+  case count {
+    0 -> Error(Nil)
+    1 -> at(0)
+    n ->
+      case n % 2 {
+        1 -> at(n / 2)
+        _ ->
+          case at(n / 2 - 1), at(n / 2) {
+            Ok(a), Ok(b) -> Ok(#({ a.0 + b.0 } / 2, { a.1 + b.1 } / 2))
+            _, _ -> Error(Nil)
+          }
+      }
+  }
+}
+
+fn edge_line(edge: PlacedEdge) -> Element(msg) {
   let kind_class = case edge.kind {
     graph.Direct -> "edge"
     graph.Residual -> "edge residual"
@@ -218,16 +292,43 @@ fn node_element(
       svg.text(
         [
           svg_util.num("x", node.x + node.width / 2),
-          svg_util.num("y", node.y + node.height / 2 + node.font_size / 3),
+          svg_util.num("y", node.y + node.font_size + 5),
           svg_util.num("font-size", node.font_size),
           attribute.attribute("text-anchor", "middle"),
           attribute.class("node-label"),
         ],
         name,
       ),
+      svg.text(
+        [
+          svg_util.num("x", node.x + node.width / 2),
+          svg_util.num("y", node.y + node.height - 6),
+          svg_util.num("font-size", detail_font),
+          attribute.attribute("text-anchor", "middle"),
+          attribute.class("node-detail"),
+        ],
+        detail_text(node, total, u),
+      ),
     ],
   )
 }
+
+// The second line of a node, like pprof's: flat then cumulative, each with
+// its share of the total.
+fn detail_text(node: PlacedNode, total: Int, u: Unit) -> String {
+  fmt.known(node.flat, u)
+  <> " ("
+  <> fmt.share(node.flat, of: total)
+  <> ") · "
+  <> fmt.known(node.cum, u)
+  <> " ("
+  <> fmt.share(node.cum, of: total)
+  <> ")"
+}
+
+// The size of the second line: the smallest label size, so it is never
+// below 11 either.
+const detail_font: Int = 11
 
 fn selection_class(selected: Option(Key), id: Key) -> attribute.Attribute(msg) {
   case selected {

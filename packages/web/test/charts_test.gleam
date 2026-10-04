@@ -35,6 +35,7 @@ fn draw(layout: flame.Layout, facing: flame_chart.Facing) -> String {
     unit: unit.Count,
     selected: None,
     search: "",
+    verdict: flame_chart.Directed,
     on_select: fn(box) { key.to_string(box) },
   )
   |> element.to_string
@@ -53,7 +54,8 @@ pub fn the_number_of_drawn_boxes_stays_within_the_layout_bound_test() {
     let html = draw(layout, flame_chart.RootBelow)
 
     { support.count(html, "<rect") <= limit } |> should.be_true
-    support.count(html, "<rect") |> should.equal(list.length(layout.boxes))
+    // The synthetic root is not drawn.
+    support.count(html, "<rect") |> should.equal(list.length(layout.boxes) - 1)
   })
 }
 
@@ -64,7 +66,7 @@ pub fn every_box_has_a_native_title_and_a_closed_colour_class_test() {
 
   let html = draw(layout, flame_chart.RootBelow)
 
-  support.count(html, "<title>") |> should.equal(list.length(layout.boxes))
+  support.count(html, "<title>") |> should.equal(list.length(layout.boxes) - 1)
   string.contains(html, "style=") |> should.be_false
 }
 

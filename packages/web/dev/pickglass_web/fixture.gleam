@@ -626,7 +626,7 @@ pub fn census() -> List(model.ProcRow) {
 fn delta_for(label: String) -> Measurement {
   case label {
     "session:s-12" -> Known(188 * mib)
-    "session:s-12 / restart_keeper" -> Known(179 * mib)
+    "session:s-12 / restart_keeper" -> Known(182 * mib)
     "session:s-12 / worker" -> Known(6 * mib)
     "session:s-07" -> Known(206_000)
     "daemon:core" -> Known(mib)
@@ -639,12 +639,14 @@ fn delta_for(label: String) -> Measurement {
 /// The owners page's data, built through `census/owners` so the unknown row
 /// and the overlap rule are the production ones.
 pub fn owners() -> model.OwnersModel {
+  let listed = list.length(census())
+
   owners_builder.build(
     cut(
       info(
         "census",
-        "process_info bundle v1, label read",
-        3412,
+        "process_info bundle v1, label read, top owners by heap capacity",
+        listed,
         3412,
         "processes",
       ),
@@ -655,6 +657,21 @@ pub fn owners() -> model.OwnersModel {
     idle_0(),
     delta_for,
   )
+  |> owners_builder.with_remainder(
+    procs: 3412 - listed,
+    heap_cap: Known(44 * mib),
+  )
+}
+
+/// The owners whose heap capacity moved most since the checkpoint, in the
+/// same figures the owners page shows for its groups.
+pub fn owner_movers() -> model.OwnerMovers {
+  model.OwnerMovers(since: "idle-0", rows: [
+    model.OwnerMover(label: "daemon:core", delta: Known(mib)),
+    model.OwnerMover(label: "session:s-12", delta: delta_for("session:s-12")),
+    model.OwnerMover(label: "session:s-07", delta: delta_for("session:s-07")),
+    model.OwnerMover(label: "unknown", delta: Known(0)),
+  ])
 }
 
 // ------------------------------------------------------------ processes
@@ -860,8 +877,8 @@ pub fn memory() -> model.MemoryModel {
       info: info(
         "allocator info",
         "erlang:system_info(allocator), carriers",
-        6,
-        6,
+        7,
+        7,
         "allocators",
       ),
       body: [
@@ -896,10 +913,16 @@ pub fn memory() -> model.MemoryModel {
           "capacity held for literals",
         ),
         category(
+          "other allocators carriers",
+          Known(284 * mib),
+          measure.Additive,
+          "temp, short-lived, standard and driver allocators together",
+        ),
+        category(
           "fragmentation",
           Missing(measure.UnsupportedOnPlatform),
-          measure.Overlapping("derived from carriers and use"),
-          "unused part of carriers",
+          measure.Overlapping("would be derived from carriers and use"),
+          "unused part of carriers; this platform does not report allocator use",
         ),
       ],
     ),
@@ -1091,8 +1114,8 @@ pub fn probes() -> model.ProbesModel {
         cost: capture.ProbeCost(
           probe: "p-40",
           enabled: ["call_time"],
-          events: Known(18_204),
-          collector_reductions: Known(2_100_000),
+          events: measure.NotApplicable,
+          collector_reductions: measure.NotApplicable,
           bytes: Known(1_400_000),
           wall_ms: Known(30_004),
         ),
@@ -1177,12 +1200,12 @@ pub fn profile() -> Result(model.ProfileModel, String) {
         achieved_ms: Some(20),
         coverage: measure.Coverage(
           scope: "samples over 2 targets",
-          requested: 10_000,
-          achieved: 9812,
+          requested: 12_000,
+          achieved: profile.total(base, column),
           outcome: measure.Partial(reason: measure.Truncated(
             reason: measure.BudgetReached,
           )),
-          dropped_events: Known(188),
+          dropped_events: Known(12_000 - profile.total(base, column)),
           in_flight_events: NotApplicable,
           unscanned_bytes: NotApplicable,
         ),
@@ -1196,7 +1219,6 @@ pub fn profile() -> Result(model.ProfileModel, String) {
     profile: applied.profile,
     column:,
     chain: applied.reports,
-    total_before: profile.total(base, column),
     stacks: model.HasStacks(layout:, graph: call_graph, dag: placed, peeks:),
     top: table,
   ))
@@ -1535,6 +1557,7 @@ pub fn feeds() -> List(msg.Feed) {
     [
       msg.FedStrip(strip()),
       msg.FedOverview(overview()),
+      msg.FedOwnerMovers(owner_movers()),
       msg.FedOwners(owners()),
       msg.FedProcesses(processes()),
       msg.FedProcessDetail(process_detail()),
