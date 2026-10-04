@@ -435,3 +435,21 @@ pub fn the_checkpoints_are_bounded_and_the_drop_is_audited_test() {
     })
     == 3
 }
+
+pub fn detaching_marks_the_pins_gone_at_once_test() {
+  let rig = harness.live(fixture.healthy, None)
+  let page = harness.page(rig, "alice", harness.all)
+  let token = pinned_token(page)
+
+  assert page.submit(seam.Detach) == seam.Done("detached")
+
+  // The hub would say the target was lost only after three empty passes. The
+  // pins are dead now, and a command naming one is refused by the gate
+  // without a request going to the agent.
+  let assert [seam.PinCard(status: seam.PinGone(_), ..)] = page.pins()
+
+  let _ = fixture.drain(rig.seen, 50)
+
+  assert mentions([rejected(page.submit(seam.ReadProcess(token)))], "pin")
+  assert fixture.drain(rig.seen, 50) == []
+}

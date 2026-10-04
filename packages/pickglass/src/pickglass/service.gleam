@@ -352,30 +352,34 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
 
     Polled(pulled) -> actor.continue(finish_poll(state, pulled))
 
-    // The hub reported the target gone: every pin is dead from here on, and
-    // so is every probe the agent was running.
-    TargetGone(hub.TargetLost(reason)) -> {
-      audit.append(
-        state.config.audit,
-        audit.Host(state.config.clock(), audit.PinsInvalidated(reason)),
-      )
-
-      actor.continue(
-        State(
-          ..state,
-          gate: gate.target_lost(state.gate, reason, state.config.clock()),
-          probes: list.map(state.probes, fn(probe) {
-            case probe_book.is_running(probe) {
-              True ->
-                probe_book.finish_lost(probe, reason, state.config.clock())
-              False -> probe
-            }
-          }),
-        ),
-      )
-    }
+    // The hub reported the target gone.
+    TargetGone(hub.TargetLost(reason)) ->
+      actor.continue(lose_target(state, reason))
     TargetGone(hub.Observed(_)) -> actor.continue(state)
   }
+}
+
+// Every pin is dead from here on, and so is every probe the agent was
+// running: a later command naming a pin is denied by the gate before it
+// reaches the link.
+fn lose_target(state: State, reason: String) -> State {
+  let now = state.config.clock()
+
+  audit.append(
+    state.config.audit,
+    audit.Host(now, audit.PinsInvalidated(reason)),
+  )
+
+  State(
+    ..state,
+    gate: gate.target_lost(state.gate, reason, now),
+    probes: list.map(state.probes, fn(probe) {
+      case probe_book.is_running(probe) {
+        True -> probe_book.finish_lost(probe, reason, now)
+        False -> probe
+      }
+    }),
+  )
 }
 
 fn pin_card(pin: gate.Pin) -> seam.PinCard {
@@ -532,7 +536,13 @@ fn apply(
       seam.StacksStopped(snapshot),
     )
 
-    exec.DetachRequested -> #(state, seam.Done("detached"))
+    // The agent is told to go, and nothing the viewer holds is valid against
+    // it from here. Waiting for the hub to notice would leave three passes
+    // in which commands pass the gate and each wait out the agent's deadline.
+    exec.DetachRequested -> #(
+      lose_target(state, "detached"),
+      seam.Done("detached"),
+    )
 
     exec.NotAnAgentCommand -> follow_up(state, follow, now)
 
