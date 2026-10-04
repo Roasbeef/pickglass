@@ -1,0 +1,19 @@
+name = "pickglass_agent"
+version = "0.1.0"
+licences = ["Apache-2.0"]
+description = "The dependency-free agent pickglass pushes into a running BEAM node."
+target = "erlang"
+
+gleam = ">= 1.18.0"
+
+repository = { type = "github", user = "Roasbeef", repo = "pickglass" }
+
+# The agent is loaded into someone else's VM. Any dependency here would be
+# loaded there too and would replace the target's own copy of the same
+# module, so this table stays empty. `make check` proves it with a beam
+# import check, not by trust.
+[dependencies]
+
+[dev_dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleeunit = ">= 1.0.0 and < 2.0.0"
