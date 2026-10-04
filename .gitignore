@@ -1,4 +1,9 @@
-build/
+# Build output only: Gleam writes it at each package root. A bare `build/`
+# would also hide a source module that happens to live in a `build/`
+# directory under `src/`, which is how one went missing from a commit.
+/build/
+/packages/*/build/
+/tools/*/build/
 erl_crash.dump
 *.beam
 *.ez
