@@ -202,6 +202,24 @@ pub fn a_stack_reply_naming_a_missing_frame_is_an_errored_probe_test() {
     == measure.Errored("a sampled stack names a frame the agent did not list")
 }
 
+// The real data shape of loom's session owners: one target is hibernating
+// and the agent reports its samples as a stack of no frames.
+pub fn a_sleeping_target_does_not_fail_the_whole_probe_test() {
+  let asleep =
+    wire.StacksSnapshot(..stacks(wire.ProbeFinished), stacks: [
+      wire.SampledStack(70, "running", [0, 1]),
+      wire.SampledStack(30, "waiting", []),
+    ])
+  let probe = probe_book.started(11, policy.Sampling, [], 0, 1000, 1)
+  let done = probe_book.finish_stacks(probe, asleep, 10)
+  let assert probe_book.Finished(outcome:, profile: Some(built), notes:, ..) =
+    done.state
+
+  assert outcome == measure.Complete
+  assert list.length(profile.samples(built)) == 2
+  assert list.any(notes, string.contains(_, "30 samples found a process"))
+}
+
 pub fn a_probe_that_hit_its_sample_budget_is_partial_and_says_so_test() {
   let cut =
     wire.StacksSnapshot(..stacks(wire.ProbeFinished), stop: wire.SamplingBudget)

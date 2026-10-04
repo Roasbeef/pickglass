@@ -23,12 +23,18 @@
 ////
 //// Two properties are held by construction. Every stack's count is
 //// positive, so the profile's total equals the sum of the input counts and
-//// a sample is never dropped silently; a stack with no frames or a count
-//// below one is refused with its position, because dropping it would make
-//// the total disagree with the number of samples taken. And a function is
-//// one function however many stacks it appears in: frames are interned by
-//// module, name and arity, and the first line information seen for a
-//// function is kept.
+//// a sample is never dropped silently; a count below one is refused with
+//// its position, because dropping it would make the total disagree with the
+//// number of samples taken. And a function is one function however many
+//// stacks it appears in: frames are interned by module, name and arity, and
+//// the first line information seen for a function is kept.
+////
+//// A process that reports no stack at all (one that is hibernating, which
+//// discards its stack, or one that is exiting) is a real sample, not a
+//// malformed one. Refusing it would fail a whole probe because one target
+//// slept, which is what happened to every loom session owner, so such a
+//// stack is drawn as one frame, `no_stack`, and the notes say how many
+//// samples it holds.
 
 import gleam/dict.{type Dict}
 import gleam/int
@@ -92,11 +98,19 @@ pub type Aggregated {
   )
 }
 
+/// The frame a stack with no frames is drawn as. The name says what the
+/// process reported, not a function it was running.
+pub const no_stack_frame =
+  Frame(
+    module: "(no stack)",
+    function: "hibernating_or_exiting",
+    arity: 0,
+    file: None,
+    line: None,
+  )
+
 /// Why a table could not become a profile.
 pub type Refusal {
-  /// A stack has no frames; its position is from zero.
-  EmptyStack(position: Int)
-
   /// A stack's count is below one; its position is from zero.
   NonPositiveCount(position: Int, count: Int)
 
@@ -122,13 +136,14 @@ pub type Refusal {
 pub fn build(input: Aggregated) -> Result(Profile, Refusal) {
   use _ <- result.try(check(input.stacks, 0))
 
-  let interned = intern(input.stacks)
+  let stacks = list.map(input.stacks, with_a_frame)
+  let interned = intern(stacks)
 
   profile.new(
     profile.SampledStacks(method: input.method, rate: input.rate_hz),
     [profile.ValueType(name: "samples", unit: unit.Count)],
     interned.functions,
-    list.map(input.stacks, fn(stack) {
+    list.map(stacks, fn(stack) {
       profile.Sample(
         frames: list.map(stack.frames, fn(frame) { id_of(interned.ids, frame) }),
         values: [stack.count],
@@ -146,11 +161,19 @@ fn check(stacks: List(Stack), position: Int) -> Result(Nil, Refusal) {
   case stacks {
     [] -> Ok(Nil)
     [stack, ..rest] ->
-      case stack.frames, stack.count >= 1 {
-        [], _ -> Error(EmptyStack(position))
-        _, False -> Error(NonPositiveCount(position:, count: stack.count))
-        _, True -> check(rest, position + 1)
+      case stack.count >= 1 {
+        False -> Error(NonPositiveCount(position:, count: stack.count))
+        True -> check(rest, position + 1)
       }
+  }
+}
+
+// A stack with no frames is drawn as the one `no_stack_frame`, so core's
+// rule that a sample has a frame holds without refusing the probe.
+fn with_a_frame(stack: Stack) -> Stack {
+  case stack.frames {
+    [] -> Stack(..stack, frames: [no_stack_frame])
+    [_, ..] -> stack
   }
 }
 
@@ -236,12 +259,26 @@ pub fn caveats(input: Aggregated) -> List(String) {
       <> "; deeper stacks are cut at the outer end.",
   ]
 
-  case input.completeness {
+  let cut = case input.completeness {
     AllStacks -> base
     CutShort(dropped_samples:) ->
       list.append(base, [
         int.to_string(dropped_samples)
         <> " samples were taken and are not in any stack.",
       ])
+  }
+
+  case list.filter(input.stacks, fn(stack) { stack.frames == [] }) {
+    [] -> cut
+    empty -> {
+      let samples = list.fold(empty, 0, fn(sum, stack) { sum + stack.count })
+
+      list.append(cut, [
+        int.to_string(samples)
+        <> " samples found a process with no stack, which is a hibernating or exiting process; they are drawn as "
+        <> profile.function_name(function_of(0, no_stack_frame))
+        <> ".",
+      ])
+    }
   }
 }

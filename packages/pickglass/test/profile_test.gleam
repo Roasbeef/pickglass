@@ -2,6 +2,7 @@
 
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import pickglass/counters_profile
 import pickglass/profile_from_stacks.{Aggregated, Frame, Stack}
 import pickglass_core/profile
@@ -146,14 +147,32 @@ pub fn frames_keep_their_order_innermost_first_test() {
     == ["loom@runtime:leaf/1", "loom@runtime:root/1"]
 }
 
-pub fn an_empty_stack_or_a_bad_count_is_refused_with_its_position_test() {
+pub fn a_bad_count_is_refused_with_its_position_test() {
   assert profile_from_stacks.build(
-      input([Stack([frame("a", None)], 1, None), Stack([], 3, None)]),
+      input([
+        Stack([frame("a", None)], 1, None),
+        Stack([frame("a", None)], 0, None),
+      ]),
     )
-    == Error(profile_from_stacks.EmptyStack(1))
+    == Error(profile_from_stacks.NonPositiveCount(position: 1, count: 0))
+}
 
-  assert profile_from_stacks.build(input([Stack([frame("a", None)], 0, None)]))
-    == Error(profile_from_stacks.NonPositiveCount(position: 0, count: 0))
+// A hibernating process reports an empty stack. Loom's session processes
+// hibernate, so refusing it failed every profile of a session owner.
+pub fn a_stack_with_no_frames_is_drawn_as_one_no_stack_frame_test() {
+  let stacks = [
+    Stack([frame("a", None)], 2, Some("running")),
+    Stack([], 3, Some("waiting")),
+  ]
+  let assert Ok(built) = profile_from_stacks.build(input(stacks))
+  let assert [_, asleep] = profile.samples(built)
+
+  assert list.map(asleep.frames, fn(id) { profile.name_of(built, id) })
+    == ["(no stack):hibernating_or_exiting/0"]
+  assert asleep.values == [3]
+  assert list.any(profile_from_stacks.caveats(input(stacks)), fn(line) {
+    string.contains(line, "3 samples found a process with no stack")
+  })
 }
 
 pub fn no_stacks_at_all_is_an_empty_profile_test() {

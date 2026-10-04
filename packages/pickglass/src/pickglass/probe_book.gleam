@@ -35,6 +35,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 import pickglass/calltrace_profile
 import pickglass/counters_profile
 import pickglass/profile_from_stacks
@@ -261,13 +262,15 @@ fn closed_finish_stacks(
       )
     Ok(input) ->
       case profile_from_stacks.build(input) {
-        Error(_) ->
+        Error(refusal) ->
           ProbeRecord(
             ..probe,
             state: Finished(
               ended_ms: now_ms,
               outcome: measure.Errored(
-                "the sampled stacks could not be read as a profile",
+                "the sampled stacks could not be read as a profile ("
+                <> string.inspect(refusal)
+                <> ")",
               ),
               cost:,
               profile: None,
