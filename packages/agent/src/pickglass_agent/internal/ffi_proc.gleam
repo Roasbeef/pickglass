@@ -56,6 +56,18 @@ pub type HeapLimit {
   ErrorLogger
 }
 
+/// The kind of collection `garbage_collect/2` runs. A major collection
+/// sweeps the whole heap, which is what makes the before and after sizes
+/// comparable.
+pub type GcType {
+  Major
+}
+
+/// Options for `garbage_collect/2`.
+pub type GcOption {
+  Type(kind: GcType)
+}
+
 /// The signal `exit/2` sends to end a worker.
 pub type ExitSignal {
   Kill
@@ -94,6 +106,11 @@ pub fn set_label(label: Term) -> Nil {
 
   Nil
 }
+
+/// A fresh reference, unique on the node and unguessable by other processes,
+/// used to quote a request in its answer.
+@external(erlang, "erlang", "make_ref")
+pub fn make_ref() -> Reference
 
 /// This process.
 @external(erlang, "erlang", "self")
@@ -143,6 +160,13 @@ pub fn heap_limit(words: Int) -> SpawnOption {
 /// arrives when it exits.
 @external(erlang, "erlang", "monitor")
 pub fn monitor(kind: MonitorKind, pid: Pid) -> Reference
+
+/// Collect a local process's garbage and wait until it has. Returns `False`
+/// for a process that has exited. The caller blocks for as long as the target
+/// takes to get to the request, so only a worker that has a deadline calls
+/// it.
+@external(erlang, "erlang", "garbage_collect")
+pub fn garbage_collect(pid: Pid, options: List(GcOption)) -> Bool
 
 /// Remove a monitor and any `DOWN` already queued for it.
 @external(erlang, "erlang", "demonitor")

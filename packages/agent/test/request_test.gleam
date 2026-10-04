@@ -54,6 +54,20 @@ pub fn supervision_and_system_decode_test() {
   assert decoded_request(envelope(#("system", 1))) |> is_error
 }
 
+pub fn gc_and_measure_clamp_their_waits_test() {
+  let token = request.Token("boot-1", 4)
+
+  assert decoded_request(envelope(#("gc", #("boot-1", 4), 1)))
+    == Ok(request.TargetedGc(token, request.min_gc_wait_ms))
+  assert decoded_request(envelope(#("gc", #("boot-1", 4), 999_999)))
+    == Ok(request.TargetedGc(token, request.max_gc_wait_ms))
+  assert decoded_request(envelope(#("measure", #("boot-1", 4), 1)))
+    == Ok(request.SelfMeasure(token, request.min_measure_wait_ms))
+  assert decoded_request(envelope(#("measure", #("boot-1", 4), 999_999)))
+    == Ok(request.SelfMeasure(token, request.max_measure_wait_ms))
+  assert decoded_request(envelope(#("gc", "<0.1.0>", 100))) |> is_error
+}
+
 pub fn process_detail_takes_a_token_test() {
   assert decoded_request(envelope(#("process_detail", #("boot-1", 4))))
     == Ok(request.ProcessDetail(request.Token("boot-1", 4)))

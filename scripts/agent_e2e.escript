@@ -78,6 +78,11 @@ scenario_link_killed(Target, Work) ->
               {<<"unavailable">>, Why} when is_binary(Why) -> true;
               _ -> false
           end),
+    {<<"gc">>, <<"intrusive">>, WorkText, <<"completed">>, _,
+     {<<"heap">>, _, _, _, _, _, _, _, _, _}, {<<"heap">>, _, _, _, _, _, _, _, _, _}} =
+        ask(Target, {<<"gc">>, {<<"boot-1">>, PinId}, 5000}),
+    check("a targeted collection reports the heap before and after", true),
+    scenario_measure(Target, WorkText),
     {<<"scheduler">>, <<"collecting">>, _} = ask(Target, {<<"scheduler">>, <<"on">>}),
     check("scheduler wall time is on", is_list(statistics_on(Target))),
     {<<"counters_started">>, ProbeId, Matched, _} =
@@ -104,6 +109,29 @@ scenario_link_killed(Target, Work) ->
           not atom_exists(Target, <<"zz_no_such_module_ever">>)),
     exit(Link, kill),
     torn_down(Target, Agent, Work, "after the link process died").
+
+%% Self-measure: a process that advertises the capability answers, and every
+%% way the exchange can go wrong is a typed refusal.
+scenario_measure(Target, WorkText) ->
+    Good = erpc:call(Target, pg_e2e_measurable, start, [good]),
+    Bad = erpc:call(Target, pg_e2e_measurable, start, [bad]),
+    Silent = erpc:call(Target, pg_e2e_measurable, start, [silent]),
+    Pin = fun(P) ->
+              {<<"pinned">>, <<"boot-1">>, Id, _} = ask(Target, {<<"pin">>, pid_text(Target, P)}),
+              {<<"boot-1">>, Id}
+          end,
+    {<<"measure">>, _, _, [{<<"callback">>, 120, <<"words">>}]} =
+        ask(Target, {<<"measure">>, Pin(Good), 2000}),
+    check("a measurable process answers its own measurement", true),
+    {<<"error">>, <<"bad_reply">>, _} = ask(Target, {<<"measure">>, Pin(Bad), 2000}),
+    check("a reply that is not readings is refused", true),
+    {<<"error">>, <<"measure_deadline">>, _} = ask(Target, {<<"measure">>, Pin(Silent), 200}),
+    check("a process that does not answer is a deadline refusal", true),
+    {<<"pinned">>, <<"boot-1">>, WId, WorkText} = ask(Target, {<<"pin">>, WorkText}),
+    {<<"error">>, <<"not_measurable">>, _} = ask(Target, {<<"measure">>, {<<"boot-1">>, WId}, 500}),
+    check("a process that does not advertise measure is not asked", true),
+    [exit(P, kill) || P <- [Good, Bad, Silent]],
+    ok.
 
 %% An explicit detach replies after the session is destroyed.
 scenario_detach(Target, Work) ->
@@ -234,14 +262,32 @@ pid_text(Target, Pid) ->
 
 %% A process on the target that calls a traced function in a loop.
 push_workload(Target) ->
-    Src = "-module(pg_e2e_work). -export([loop/0, work/1]). "
-          "loop() -> work(100), receive after 1 -> ok end, loop(). "
-          "work(0) -> ok; work(N) -> lists:sort([3,2,1]), work(N-1). ",
+    Work = load_source(Target, "pg_e2e_work",
+        "-module(pg_e2e_work). -export([loop/0, work/1]). "
+        "loop() -> work(100), receive after 1 -> ok end, loop(). "
+        "work(0) -> ok; work(N) -> lists:sort([3,2,1]), work(N-1). "),
+    _ = load_source(Target, "pg_e2e_measurable",
+        "-module(pg_e2e_measurable). -export([start/1]). "
+        "start(Mode) -> spawn(fun() -> "
+        "  proc_lib:set_label({pickglass_owner, 1, [], <<\"measurable\">>, [<<\"measure\">>]}), "
+        "  loop(Mode) end). "
+        "loop(Mode) -> receive "
+        "  {pickglass_measure, _Budget, ReplyTo, Ref} -> "
+        "    case Mode of "
+        "      good -> ReplyTo ! {pickglass_measure_reply, Ref, [{<<\"callback\">>, 120, <<\"words\">>}]}; "
+        "      bad -> ReplyTo ! {pickglass_measure_reply, Ref, [{<<\"x\">>, <<\"nope\">>, <<\"words\">>}]}; "
+        "      silent -> ok "
+        "    end, loop(Mode) "
+        "end. "),
+    erpc:call(Target, erlang, spawn, [Work, loop, []]).
+
+%% Compile a module from source text and load it into the target.
+load_source(Target, Name, Src) ->
     {ok, Tokens, _} = erl_scan:string(Src),
     Forms = [begin {ok, F} = erl_parse:parse_form(T), F end || T <- split_forms(Tokens)],
     {ok, Mod, Bin} = compile:forms(Forms, [binary]),
-    {module, Mod} = erpc:call(Target, code, load_binary, [Mod, "pg_e2e_work.erl", Bin]),
-    erpc:call(Target, erlang, spawn, [Mod, loop, []]).
+    {module, Mod} = erpc:call(Target, code, load_binary, [Mod, Name ++ ".erl", Bin]),
+    Mod.
 
 split_forms(Tokens) -> split_forms(Tokens, [], []).
 split_forms([], [], Acc) -> lists:reverse(Acc);

@@ -50,6 +50,7 @@ import pickglass_agent/internal/ffi_term.{
 import pickglass_agent/internal/ffi_vm
 import pickglass_agent/internal/seq
 import pickglass_agent/janitor
+import pickglass_agent/measure
 import pickglass_agent/owner
 import pickglass_agent/reply.{type Failure, Failure}
 import pickglass_agent/request.{type Envelope, type Token, Envelope}
@@ -338,6 +339,10 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
       process_detail(state, reply_to, reference, token)
     request.Supervision(max_scanned, max_edges) ->
       supervision_request(state, reply_to, reference, max_scanned, max_edges)
+    request.TargetedGc(token, deadline_ms) ->
+      targeted_gc(state, reply_to, reference, token, deadline_ms)
+    request.SelfMeasure(token, budget_ms) ->
+      self_measure(state, reply_to, reference, token, budget_ms)
     request.SystemReport ->
       start_worker(state, reply_to, reference, "system", read_deadline_ms, fn() {
         reply.system(system.read())
@@ -434,6 +439,33 @@ fn start_worker(
   deadline_ms: Int,
   compute: fn() -> Term,
 ) -> Next(State) {
+  start_process(state, reply_to, reference, kind, deadline_ms, fn() {
+    let #(pid, monitor) =
+      ffi_proc.spawn_opt(
+        fn() {
+          owner.claim_self()
+          reply.send(reply_to, reference, compute())
+        },
+        [ffi_proc.Monitor, ffi_proc.heap_limit(worker_heap_words)],
+      )
+
+    Ok(#(pid, monitor))
+  })
+}
+
+// Registers a process the agent started for one request, whatever way it
+// was started. `launch` returns the process and a monitor on it, or `Error`
+// when it could not be started. The agent keeps the process in `workers` so
+// that its deadline, its abnormal exit and the agent's own teardown all end
+// in a reply or a kill.
+fn start_process(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  kind: String,
+  deadline_ms: Int,
+  launch: fn() -> Result(#(Pid, Reference), Nil),
+) -> Next(State) {
   case seq.length(state.workers) >= max_workers {
     True ->
       refuse(
@@ -443,24 +475,110 @@ fn start_worker(
         "busy",
         "the agent is already running as many reads as it allows",
       )
-    False -> {
-      let #(pid, monitor) =
-        ffi_proc.spawn_opt(
-          fn() {
-            owner.claim_self()
-            reply.send(reply_to, reference, compute())
-          },
-          [ffi_proc.Monitor, ffi_proc.heap_limit(worker_heap_words)],
-        )
-      let deadline_at = ffi_proc.now_ms() + deadline_ms + worker_grace_ms
+    False ->
+      case launch() {
+        Error(Nil) ->
+          refuse(
+            state,
+            reply_to,
+            reference,
+            "start_failed",
+            "the agent could not start a process for " <> kind,
+          )
+        Ok(#(pid, monitor)) -> {
+          let deadline_at = ffi_proc.now_ms() + deadline_ms + worker_grace_ms
 
-      Noreply(
-        State(..state, workers: [
-          Worker(pid, monitor, reply_to, reference, kind, deadline_at),
-          ..state.workers
-        ]),
-      )
+          Noreply(
+            State(..state, workers: [
+              Worker(pid, monitor, reply_to, reference, kind, deadline_at),
+              ..state.workers
+            ]),
+          )
+        }
+      }
+  }
+}
+
+// A targeted collection runs in a worker for the same reason a detail read
+// does: the collection is a signal to a process that may be slow to handle
+// it. The worker reads the heap, collects and waits, and reads again; the
+// collection call blocks until the target has collected, so the deadline is
+// the worker's. A target that never gets to it is a `deadline` refusal.
+fn targeted_gc(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  token: Token,
+  deadline_ms: Int,
+) -> Next(State) {
+  case find_pin(state, token) {
+    Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
+    Ok(entry) ->
+      start_worker(state, reply_to, reference, "gc", deadline_ms, fn() {
+        collect(entry.pid)
+      })
+  }
+}
+
+fn collect(pid: Pid) -> Term {
+  let started = ffi_proc.now_ms()
+  let before = detail.read_heap(pid)
+
+  case before {
+    Error(Nil) -> collected(pid, "target_gone", started, before, Error(Nil))
+    Ok(_) -> {
+      let outcome = case
+        ffi_proc.garbage_collect(pid, [ffi_proc.Type(ffi_proc.Major)])
+      {
+        True -> "completed"
+        False -> "target_gone"
+      }
+
+      collected(pid, outcome, started, before, detail.read_heap(pid))
     }
+  }
+}
+
+fn collected(
+  pid: Pid,
+  outcome: String,
+  started: Int,
+  before: Result(detail.Heap, Nil),
+  after: Result(detail.Heap, Nil),
+) -> Term {
+  reply.collection(
+    ffi_term.pid_text(pid),
+    outcome,
+    ffi_proc.now_ms() - started,
+    before,
+    after,
+  )
+}
+
+// A self-measurement runs in a helper gen_server, because the reply is a
+// message and the agent has nothing to receive it with that does not also
+// block its own teardown.
+fn self_measure(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  token: Token,
+  budget_ms: Int,
+) -> Next(State) {
+  case find_pin(state, token) {
+    Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
+    Ok(entry) ->
+      start_process(state, reply_to, reference, "measure", budget_ms, fn() {
+        case
+          measure.start(
+            measure.Config(entry.pid, reply_to, reference, budget_ms),
+            worker_heap_words,
+          )
+        {
+          Ok(pid) -> Ok(#(pid, ffi_proc.monitor(ffi_proc.Process, pid)))
+          Error(Nil) -> Error(Nil)
+        }
+      })
   }
 }
 

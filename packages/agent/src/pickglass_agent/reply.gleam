@@ -328,3 +328,51 @@ fn carrier_row(row: system.CarrierRow) -> Term {
     row.unscanned_bytes,
   ))
 }
+
+/// The answer to `measure`: the target, how long it took to answer and its
+/// readings, already validated by `measure.valid_readings`.
+pub fn measured(pid_text: String, elapsed_ms: Int, readings: Term) -> Term {
+  ffi_term.coerce(#("measure", pid_text, elapsed_ms, readings))
+}
+
+/// The answer to `gc`: whether the collection finished, how long it took and
+/// the process's heap before and after. A reading is `Error(Nil)` when the
+/// process could not be read, which is how a process that exited during the
+/// collection shows. The class is always `intrusive`: the target stops while
+/// it collects.
+pub fn collection(
+  pid_text: String,
+  outcome: String,
+  elapsed_ms: Int,
+  before: Result(detail.Heap, Nil),
+  after: Result(detail.Heap, Nil),
+) -> Term {
+  ffi_term.coerce(#(
+    "gc",
+    "intrusive",
+    pid_text,
+    outcome,
+    elapsed_ms,
+    heap_reading(before),
+    heap_reading(after),
+  ))
+}
+
+fn heap_reading(reading: Result(detail.Heap, Nil)) -> Term {
+  case reading {
+    Error(Nil) -> ffi_term.coerce(#("gone"))
+    Ok(heap) ->
+      ffi_term.coerce(#(
+        "heap",
+        heap.memory_bytes,
+        heap.total_heap_bytes,
+        heap.heap_bytes,
+        heap.heap_block_bytes,
+        heap.old_heap_bytes,
+        heap.old_heap_block_bytes,
+        heap.mbuf_bytes,
+        heap.stack_bytes,
+        heap.bin_vheap_bytes,
+      ))
+  }
+}

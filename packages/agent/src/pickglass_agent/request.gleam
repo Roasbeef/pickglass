@@ -24,6 +24,8 @@
 //// | one process in detail | `{<<"process_detail">>, Token}` |
 //// | parent edges over the node | `{<<"supervision">>, MaxScanned, MaxEdges}` |
 //// | node facts and allocator carriers | `{<<"system">>}` |
+//// | collect one process's garbage | `{<<"gc">>, Token, DeadlineMs}` |
+//// | ask a process to measure itself | `{<<"measure">>, Token, BudgetMs}` |
 //// | detach | `{<<"detach">>}` |
 ////
 //// `Targets` is `{<<"all">>}` or `{<<"pins">>, [{BootId, PinId}]}`. Numeric
@@ -44,6 +46,18 @@ pub const max_scan = 200_000
 
 /// The most edges one supervision walk returns.
 pub const max_edges = 10_000
+
+/// The shortest and longest wait for a targeted collection, in milliseconds.
+pub const min_gc_wait_ms = 100
+
+/// The longest wait for a targeted collection, in milliseconds.
+pub const max_gc_wait_ms = 10_000
+
+/// The shortest and longest wait for a self-measurement, in milliseconds.
+pub const min_measure_wait_ms = 50
+
+/// The longest wait for a self-measurement, in milliseconds.
+pub const max_measure_wait_ms = 5000
 
 /// The most rows one census returns.
 pub const max_top_k = 200
@@ -103,6 +117,8 @@ pub type Request {
   ProcessDetail(token: Token)
   Supervision(max_scanned: Int, max_edges: Int)
   SystemReport
+  TargetedGc(token: Token, deadline_ms: Int)
+  SelfMeasure(token: Token, budget_ms: Int)
   Detach
 }
 
@@ -193,6 +209,9 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "process_detail", 2 -> decode_token_request(term, ProcessDetail)
     "supervision", 3 -> decode_supervision(term)
     "system", 1 -> Ok(SystemReport)
+    "gc", 3 -> decode_wait(term, TargetedGc, min_gc_wait_ms, max_gc_wait_ms)
+    "measure", 3 ->
+      decode_wait(term, SelfMeasure, min_measure_wait_ms, max_measure_wait_ms)
     _, _ -> Error("unknown request or wrong number of fields")
   }
 }
@@ -255,6 +274,20 @@ fn decode_supervision(term: Term) -> Result(Request, String) {
   use edges <- fallible.then(integer(ffi_term.element(3, term), "max_edges"))
 
   Ok(Supervision(clamp(scanned, 1, max_scan), clamp(edges, 1, max_edges)))
+}
+
+// `{Tag, Token, WaitMs}` for the two requests that act on one pinned process
+// and wait for it, clamped to the request's own bounds.
+fn decode_wait(
+  term: Term,
+  build: fn(Token, Int) -> Request,
+  low: Int,
+  high: Int,
+) -> Result(Request, String) {
+  use token <- fallible.then(decode_token(ffi_term.element(2, term)))
+  use wait <- fallible.then(integer(ffi_term.element(3, term), "wait"))
+
+  Ok(build(token, clamp(wait, low, high)))
 }
 
 fn decode_probe(

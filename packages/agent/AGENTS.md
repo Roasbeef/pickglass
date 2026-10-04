@@ -121,12 +121,16 @@ TotalBytes, UsedBytes, UnscannedBytes}`; `InPool` is `true`/`false`, and
 
 **Targeted garbage collection (intrusive).** `{<<"gc">>, Token,
 DeadlineMs}` (100 to 10,000) gives `{<<"gc">>, <<"intrusive">>, PidText,
-Outcome, ElapsedMs, Before, After}`. `Outcome` is `<<"completed"|"deadline"|
+Outcome, ElapsedMs, Before, After}`. `Outcome` is `<<"completed"|
 "target_gone">>`. `Before` and `After` are `{<<"heap">>, MemoryBytes,
 TotalHeapBytes, HeapBytes, HeapBlockBytes, OldHeapBytes, OldHeapBlockBytes,
 MbufBytes, StackBytes, BinVheapBytes}` or `{<<"gone">>}`. The collection is a
-major `garbage_collect(Pid, [{async, Ref}])` that stops the target while it
-runs. Errors: `stale_pin`, `gc_limit` (two collections already pending).
+major `garbage_collect/2` that stops the target while it runs. It is called
+synchronously from a worker, not asynchronously from the agent, because the
+agent never blocks on a target: the worker's deadline is the request's
+deadline. A target that does not get to the collection in time is the
+`deadline` refusal, and the before reading is lost with the killed worker.
+Errors: `stale_pin`, `busy`, `deadline`, `gc_failed`.
 
 **Self-measure.** `{<<"measure">>, Token, BudgetMs}` (50 to 5,000) gives
 `{<<"measure">>, PidText, ElapsedMs, Readings}` with a reading `{Name,
@@ -135,8 +139,7 @@ the target `{pickglass_measure, BudgetMs, AgentPid, Ref}` and expects
 `{pickglass_measure_reply, Ref, [{Name, Value, Unit}]}` back; at most 32
 readings of printable ASCII names up to 64 bytes are kept. Only a process
 whose label advertises `<<"measure">>` is asked. Errors: `stale_pin`,
-`not_measurable`, `measure_limit`, `measure_deadline`, `target_gone`,
-`bad_reply`.
+`busy`, `not_measurable`, `measure_deadline`, `target_gone`, `bad_reply`.
 
 **Stack sampling probe.** `{<<"start_stacks">>, Tokens, RateHz, DurationMs,
 MaxSamples}` (1 to 16 tokens, `RateHz` 1 to 1,000 and cut to `1000 /
