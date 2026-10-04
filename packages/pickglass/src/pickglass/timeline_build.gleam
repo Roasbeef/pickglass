@@ -142,6 +142,7 @@ pub fn build_labelled(
         gaps: gaps_of(oldest, times, width),
         events: newest_events(probes, label_of),
         calls: newest_calls(probes, label_of),
+        exports: [],
       ))
     }
   }

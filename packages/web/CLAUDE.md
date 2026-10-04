@@ -38,7 +38,17 @@ component cannot navigate the browser without more script than the CSP allows.
 `PlanCard` has `chosen` and `adjust`; its dialog (`probes.plan_dialog`) is the
 same on both pages.
 
-`key.Key` is the only name a browser event may carry: 1 to 64 characters from
+The profile page opens on the samples taken on a scheduler
+(`ProfileModel.activity`, `msg.ChooseSamples`) and states the split; with none
+running it says every process was waiting and draws no chart. A plan card from a
+profile button offers "Trace calls instead" (at most four processes, modules
+typed in the plan form's field) and "Sample stacks instead". `TraceProcess`,
+`RecordProcess` and `RecordOwner` plan a call trace or a scheduling recording.
+`timeline_model` holds the Timeline page's types, including the scheduling and
+call timelines that `chart/activity` draws on a time axis of their own, and
+`ExportTrace` asks for their Chrome traces.
+
+`key.Key` is the only name a browser event may carry:`key.Key` is the only name a browser event may carry: 1 to 64 characters from
 a closed alphabet, issued by the viewer for rows, boxes, nodes, plans and
 checkpoints. Pids, module names and function names never travel from the
 browser.

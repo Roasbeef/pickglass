@@ -62,6 +62,7 @@ import pickglass_web/fmt
 import pickglass_web/key.{type Key}
 import pickglass_web/model
 import pickglass_web/msg
+import pickglass_web/timeline_model
 
 /// How many rows the processes page shows at once.
 pub const window_size = 100
@@ -1779,7 +1780,7 @@ fn timeline_feed(
       fn(pid) { pid <> label_for(rows, pid) },
     )
   {
-    Ok(page) -> [msg.FedTimeline(page)]
+    Ok(page) -> [msg.FedTimeline(timeline_model.TimelineModel(..page, exports: inputs.exports))]
     Error(_) -> []
   }
 }

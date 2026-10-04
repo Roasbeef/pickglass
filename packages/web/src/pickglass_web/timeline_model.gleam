@@ -193,5 +193,8 @@ pub type TimelineModel {
     events: Option(EventsTimeline),
     /// The newest call tree probe that kept call slices, likewise.
     calls: Option(CallsTimeline),
+    /// What the page was asked to export and what became of each request,
+    /// newest first.
+    exports: List(model.ExportNote),
   )
 }

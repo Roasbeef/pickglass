@@ -1500,6 +1500,7 @@ pub fn timeline() -> timeline_model.TimelineModel {
     ],
     events: None,
     calls: None,
+    exports: [],
   )
 }
 

@@ -38,6 +38,7 @@ import pickglass_web/state.{type UiState}
 import pickglass_web/timeline_model.{
   type CallsTimeline, type CoverageGap, type EventsTimeline, type TimelineModel,
 }
+import pickglass_web/view/profile as profile_view
 import pickglass_web/view/ui
 import pickglass_web/wire
 
@@ -47,6 +48,10 @@ pub fn view(data: TimelineModel, ui_state: UiState) -> Element(Msg) {
     polled_panel(data, ui_state),
     events_panel(data.events),
     calls_panel(data.calls),
+    case data.exports {
+      [] -> element.none()
+      notes -> profile_view.export_notes(notes)
+    },
   ])
 }
 

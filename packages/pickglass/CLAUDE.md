@@ -91,7 +91,15 @@ lapses, when the start fails, and when the probe ends; a pin the operator held
 first is never in `Held`. `seam.Page.profile` and `profile_notes` carry it to
 the pages, and `feeds.flow` is what every page but Probes draws above its body.
 
-Probes and profiles: `probe_book` is the viewer's record of each probe (running,
+the four probe kinds are run by `exec`. `calltrace_profile` turns a call tree
+into a `TracedCalls` profile (calls, inclusive and exclusive ns, drawn from
+exclusive) with the stop reason and drops as caveats; a scheduling probe has no
+profile and keeps its result as `probe_book.Detail`, which `to_records` writes as
+an `events` record and `timeline_build` draws. A pending profile plan can be
+re-planned by another `seam.ProfileMethod` over the pins it holds. Stack
+profiles default to running samples in pages, exports and compare;
+`pickglass profile` takes `--include-waiting`, and `--trace-calls --module`.
+Earlier: `probe_book`Probes and profiles: `probe_book` is the viewer's record of each probe (running,
 or finished with its profile, outcome and cost); `service` polls running
 probes once a second and takes a result into `counters_profile` before the
 agent discards it. `profile_from_stacks` turns an aggregated-stacks result

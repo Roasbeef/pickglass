@@ -667,6 +667,9 @@ pub fn a_confirmed_recording_asks_for_the_thresholds_test() {
   let assert [probe] = page.probes()
 
   assert probe.kind == policy.SchedulingGc
+
+  // The window is the duration the agent settled on, not its event budget.
+  assert probe.duration_ms == 10_000
 }
 
 // A node older than OTP 28 refuses a probe that sets the node-wide thresholds

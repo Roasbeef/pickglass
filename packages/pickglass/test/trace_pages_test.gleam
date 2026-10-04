@@ -456,6 +456,10 @@ pub fn a_recording_exports_as_a_chrome_trace_that_parses_test() {
   let events = parsed(file.body)
 
   assert label == "Scheduling trace"
+
+  // The page that asked is shown the link, since nothing else would say the
+  // button did anything.
+  assert timeline_of(state).exports == web_mount.exports_of(state)
   assert file.file_name == "probe-31.scheduling.trace.json"
   assert list.filter(events, fn(e) { e.0 == "X" })
     == [#("X", "run"), #("X", "gc major")]

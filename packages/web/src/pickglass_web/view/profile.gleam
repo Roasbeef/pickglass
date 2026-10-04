@@ -339,7 +339,16 @@ fn loss_text(losses: List(String)) -> String {
 // the format leaves out, or the reason the format cannot show this profile.
 // The link's address is the viewer's own ticket, which `key` limits to a
 // closed alphabet, so no text from the target is ever part of an address.
-fn export_notes(notes: List(model.ExportNote)) -> Element(Msg) {
+/// The exports the operator asked for: each a one-time link with what the
+/// format leaves out, or the reason it could not be made. The Timeline page
+/// draws the same list for its Chrome traces.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.export_notes(data.exports)
+/// ```
+pub fn export_notes(notes: List(model.ExportNote)) -> Element(Msg) {
   case notes {
     [] -> element.none()
     _ ->

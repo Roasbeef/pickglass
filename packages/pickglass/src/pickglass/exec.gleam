@@ -230,7 +230,7 @@ fn events_request(
       ask_deadline_ms,
     )
   {
-    Ok(wire.EventsStarted(probe_id, targets, _, duration, ..)) ->
+    Ok(wire.EventsStarted(probe_id, targets, duration, ..)) ->
       ProbeStarted(probe_id, targets, duration)
     Ok(other) -> Unexpected(string.inspect(other))
     Error(failure) -> Failed(failure)

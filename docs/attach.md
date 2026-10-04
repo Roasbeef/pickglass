@@ -61,6 +61,26 @@ functions, the coverage and the caveats. Samples are taken at reduction safe
 points, so time in long BIFs and NIFs is under-counted. A failure prints one
 line, `profile failed (code): reason`, and exits non-zero.
 
+By default only the samples taken while a process was running or runnable are
+counted, because on an idle node most samples find processes waiting in
+`receive` and the heaviest functions would be the waits. The summary says how
+the whole set split ("3,008 samples: 412 running/runnable, 2,596 waiting"), and
+`--include-waiting` counts all of them. If no sample caught a process running,
+the command says every process was waiting and writes no file; the Profile page
+does the same and offers the waiting samples with one button.
+
+To trace calls instead, name the modules: `pickglass profile --node app@127.0.0.1
+--top 3 --trace-calls --module my_app --seconds 5`. The agent traces calls to
+the named modules in at most four processes for at most ten seconds, stops at
+100,000 events or when its collector falls behind, and says so. The result is a
+call tree with exact call counts and times (exclusive time is what the views
+draw). Tracing every function, or a module every process calls such as `lists`,
+is refused. On the pages the same probes are planned from Probes, the Process
+page ("Trace calls…", "Record scheduling…"), a profile plan card ("Trace calls
+instead") and owner rows ("Record"). A recording draws each traced process's
+runs and garbage collections on the Timeline page with per-process totals;
+both probes export as Chrome traces.
+
 ## What a distributed node is
 
 A BEAM node can talk to other nodes: send them messages, call functions on

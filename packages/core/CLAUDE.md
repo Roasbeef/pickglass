@@ -84,6 +84,17 @@ top functions with flat and cumulative shares and an indented call tree.
 `policy.ProbeSpec` carries `rate_hz`; `sampling_rate_hz` is the rate the agent
 will run once its ceiling is shared between the targets.
 
+`profile/activity` splits stack samples by the process status the agent
+reports: `profile_from_stacks` keeps it as the `pickglass::status` label, an
+`Inclusion` (`OnSchedulerOnly` or `IncludeWaiting`) restricts a profile, and
+`split` counts running or runnable, waiting and unstated samples (a sample with
+no status is kept, never called idle). `trace_codec` writes and reads a call
+tree or events probe's result as JSON, and `capture.Events` carries it in an
+optional `traced` field beside the generic millisecond fields. `export/chrome_trace`
+has `events` and `calls` for the two probes' timelines, and `export/text`
+writes nanosecond columns as times. `policy` holds the agent's limits for call
+trees (four processes, ten seconds, eight modules) and the trace budgets.
+
 `wire` holds the agent's reply decoders and the request encoders. It grows
 additively: the original `Request` and the first-release records keep their
 shapes, new replies are new `Reply` variants, and the requests added later
