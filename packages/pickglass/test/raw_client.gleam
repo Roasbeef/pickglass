@@ -60,12 +60,25 @@ pub fn connect(port: Int) -> Conn {
   Conn(socket:, pending: <<>>)
 }
 
+// `gen_tcp:recv` answers `{error, closed}` when the peer closed the
+// connection and `{error, timeout}` when nothing arrived in time. The two
+// mean different things to a test, so the reason is kept as text.
+fn receive_why(conn: Conn, wait_ms: Int) -> Result(BitArray, String) {
+  let answer = tcp_recv(conn.socket, 0, wait_ms)
+
+  case decode.run(answer, decode.field(1, decode.bit_array, decode.success)) {
+    Ok(chunk) -> Ok(chunk)
+    Error(_) ->
+      Error(
+        decode.run(answer, decode.field(1, decode.dynamic, decode.success))
+        |> result.map(string.inspect)
+        |> result.unwrap(string.inspect(answer)),
+      )
+  }
+}
+
 fn receive(conn: Conn, wait_ms: Int) -> Result(BitArray, Nil) {
-  decode.run(
-    tcp_recv(conn.socket, 0, wait_ms),
-    decode.field(1, decode.bit_array, decode.success),
-  )
-  |> result.replace_error(Nil)
+  receive_why(conn, wait_ms) |> result.replace_error(Nil)
 }
 
 fn read_until_closed(conn: Conn, so_far: BitArray) -> BitArray {
@@ -160,9 +173,13 @@ pub fn upgrade(
   let _ = tcp_send(conn.socket, bit_array.from_string(text))
 
   case read_head(conn, <<>>) {
-    Error(Nil) -> Error(Reply(0, "", ""))
+    Error(why) -> {
+      let _ = tcp_close(conn.socket)
+
+      Error(Reply(0, "no response head: " <> why, ""))
+    }
     Ok(raw) -> {
-      let reply = parse_reply(result.unwrap(bit_array.to_string(raw), ""))
+      let reply = parse_reply(head_text(raw))
 
       case reply.status {
         101 -> Ok(Conn(..conn, pending: leftover(raw)))
@@ -176,6 +193,23 @@ pub fn upgrade(
   }
 }
 
+// The response head as text. The first segment can carry the first frame
+// after the blank line, and a frame is binary: the mount frame's length
+// bytes are not valid UTF-8. Decoding the whole segment then failed, which
+// left an empty head and a status of zero for an upgrade the server had
+// accepted. Only the bytes up to the blank line are text.
+fn head_text(raw: BitArray) -> String {
+  let head = case split_head(raw, 0) {
+    Ok(offset) -> bit_array.slice(raw, 0, offset) |> result.unwrap(raw)
+    Error(Nil) -> raw
+  }
+
+  case bit_array.to_string(head) {
+    Ok(text) -> text
+    Error(Nil) -> "unreadable head: " <> string.inspect(head)
+  }
+}
+
 // Read until the blank line that ends the response head has arrived. A
 // receive returns whatever the socket holds, and a server that writes the
 // status line and the headers in separate sends can have the first segment
@@ -183,15 +217,25 @@ pub fn upgrade(
 // were gave a status of zero and a refused upgrade that the server had never
 // refused. The wait applies to each receive, so a server that is slow to
 // answer is still told apart from one that answered in pieces.
-fn read_head(conn: Conn, so_far: BitArray) -> Result(BitArray, Nil) {
+//
+// A failure says which of three things happened. The server closed the
+// connection having sent nothing, the wait ran out having received nothing,
+// or bytes arrived that were not a complete head (those are returned as they
+// are, and the caller reports the status they carry).
+fn read_head(conn: Conn, so_far: BitArray) -> Result(BitArray, String) {
   case split_head(so_far, 0) {
     Ok(_) -> Ok(so_far)
     Error(Nil) ->
-      case receive(conn, 2000) {
+      case receive_why(conn, 2000) {
         Ok(chunk) -> read_head(conn, bit_array.append(so_far, chunk))
-        Error(Nil) ->
+        Error(why) ->
           case so_far {
-            <<>> -> Error(Nil)
+            <<>> ->
+              Error(case why {
+                "Closed" -> "closed by the server with no bytes sent"
+                "Timeout" -> "timed out after 2000 ms with no bytes received"
+                other -> other
+              })
             _ -> Ok(so_far)
           }
       }
