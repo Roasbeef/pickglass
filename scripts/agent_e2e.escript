@@ -1,5 +1,4 @@
 #!/usr/bin/env escript
-%%! -name pg_e2e_ctl@127.0.0.1 -setcookie pg_e2e_cookie -hidden
 %%% Integration test for the pushed agent.
 %%%
 %%% Starts a target node and a viewer node as peers, pushes the agent's beams
@@ -19,6 +18,11 @@
 -mode(compile).
 
 main([Ebin]) ->
+    %% The controller's name is unique per run, so two runs on one machine,
+    %% such as checks in two worktrees, do not collide on a fixed name.
+    {ok, _} = net_kernel:start(list_to_atom(node_name("pg_e2e_ctl")),
+                               #{name_domain => longnames, hidden => true}),
+    erlang:set_cookie(node(), pg_e2e_cookie),
     process_flag(trap_exit, true),
     Beams = beams(Ebin),
     {ok, TPeer, Target} = peer:start_link(#{name => node_name("pg_e2e_target"),
@@ -28,6 +32,7 @@ main([Ebin]) ->
     scenario_link_killed(Target, Work),
     scenario_detach(Target, Work),
     scenario_viewer_killed(Target, Work),
+    scenario_viewer_killed_tracing(Target, Work),
     scenario_attach_again(Target),
     peer:stop(TPeer),
     finish().
@@ -106,6 +111,9 @@ scenario_link_killed(Target, Work) ->
                        (_) -> false end, CRows)),
     scenario_counter_set(Target, PinId),
     scenario_stacks(Target, PinId),
+    scenario_calltrace(Target, PinId),
+    scenario_events(Target, PinId),
+    scenario_trace_floods(Target),
     {<<"error">>, <<"unknown_module">>, _} =
         ask(Target, {<<"start_counters">>, <<"zz_no_such_module_ever">>, <<"_">>,
                      {<<"all">>}, 1000}),
@@ -114,6 +122,10 @@ scenario_link_killed(Target, Work) ->
     check("a malformed request is refused", true),
     check("no atom was created from the unknown module name",
           not atom_exists(Target, <<"zz_no_such_module_ever">>)),
+    {<<"events_started">>, _, _, _, _, _, _, _} =
+        ask(Target, {<<"start_events">>, [{<<"boot-1">>, PinId}], 60000, 200000, 100, 0, 0}),
+    check("an events probe is running when the link process is killed",
+          length(sessions(Target)) >= 3),
     exit(Link, kill),
     torn_down(Target, Agent, Work, "after the link process died").
 
@@ -207,6 +219,252 @@ scenario_stacks(Target, PinId) ->
     check("a stopped probe is gone", true),
     ok.
 
+%% The call tree probe: it folds events into paths in the tracer, stops at its
+%% window and at its event budget, and its paths are the shape the stack probe
+%% uses, with call counts and inclusive and exclusive time.
+scenario_calltrace(Target, PinId) ->
+    heading("call tree probe"),
+    Pin = {<<"boot-1">>, PinId},
+    Patterns = [{<<"pg_e2e_work">>, <<"_">>}, {<<"pg_e2e_more">>, <<"_">>}],
+    %% The counters probe the caller left running takes one of the two slots.
+    {<<"calltrace_started">>, Id, 1, Matched, 600, 200000, 100} =
+        ask(Target, {<<"start_calltrace">>, [Pin], Patterns, 600, 200000, 100}),
+    check("a call tree probe matches the functions of both modules", Matched >= 3),
+    {<<"error">>, <<"probe_limit">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], Patterns, 600, 200000, 100}),
+    check("a second call tree probe is refused", true),
+    timer:sleep(250),
+    {<<"calltrace">>, Id, <<"running">>, <<"running">>, {_, _, Mid, _, _, _, _, _, _, _, _, _, _, _, _}, _, _, _} =
+        ask(Target, {<<"read_calltrace">>, Id}),
+    check("a running call tree probe can be read and has events", Mid > 0),
+    timer:sleep(700),
+    {<<"calltrace">>, Id, <<"finished">>, <<"deadline">>,
+     {<<"traced_call_return_to">>, Elapsed, Events, 200000, Dropped, InFlight, Peak, Limit, 0,
+      _Forced, Distinct, 0, 0, 0, Depth},
+     Frames, Paths, {Pids, Slices}} = ask(Target, {<<"read_calltrace">>, Id}),
+    io:format("       call tree: ~b events in ~b ms, ~b paths, peak queue ~b, ~b dropped, ~b in flight~n",
+              [Events, Elapsed, Distinct, Peak, Dropped, InFlight]),
+    check("the call tree probe stopped at its window", Elapsed >= 550 andalso Elapsed =< 1500),
+    check("the call tree probe folded events and kept none", Events > 100 andalso Peak =< Limit),
+    check("the call tree reports its depth bound", Depth >= 8),
+    check("the paths account for every distinct path", Distinct =:= length(Paths)),
+    check("the target is named", length(Pids) =:= 1 andalso is_binary(hd(Pids))),
+    NameOf = fun(I) -> {M, F, A, {<<"none">>}} = lists:nth(I + 1, Frames), {M, F, A} end,
+    PathNames = [{C, Inc, Exc, [NameOf(I) || I <- Is]} || {C, Inc, Exc, Is} <- Paths],
+    check("a path names work/1 under loop/0, leaf first",
+          lists:any(fun({C, _, _, [{<<"pg_e2e_work">>, <<"work">>, 1},
+                                   {<<"pg_e2e_work">>, <<"loop">>, 0}]}) -> C > 0;
+                       (_) -> false end, PathNames)),
+    check("a path names more/1 under loop/0, leaf first",
+          lists:any(fun({_, _, _, [{<<"pg_e2e_more">>, <<"more">>, 1},
+                                   {<<"pg_e2e_work">>, <<"loop">>, 0}]}) -> true;
+                       (_) -> false end, PathNames)),
+    check("self tail calls do not deepen a path: none is longer than loop/work",
+          lists:all(fun({_, _, _, Is}) -> length(Is) =< 2 end, Paths)),
+    check("inclusive time is at least exclusive time on every path",
+          lists:all(fun({_, Inc, Exc, _}) -> Inc >= Exc andalso Exc >= 0 end, Paths)),
+    check("the exclusive times fit inside the window",
+          lists:sum([Exc || {_, _, Exc, _} <- Paths]) =< (Elapsed + 50) * 1000000),
+    check("every frame index is in the table",
+          lists:all(fun({_, _, _, Is}) -> lists:all(fun(I) -> I >= 0 andalso I < length(Frames) end, Is) end,
+                    Paths)),
+    check("the timeline is bounded and its slices are inside the window",
+          length(Slices) =< 100 andalso length(Slices) > 0
+          andalso lists:all(fun({0, F, Start, Dur, D}) ->
+                                F < length(Frames) andalso Start >= 0 andalso Dur >= 0 andalso D >= 0;
+                               (_) -> false end, Slices)),
+    {<<"calltrace">>, Id, <<"finished">>, <<"deadline">>, _, _, _, _} =
+        ask(Target, {<<"stop_calltrace">>, Id}),
+    {<<"error">>, <<"no_such_probe">>, _} = ask(Target, {<<"read_calltrace">>, Id}),
+    check("a stopped call tree probe is gone", true),
+    {<<"error">>, <<"no_such_probe">>, _} = ask(Target, {<<"read_events">>, Id}),
+    check("a read of the wrong kind is no such probe", true),
+    %% The event budget is exact, and the tracer cuts the stream itself.
+    {<<"calltrace_started">>, Id2, 1, _, 5000, 500, 0} =
+        ask(Target, {<<"start_calltrace">>, [Pin], Patterns, 5000, 500, 0}),
+    wait_until(fun() ->
+        case ask(Target, {<<"read_calltrace">>, Id2}) of
+            {<<"calltrace">>, _, <<"finished">>, _, _, _, _, _} -> true;
+            _ -> false
+        end
+    end, 3000),
+    {<<"calltrace">>, Id2, <<"finished">>, <<"event_budget">>,
+     {_, Elapsed2, 500, 500, _, _, _, _, _, _, _, _, _, _, _}, _, _, {_, []}} =
+        ask(Target, {<<"read_calltrace">>, Id2}),
+    check("the call tree probe stops at its event budget, well before its window",
+          Elapsed2 < 3000),
+    {<<"calltrace">>, Id2, _, _, _, _, _, _} = ask(Target, {<<"stop_calltrace">>, Id2}),
+    {<<"error">>, <<"unknown_function">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], [{<<"pg_e2e_work">>, <<"zz_no_such_function">>}],
+                     500, 500, 0}),
+    {<<"error">>, <<"no_match">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], [{<<"pg_e2e_work">>, <<"loop">>}, {<<"pg_e2e_more">>, <<"loop">>}],
+                     500, 500, 0}),
+    {<<"error">>, <<"pattern_too_broad">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], [{<<"lists">>, <<"_">>}], 500, 500, 0}),
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask(Target, {<<"start_calltrace">>, [{<<"boot-1">>, 99999}], Patterns, 500, 500, 0}),
+    {<<"error">>, <<"bad_request">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin, Pin, Pin, Pin, Pin], Patterns, 500, 500, 0}),
+    AgentText = pid_text(Target, erpc:call(Target, erlang, whereis, [pickglass_agent])),
+    {<<"pinned">>, <<"boot-1">>, AgentPin, AgentText} = ask(Target, {<<"pin">>, AgentText}),
+    {<<"error">>, <<"agent_process">>, _} =
+        ask(Target, {<<"start_calltrace">>, [{<<"boot-1">>, AgentPin}], Patterns, 500, 500, 0}),
+    {<<"error">>, <<"agent_process">>, _} =
+        ask(Target, {<<"start_events">>, [{<<"boot-1">>, AgentPin}], 500, 500, 0, 0, 0}),
+    check("a probe over the agent's own process is refused", true),
+    check("a probe over an unknown, unmatched, too broad or stale target is refused", true),
+    check("a refused call tree probe leaves no session behind", length(sessions(Target)) =< 2),
+    ok.
+
+%% The scheduling and collection probe.
+scenario_events(Target, PinId) ->
+    heading("scheduling and collection probe"),
+    Pin = {<<"boot-1">>, PinId},
+    Supported = erpc:call(Target, erlang, function_exported, [trace, system, 3]),
+    {<<"events_started">>, Id, 1, 600, 200000, 50, LongGc, LongSched} =
+        ask(Target, {<<"start_events">>, [Pin], 600, 200000, 50, 2, 2}),
+    check("an events probe echoes its thresholds where the VM has them",
+          case Supported of true -> {LongGc, LongSched} =:= {2, 2}; false -> true end),
+    GcBurn = erpc:call(Target, erlang, spawn, [pg_e2e_gc, burn, []]),
+    timer:sleep(300),
+    {<<"events">>, Id, <<"running">>, <<"running">>, {_, _, MidEvents, _, _, _, _, _, _, _, _, _, _, _, _}, _, _, _} =
+        ask(Target, {<<"read_events">>, Id}),
+    check("a running events probe can be read and has events", MidEvents > 0),
+    timer:sleep(700),
+    {<<"events">>, Id, <<"finished">>, <<"deadline">>,
+     {<<"traced_running_gc">>, Elapsed, Events, 200000, _Dropped, _InFlight, _Peak, _Limit, 0,
+      _Unpaired, _SlicesDropped, LongSeen, _Strays, 2, 2},
+     Procs, Slices, Long} = ask(Target, {<<"read_events">>, Id}),
+    io:format("       events: ~b events in ~b ms, ~b slices, ~b long events~n",
+              [Events, Elapsed, length(Slices), LongSeen]),
+    check("the events probe stopped at its window", Elapsed >= 550 andalso Elapsed =< 1500),
+    [{ProcText, Runs, RunNs, Minor, Major, GcNs}] = Procs,
+    check("the target ran, and the run time is time on a scheduler",
+          is_binary(ProcText) andalso Runs > 10 andalso RunNs > 0
+          andalso RunNs =< (Elapsed + 50) * 1000000),
+    check("the target collected garbage", Minor + Major > 0 andalso GcNs >= 0),
+    check("the slices are bounded and name runs and collections",
+          length(Slices) =< 50 andalso length(Slices) > 0
+          andalso lists:all(fun({0, K, Start, Dur}) ->
+                                lists:member(K, [<<"run">>, <<"gc_minor">>, <<"gc_major">>])
+                                andalso Start >= 0 andalso Dur >= 0;
+                               (_) -> false end, Slices)),
+    case Supported of
+        true ->
+            check("a node-wide slow collection of an unpinned process is reported",
+                  lists:any(fun({<<"long_gc">>, P, Ms, Words}) ->
+                                    is_binary(P) andalso Ms >= 2 andalso Words >= 0;
+                               (_) -> false end, Long)),
+            ok;
+        false ->
+            check("an old VM refuses thresholds", true)
+    end,
+    _ = GcBurn,
+    {<<"events">>, Id, <<"finished">>, <<"deadline">>, _, _, _, _} =
+        ask(Target, {<<"stop_events">>, Id}),
+    {<<"error">>, <<"no_such_probe">>, _} = ask(Target, {<<"read_events">>, Id}),
+    check("a stopped events probe is gone", true),
+    %% The budget, exact.
+    {<<"events_started">>, Id2, 1, 5000, 100, 0, 0, 0} =
+        ask(Target, {<<"start_events">>, [Pin], 5000, 100, 0, 0, 0}),
+    wait_until(fun() ->
+        case ask(Target, {<<"read_events">>, Id2}) of
+            {<<"events">>, _, <<"finished">>, _, _, _, _, _} -> true;
+            _ -> false
+        end
+    end, 3000),
+    {<<"events">>, Id2, <<"finished">>, <<"event_budget">>, {_, Elapsed2, 100, 100, _, _, _, _, _, _, _, _, _, 0, 0},
+     _, _, []} = ask(Target, {<<"read_events">>, Id2}),
+    check("the events probe stops at its event budget", Elapsed2 < 3000),
+    {<<"events">>, Id2, _, _, _, _, _, _} = ask(Target, {<<"stop_events">>, Id2}),
+    check("a refused events probe leaves no session behind", length(sessions(Target)) =< 2),
+    ok.
+
+%% Floods: processes that emit events faster than the tracer can fold them.
+%% The tracer must watch its own mailbox and stop the probe with `overrun`
+%% instead of letting it grow, and the target must keep running.
+scenario_trace_floods(Target) ->
+    heading("flooded tracers"),
+    Spinners = erpc:call(Target, pg_e2e_flood, start, [spin, 4]),
+    Yielders = erpc:call(Target, pg_e2e_flood, start, [yielder, 4]),
+    Pin = fun(P) ->
+              {<<"pinned">>, <<"boot-1">>, I, _} = ask(Target, {<<"pin">>, pid_text(Target, P)}),
+              {<<"boot-1">>, I}
+          end,
+    SpinPins = [Pin(P) || P <- Spinners],
+    YieldPins = [Pin(P) || P <- Yielders],
+    {<<"calltrace_started">>, Id, 4, _, 5000, 200000, 0} =
+        ask(Target, {<<"start_calltrace">>, SpinPins, [{<<"pg_e2e_flood">>, <<"_">>}], 5000, 200000, 0}),
+    wait_until(fun() ->
+        case ask(Target, {<<"read_calltrace">>, Id}) of
+            {<<"calltrace">>, _, <<"finished">>, _, _, _, _, _} -> true;
+            _ -> false
+        end
+    end, 6000),
+    {<<"calltrace">>, Id, <<"finished">>, CStop,
+     {_, CElapsed, CEvents, _, CDropped, CInFlight, CPeak, CLimit, 0, _, _, _, _, _, _},
+     _, _, _} = ask(Target, {<<"read_calltrace">>, Id}),
+    io:format("       flooded call tree: stop ~s after ~b ms, ~b events, ~b in flight, ~b dropped, peak queue ~b~n",
+              [CStop, CElapsed, CEvents, CInFlight, CDropped, CPeak]),
+    %% Whether the tracer or the targets win depends on how many schedulers the
+    %% machine has: with few, the high priority tracer keeps up and the probe
+    %% spends its budget. Either way the bound held. The suspended tracer below
+    %% makes overrun certain.
+    check("a flooded call tree probe stops at its mailbox limit or its budget",
+          CStop =:= <<"overrun">> orelse CStop =:= <<"event_budget">>),
+    check("the flooded call tree probe stopped long before its window", CElapsed < 4000),
+    check("the flooded tracer's mailbox stayed within a few times its limit",
+          CPeak =< 4 * CLimit andalso CInFlight =< 4 * CLimit),
+    check("the call tree probe reports what it left unread", CDropped >= 0 andalso CEvents > 0),
+    {<<"calltrace">>, Id, _, _, _, _, _, _} = ask(Target, {<<"stop_calltrace">>, Id}),
+    %% A tracer that cannot keep up: suspended for a moment while the targets
+    %% flood it, it must find its mailbox past the limit when it resumes.
+    {<<"calltrace_started">>, Id3, 4, _, _, _, _} =
+        ask(Target, {<<"start_calltrace">>, SpinPins, [{<<"pg_e2e_flood">>, <<"_">>}], 5000, 200000, 0}),
+    Tracers = tracers(Target),
+    check("the call tree probe has a tracer process", length(Tracers) =:= 1),
+    [erpc:call(Target, sys, suspend, [T]) || T <- Tracers],
+    timer:sleep(30),
+    [erpc:call(Target, sys, resume, [T]) || T <- Tracers],
+    wait_until(fun() ->
+        case ask(Target, {<<"read_calltrace">>, Id3}) of
+            {<<"calltrace">>, _, <<"finished">>, _, _, _, _, _} -> true;
+            _ -> false
+        end
+    end, 6000),
+    {<<"calltrace">>, Id3, <<"finished">>, <<"overrun">>,
+     {_, SElapsed, SEvents, _, SDropped, SInFlight, _, SLimit, 0, _, _, _, _, _, _},
+     _, _, _} = ask(Target, {<<"read_calltrace">>, Id3}),
+    io:format("       suspended call tree: ~b ms, ~b events folded, ~b in flight at stop, ~b dropped~n",
+              [SElapsed, SEvents, SInFlight, SDropped]),
+    check("a tracer that falls behind stops with overrun and reports its backlog",
+          SInFlight > SLimit andalso SDropped >= SInFlight andalso SEvents =< 200000),
+    {<<"calltrace">>, Id3, _, _, _, _, _, _} = ask(Target, {<<"stop_calltrace">>, Id3}),
+    {<<"events_started">>, Id2, 4, _, _, _, _, _} =
+        ask(Target, {<<"start_events">>, YieldPins, 5000, 200000, 0, 0, 0}),
+    wait_until(fun() ->
+        case ask(Target, {<<"read_events">>, Id2}) of
+            {<<"events">>, _, <<"finished">>, _, _, _, _, _} -> true;
+            _ -> false
+        end
+    end, 6000),
+    {<<"events">>, Id2, <<"finished">>, EStop,
+     {_, EElapsed, EEvents, _, EDropped, EInFlight, EPeak, ELimit, 0, _, _, _, _, _, _},
+     _, _, _} = ask(Target, {<<"read_events">>, Id2}),
+    io:format("       flooded events: stop ~s after ~b ms, ~b events, ~b in flight, ~b dropped, peak queue ~b~n",
+              [EStop, EElapsed, EEvents, EInFlight, EDropped, EPeak]),
+    check("a flooded events probe reports overrun or spends its budget",
+          EStop =:= <<"overrun">> orelse EStop =:= <<"event_budget">>),
+    check("the flooded events tracer's mailbox stayed within a few times its limit",
+          EPeak =< 4 * ELimit andalso EInFlight =< 4 * ELimit),
+    {<<"events">>, Id2, _, _, _, _, _, _} = ask(Target, {<<"stop_events">>, Id2}),
+    check("the flooded targets are still running",
+          lists:all(fun(P) -> erpc:call(Target, erlang, is_process_alive, [P]) end, Spinners ++ Yielders)),
+    [exit(P, kill) || P <- Spinners ++ Yielders],
+    check("no trace session is left after the floods", length(sessions(Target)) =< 2),
+    ok.
+
 %% A probe that did not ask for allocation answers `none` and not zeros.
 ask_time_only_memory(Target, Pins) ->
     {<<"counters_started">>, Id, _, _} =
@@ -247,6 +505,12 @@ scenario_detach(Target, Work) ->
     {<<"counters_started">>, _, _, _} =
         ask(Target, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>, {<<"all">>}, 60000}),
     check("a probe over all processes is running", length(sessions(Target)) >= 2),
+    {<<"pinned">>, <<"boot-1">>, DPin, _} = ask(Target, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"calltrace_started">>, _, 1, _, _, _, _} =
+        ask(Target, {<<"start_calltrace">>, [{<<"boot-1">>, DPin}],
+                     [{<<"pg_e2e_work">>, <<"_">>}], 10000, 200000, 0}),
+    check("a call tree probe and a counters probe are both running",
+          length(sessions(Target)) >= 3),
     {<<"detached">>, <<"requested">>} = ask(Target, {<<"detach">>}),
     check("the session is already gone when detach replies", length(sessions(Target)) =:= 1),
     torn_down(Target, Agent, Work, "after detach"),
@@ -284,6 +548,34 @@ scenario_viewer_killed(Target, Work) ->
     After = erpc:call(Target, erlang, system_info, [process_count]),
     check("the target kept its processes (" ++ integer_to_list(Before) ++ " -> "
           ++ integer_to_list(After) ++ ")", abs(After - Before) =< 10).
+
+%% The viewer's OS process is killed while both event probes are tracing. The
+%% sessions, the tracers and the agent must all be gone, and the traced
+%% process must keep running.
+scenario_viewer_killed_tracing(Target, Work) ->
+    heading("viewer killed with SIGKILL while tracing"),
+    {ok, _VPeer, V} = peer:start(#{name => node_name("pg_e2e_viewer"),
+                                  args => ["-hidden", "-setcookie", "pg_e2e_cookie"]}),
+    VLink = erpc:call(V, erlang, spawn, [timer, sleep, [infinity]]),
+    {ok, Agent} = erpc:call(V, erpc, call,
+                            [Target, pickglass_agent@server, start,
+                             [{VLink, <<"boot-3">>, 30000}]]),
+    {<<"pinned">>, <<"boot-3">>, Pin, _} = ask(Target, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"calltrace_started">>, _, 1, _, _, _, _} =
+        ask(Target, {<<"start_calltrace">>, [{<<"boot-3">>, Pin}],
+                     [{<<"pg_e2e_work">>, <<"_">>}], 10000, 200000, 0}),
+    {<<"events_started">>, _, 1, _, _, _, _, _} =
+        ask(Target, {<<"start_events">>, [{<<"boot-3">>, Pin}], 60000, 200000, 0, 0, 0}),
+    timer:sleep(200),
+    check("both event probes have a session and a tracer", length(sessions(Target)) >= 3
+          andalso length(agent_processes(Target)) >= 3),
+    check("the traced process carries a session's trace flags",
+          lists:any(fun(S) -> {flags, F} = erpc:call(Target, trace, info, [S, Work, flags]), F =/= [] end,
+                    [S || S <- sessions(Target), S =/= {legacy, default}])),
+    OsPid = erpc:call(V, os, getpid, []),
+    _ = os:cmd("kill -9 " ++ OsPid),
+    torn_down(Target, Agent, Work, "after kill -9 of the viewer mid trace"),
+    ok.
 
 %% After a teardown the node must accept a fresh attach, including one that
 %% reloads the modules the previous agent removed.
@@ -329,6 +621,15 @@ agent_processes(Target) ->
     Label = {pickglass_owner, 1, [{<<"tool">>, <<"pickglass">>}], <<"agent">>},
     [P || P <- erpc:call(Target, erlang, processes, []),
           erpc:call(Target, erlang, process_info, [P, label]) =:= {label, Label}].
+
+%% The tracer processes of the agent's event probes, found by their initial
+%% call, which is how the agent starts them.
+tracers(Target) ->
+    [P || P <- agent_processes(Target),
+          case erpc:call(Target, proc_lib, initial_call, [P]) of
+              {pickglass_agent@tracer, init, _} -> true;
+              _ -> false
+          end].
 
 agent_modules_loaded(Target) ->
     [M || {M, _} <- erpc:call(Target, code, all_loaded, []),
@@ -389,6 +690,15 @@ push_workload(Target) ->
         "-module(pg_e2e_work). -export([loop/0, work/1]). "
         "loop() -> work(100), pg_e2e_more:more(3), receive after 1 -> ok end, loop(). "
         "work(0) -> ok; work(N) -> lists:sort([3,2,1]), work(N-1). "),
+    _ = load_source(Target, "pg_e2e_gc",
+        "-module(pg_e2e_gc). -export([burn/0]). "
+        "burn() -> L = lists:seq(1, 3000000), erlang:garbage_collect(), length(L). "),
+    _ = load_source(Target, "pg_e2e_flood",
+        "-module(pg_e2e_flood). -export([start/2, spin/0, yielder/0, hot/1]). "
+        "start(Kind, N) -> [spawn(pg_e2e_flood, Kind, []) || _ <- lists:seq(1, N)]. "
+        "spin() -> hot(1), spin(). "
+        "hot(X) -> X + 1. "
+        "yielder() -> erlang:yield(), yielder(). "),
     _ = load_source(Target, "pg_e2e_measurable",
         "-module(pg_e2e_measurable). -export([start/1]). "
         "start(Mode) -> spawn(fun() -> "
