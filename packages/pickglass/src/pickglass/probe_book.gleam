@@ -433,6 +433,34 @@ fn recorded(probe: ProbeRecord) -> ProbeRecord {
   }
 }
 
+/// Keep every running probe and the newest `keep` finished ones, from a list
+/// newest first, and say how many finished ones were let go. A finished probe
+/// holds a profile, so without a bound a long session grows by one per probe.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probe_book.bound(probes, 50)
+/// // -> #(kept, 3)
+/// ```
+pub fn bound(
+  probes: List(ProbeRecord),
+  keep: Int,
+) -> #(List(ProbeRecord), Int) {
+  let #(kept, dropped, _) =
+    list.fold(probes, #([], 0, 0), fn(state, probe) {
+      let #(kept, dropped, finished) = state
+
+      case is_running(probe), finished >= keep {
+        True, _ -> #([probe, ..kept], dropped, finished)
+        False, False -> #([probe, ..kept], dropped, finished + 1)
+        False, True -> #(kept, dropped + 1, finished)
+      }
+    })
+
+  #(list.reverse(kept), dropped)
+}
+
 /// The newest finished probe that has a profile, from a list newest first.
 ///
 /// ## Examples

@@ -19,6 +19,7 @@
 //// - `tail` reads the newest entries back, newest first.
 
 import gleam/erlang/process.{type Subject}
+import gleam/int
 import gleam/list
 import pickglass/ring.{type Ring}
 import pickglass_core/policy.{type AuditEntry}
@@ -71,6 +72,10 @@ pub type HostEvent {
 
   /// Pins were dropped because the target went away.
   PinsInvalidated(reason: String)
+
+  /// The oldest of a bounded list the service keeps were let go to make
+  /// room: `what` names the list, `count` how many.
+  RecordsDropped(what: String, count: Int)
 }
 
 /// A handle to the log actor.
@@ -185,5 +190,7 @@ fn describe_event(event: HostEvent) -> String {
     RequestMalformed(principal, reason) ->
       "request from " <> principal <> " refused: " <> reason
     PinsInvalidated(reason) -> "pins invalidated: " <> reason
+    RecordsDropped(what, count) ->
+      int.to_string(count) <> " oldest " <> what <> " dropped at the limit"
   }
 }

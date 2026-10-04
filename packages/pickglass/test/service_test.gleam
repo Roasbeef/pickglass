@@ -1,6 +1,7 @@
 import fixture
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -413,4 +414,24 @@ pub fn a_probe_is_recorded_with_the_duration_the_agent_ran_test() {
   let assert [probe] = page.probes()
 
   assert probe.duration_ms == 12_000
+}
+
+pub fn the_checkpoints_are_bounded_and_the_drop_is_audited_test() {
+  let rig = harness.live(fixture.healthy, None)
+  let page = harness.page(rig, "alice", harness.all)
+
+  list.repeat(Nil, service.max_marks + 3)
+  |> list.index_map(fn(_, n) { n + 1 })
+  |> list.each(fn(n) {
+    let assert seam.Done(_) =
+      page.submit(seam.Checkpoint("mark-" <> int.to_string(n)))
+
+    Nil
+  })
+
+  assert list.length(page.checkpoints()) == service.max_marks
+  assert list.count(harness.trail(rig), fn(line) {
+      string.contains(line, "1 oldest checkpoints dropped")
+    })
+    == 3
 }

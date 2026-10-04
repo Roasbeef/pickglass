@@ -1153,7 +1153,8 @@ fn policy_entry(entry: audit.Entry, _now: Int) -> policy.AuditEntry {
         decision: case event {
           audit.TicketRedeemed(_)
           | audit.SocketAdmitted(_)
-          | audit.DownloadServed(_) -> policy.Allowed
+          | audit.DownloadServed(_)
+          | audit.RecordsDropped(..) -> policy.Allowed
           audit.TicketRefused(_)
           | audit.RequestRefused(..)
           | audit.SocketRefused(_)

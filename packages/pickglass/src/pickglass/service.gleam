@@ -495,15 +495,17 @@ fn apply(
     )
 
     exec.ProbeStarted(probe_id, matched, deadline_ms) -> #(
-      State(
-        ..state,
-        probes: record_started(
-          state.probes,
-          command,
-          probe_id,
-          matched,
-          deadline_ms,
-          now,
+      keep_probes(
+        State(
+          ..state,
+          probes: record_started(
+            state.probes,
+            command,
+            probe_id,
+            matched,
+            deadline_ms,
+            now,
+          ),
         ),
       ),
       seam.ProbeStarted(int.to_string(probe_id), matched),
@@ -591,8 +593,12 @@ fn follow_up(state: State, follow: seam.Follow, now: Int) -> #(State, Reply) {
         list.first(hub.latest(state.config.hub)) |> option.from_result
       let checkpoint = capture.Checkpoint(name, agent_ns(state, now), now)
 
+      let all = [marks.take(checkpoint, newest), ..state.marks]
+
+      note_dropped(state, "checkpoints", list.length(all) - max_marks)
+
       #(
-        State(..state, marks: [marks.take(checkpoint, newest), ..state.marks]),
+        State(..state, marks: list.take(all, max_marks)),
         seam.Done("checkpoint recorded"),
       )
     }
@@ -698,6 +704,35 @@ fn record_started(
 // named it is closed with it.
 /// How many collection and self-measure results the service keeps.
 pub const max_results = 20
+
+/// How many finished probes the service keeps. A running probe is never
+/// dropped.
+pub const max_probes = 50
+
+/// How many checkpoints the service keeps.
+pub const max_marks = 50
+
+// Finished probes hold profiles, and every page copies the list out on each
+// update, so the list is bounded and what was let go is said in the audit
+// trail.
+fn keep_probes(state: State) -> State {
+  let #(kept, dropped) = probe_book.bound(state.probes, max_probes)
+
+  note_dropped(state, "probes", dropped)
+
+  State(..state, probes: kept)
+}
+
+fn note_dropped(state: State, what: String, count: Int) -> Nil {
+  case count > 0 {
+    True ->
+      audit.append(
+        state.config.audit,
+        audit.Host(state.config.clock(), audit.RecordsDropped(what:, count:)),
+      )
+    False -> Nil
+  }
+}
 
 fn remember(state: State, result: seam.ProcessResult) -> State {
   State(..state, results: list.take([result, ..state.results], max_results))

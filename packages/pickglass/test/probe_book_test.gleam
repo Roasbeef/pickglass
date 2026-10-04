@@ -115,3 +115,27 @@ pub fn finished_probes_survive_a_capture_round_trip_test() {
   assert cost == original_cost
   assert cost.probe == original_cost.probe
 }
+
+pub fn the_bound_drops_the_oldest_finished_probes_and_never_a_running_one_test() {
+  // Newest first: a running probe, then three finished ones, the oldest
+  // finished one last, and an old probe that is still running.
+  let finished = fn(id) {
+    probe_book.finish_lost(
+      probe_book.started(id, policy.Counters, ["lists"], 1000, 30_000, 2),
+      "gone",
+      2000,
+    )
+  }
+  let probes = [
+    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, 2),
+    finished(8),
+    finished(7),
+    finished(6),
+    probe_book.started(5, policy.Counters, ["lists"], 1000, 30_000, 2),
+  ]
+  let #(kept, dropped) = probe_book.bound(probes, 2)
+
+  assert list.map(kept, fn(probe) { probe.id }) == ["9", "8", "7", "5"]
+  assert dropped == 1
+  assert probe_book.bound(probes, 3) == #(probes, 0)
+}
