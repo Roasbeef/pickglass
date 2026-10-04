@@ -45,9 +45,17 @@ fn sampled() -> probe_book.ProbeRecord {
         depth_limit: 16,
         completeness: profile_from_stacks.AllStacks,
         stacks: [
-          Stack([frame("leaf"), frame("mid"), frame("root")], 6),
-          Stack([frame("other"), frame("mid"), frame("root")], 3),
-          Stack([frame("lone"), frame("root")], 1),
+          Stack(
+            [frame("leaf"), frame("mid"), frame("root")],
+            6,
+            Some("running"),
+          ),
+          Stack(
+            [frame("other"), frame("mid"), frame("root")],
+            3,
+            Some("running"),
+          ),
+          Stack([frame("lone"), frame("root")], 1, Some("running")),
         ],
       ),
     )
@@ -75,6 +83,7 @@ fn sampled() -> probe_book.ProbeRecord {
       profile: Some(built),
       notes: [],
     ),
+    detail: probe_book.NoDetail,
   )
 }
 

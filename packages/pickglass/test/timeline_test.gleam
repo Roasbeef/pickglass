@@ -8,7 +8,7 @@ import pickglass/timeline_build
 import pickglass_core/capture
 import pickglass_core/measure.{Known, Missing}
 import pickglass_core/policy
-import pickglass_web/model
+import pickglass_web/timeline_model
 
 fn ring() -> List(observation.Observation) {
   // Newest first, as the hub's ring returns it.
@@ -19,12 +19,15 @@ fn ring() -> List(observation.Observation) {
   ]
 }
 
-fn track(page: model.TimelineModel, label: String) -> model.Track {
+fn track(
+  page: timeline_model.TimelineModel,
+  label: String,
+) -> timeline_model.Track {
   let assert Ok(found) =
     list.find(page.tracks, fn(track) {
       case track {
-        model.CounterTrack(label: l, ..) | model.SpanTrack(label: l, ..) ->
-          l == label
+        timeline_model.CounterTrack(label: l, ..)
+        | timeline_model.SpanTrack(label: l, ..) -> l == label
       }
     })
 
@@ -38,7 +41,8 @@ pub fn an_empty_ring_has_no_timeline_test() {
 
 pub fn times_are_milliseconds_from_the_first_pass_test() {
   let assert Ok(page) = timeline_build.build(ring(), [], [], 2000, 6000)
-  let assert model.CounterTrack(steps:, ..) = track(page, "process count")
+  let assert timeline_model.CounterTrack(steps:, ..) =
+    track(page, "process count")
 
   assert list.map(steps, fn(step) { step.at_ms }) == [0, 2000, 4000]
   assert list.map(steps, fn(step) { step.value })
@@ -50,7 +54,7 @@ pub fn times_are_milliseconds_from_the_first_pass_test() {
 
 pub fn utilisation_is_the_change_between_passes_and_the_first_has_none_test() {
   let assert Ok(page) = timeline_build.build(ring(), [], [], 2000, 6000)
-  let assert model.CounterTrack(steps:, ..) =
+  let assert timeline_model.CounterTrack(steps:, ..) =
     track(page, "scheduler utilisation")
   let assert [first, second, ..] = steps
 
@@ -63,7 +67,7 @@ pub fn utilisation_is_the_change_between_passes_and_the_first_has_none_test() {
 
 pub fn the_run_queue_is_a_track_of_not_collected_words_test() {
   let assert Ok(page) = timeline_build.build(ring(), [], [], 2000, 6000)
-  let assert model.CounterTrack(steps:, ..) = track(page, "run queue")
+  let assert timeline_model.CounterTrack(steps:, ..) = track(page, "run queue")
 
   assert list.all(steps, fn(step) {
     step.value == Missing(measure.NotCollected)
@@ -72,7 +76,8 @@ pub fn the_run_queue_is_a_track_of_not_collected_words_test() {
 
 pub fn every_memory_category_has_a_track_in_bytes_test() {
   let assert Ok(page) = timeline_build.build(ring(), [], [], 2000, 6000)
-  let assert model.CounterTrack(steps:, ..) = track(page, "memory: total")
+  let assert timeline_model.CounterTrack(steps:, ..) =
+    track(page, "memory: total")
 
   assert list.map(steps, fn(step) { step.value })
     == [Known(1_002_000), Known(1_001_000), Known(1_000_000)]
@@ -85,9 +90,9 @@ pub fn checkpoints_and_probes_are_spans_on_the_same_axis_test() {
   let assert Ok(page) =
     timeline_build.build(ring(), [mark], [probe], 2000, 4500)
 
-  let assert model.SpanTrack(spans: checkpoints, ..) =
+  let assert timeline_model.SpanTrack(spans: checkpoints, ..) =
     track(page, "checkpoints")
-  let assert model.SpanTrack(spans: probes, ..) = track(page, "probes")
+  let assert timeline_model.SpanTrack(spans: probes, ..) = track(page, "probes")
 
   assert list.map(checkpoints, fn(span) { #(span.at_ms, span.label) })
     == [#(3000, "idle-0")]

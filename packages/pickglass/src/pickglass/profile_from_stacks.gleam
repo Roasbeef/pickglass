@@ -17,6 +17,10 @@
 //// that lists the outermost frame first is reversed by the mapping, not
 //// here.
 ////
+//// Each sample keeps the process status it was taken under as a label
+//// (`profile/activity`), so a view can show the samples on a scheduler apart
+//// from the ones waiting for a message.
+////
 //// Two properties are held by construction. Every stack's count is
 //// positive, so the profile's total equals the sum of the input counts and
 //// a sample is never dropped silently; a stack with no frames or a count
@@ -32,6 +36,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import pickglass_core/profile.{type Profile}
+import pickglass_core/profile/activity
 import pickglass_core/unit
 
 /// One frame of a sampled stack.
@@ -47,12 +52,18 @@ pub type Frame {
   )
 }
 
-/// One distinct stack and how many samples had exactly it.
+/// One distinct stack and how many samples had exactly it. The agent counts a
+/// stack once for each process status it was seen under, so a stack that a
+/// process held both while running and while waiting arrives as two.
 pub type Stack {
   Stack(
     /// The frames, innermost first.
     frames: List(Frame),
     count: Int,
+    /// The process status the samples were taken under, as the agent
+    /// reported it (`running`, `runnable`, `waiting`, ...). `None` for a
+    /// stack that carries none.
+    status: Option(String),
   )
 }
 
@@ -105,7 +116,7 @@ pub type Refusal {
 ///   rate_hz: 50,
 ///   depth_limit: 16,
 ///   completeness: AllStacks,
-///   stacks: [Stack([Frame("lists", "map", 2, None, None)], 3)],
+///   stacks: [Stack([Frame("lists", "map", 2, None, None)], 3, Some("running")],
 /// ))
 /// ```
 pub fn build(input: Aggregated) -> Result(Profile, Refusal) {
@@ -121,7 +132,10 @@ pub fn build(input: Aggregated) -> Result(Profile, Refusal) {
       profile.Sample(
         frames: list.map(stack.frames, fn(frame) { id_of(interned.ids, frame) }),
         values: [stack.count],
-        labels: [],
+        labels: case stack.status {
+          Some(status) -> [activity.status_label(status)]
+          None -> []
+        },
       )
     }),
   )

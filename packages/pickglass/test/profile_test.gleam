@@ -82,9 +82,10 @@ pub fn the_profile_total_equals_the_sum_of_the_counts_test() {
     Stack(
       [frame("leaf", Some(10)), frame("mid", Some(20)), frame("root", None)],
       7,
+      None,
     ),
-    Stack([frame("leaf", Some(11)), frame("root", None)], 5),
-    Stack([frame("other", None)], 1),
+    Stack([frame("leaf", Some(11)), frame("root", None)], 5, None),
+    Stack([frame("other", None)], 1, None),
   ]
   let assert Ok(built) = profile_from_stacks.build(input(stacks))
   let assert Ok(samples) = profile.column_named(built, "samples")
@@ -96,8 +97,8 @@ pub fn the_profile_total_equals_the_sum_of_the_counts_test() {
 
 pub fn a_function_is_one_function_in_every_stack_test() {
   let stacks = [
-    Stack([frame("leaf", Some(10)), frame("root", None)], 1),
-    Stack([frame("leaf", Some(99)), frame("root", None)], 1),
+    Stack([frame("leaf", Some(10)), frame("root", None)], 1, None),
+    Stack([frame("leaf", Some(99)), frame("root", None)], 1, None),
   ]
   let assert Ok(built) = profile_from_stacks.build(input(stacks))
 
@@ -120,6 +121,7 @@ pub fn line_precision_follows_what_the_frame_carried_test() {
         Frame("m", "bare", 0, None, None),
       ],
       1,
+      None,
     ),
   ]
   let assert Ok(built) = profile_from_stacks.build(input(stacks))
@@ -136,7 +138,7 @@ pub fn line_precision_follows_what_the_frame_carried_test() {
 }
 
 pub fn frames_keep_their_order_innermost_first_test() {
-  let stacks = [Stack([frame("leaf", None), frame("root", None)], 2)]
+  let stacks = [Stack([frame("leaf", None), frame("root", None)], 2, None)]
   let assert Ok(built) = profile_from_stacks.build(input(stacks))
   let assert [sample] = profile.samples(built)
 
@@ -146,11 +148,11 @@ pub fn frames_keep_their_order_innermost_first_test() {
 
 pub fn an_empty_stack_or_a_bad_count_is_refused_with_its_position_test() {
   assert profile_from_stacks.build(
-      input([Stack([frame("a", None)], 1), Stack([], 3)]),
+      input([Stack([frame("a", None)], 1, None), Stack([], 3, None)]),
     )
     == Error(profile_from_stacks.EmptyStack(1))
 
-  assert profile_from_stacks.build(input([Stack([frame("a", None)], 0)]))
+  assert profile_from_stacks.build(input([Stack([frame("a", None)], 0, None)]))
     == Error(profile_from_stacks.NonPositiveCount(position: 0, count: 0))
 }
 

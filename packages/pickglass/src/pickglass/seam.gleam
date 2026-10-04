@@ -122,9 +122,13 @@ pub type Request {
   Detach
 }
 
-/// The longest a one-click profile may name, mirrored from the agent's limit
-/// for one stack probe so a page never asks for more than it will run.
+/// The longest a one-click stack profile may name, mirrored from the agent's
+/// limit for one stack probe so a page never asks for more than it will run.
 pub const profile_limit = 16
+
+/// The longest a one-click call trace may name: the agent's limit for one
+/// call tree probe.
+pub const trace_limit = 4
 
 /// How long a one-click profile samples unless the plan card says otherwise.
 pub const profile_duration_ms = 10_000
@@ -132,6 +136,32 @@ pub const profile_duration_ms = 10_000
 /// How fast a one-click profile samples unless the plan card says otherwise,
 /// in samples per second per process.
 pub const profile_rate_hz = 100
+
+/// The longest a one-click recording of scheduling and collections may name:
+/// the agent's limit for one events probe.
+pub const recording_limit = 8
+
+/// How long a one-click recording runs unless the plan card says otherwise.
+pub const recording_duration_ms = 10_000
+
+/// How long a one-click call trace runs unless the plan card says otherwise.
+/// A trace sends one message per call, so its window is short.
+pub const trace_duration_ms = 5000
+
+/// How a profile button measures the processes it chose.
+pub type ProfileMethod {
+  /// Poll the stacks of the processes at this many samples per second each.
+  ByStacks(rate_hz: Int)
+
+  /// Trace the calls of these modules in the processes. The processes are
+  /// chosen first and the modules named by the operator, because the agent
+  /// will not trace every function of a node.
+  ByCalls(modules: List(String))
+
+  /// Record when the processes run on a scheduler and when they collect
+  /// garbage, as slices on a timeline.
+  ByEvents
+}
 
 /// A one-click profile. Unlike a `Request` it is not one command: pinning the
 /// processes that are not pinned and planning the probe over them are several
@@ -150,9 +180,25 @@ pub type ProfileRequest {
     rate_hz: Int,
   )
 
-  /// Plan the same processes again for another duration and rate, replacing
-  /// the pending plan a profile button made.
-  ReplanProfile(plan_id: String, duration_ms: Int, rate_hz: Int)
+  /// Pin the processes and plan a call trace of these modules over them. The
+  /// same rules as `PlanProfile`, with the call trace's limit of
+  /// `trace_limit` processes.
+  PlanCallTrace(
+    pids: List(String),
+    chosen: String,
+    duration_ms: Int,
+    modules: List(String),
+  )
+
+  /// Pin the processes and plan a scheduling and collection recording over
+  /// them. The same rules as `PlanProfile`, with the events probe's limit of
+  /// `recording_limit` processes.
+  PlanRecording(pids: List(String), chosen: String, duration_ms: Int)
+
+  /// Plan the same processes again for another duration and method, replacing
+  /// the pending plan a profile button made. A plan can change from stacks to
+  /// calls or back, and keeps the pins it holds.
+  ReplanProfile(plan_id: String, duration_ms: Int, method: ProfileMethod)
 }
 
 /// What the viewer remembers of a pending profile plan, for its card.
@@ -162,7 +208,9 @@ pub type ProfileNote {
     /// How the processes were chosen.
     chosen: String,
     duration_ms: Int,
-    rate_hz: Int,
+    method: ProfileMethod,
+    /// How many processes the plan names.
+    processes: Int,
   )
 }
 
@@ -186,6 +234,12 @@ pub type Reply {
 
   /// A stack probe stopped, with what it sampled.
   StacksStopped(snapshot: wire.StacksSnapshot)
+
+  /// A call tree probe stopped, with what it traced.
+  CalltraceStopped(snapshot: wire.CalltraceSnapshot)
+
+  /// A scheduling and collection probe stopped, with what it recorded.
+  EventsStopped(snapshot: wire.EventsSnapshot)
 
   /// A targeted collection ran, with the heap before and after.
   Collected(snapshot: wire.CollectionSnapshot)

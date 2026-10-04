@@ -113,7 +113,7 @@ pub fn an_owner_row_plans_a_profile_of_its_processes_test() {
 
   let assert [note] = page.profile_notes()
   assert note.chosen == "all 2 listed processes of session:s1"
-  assert note.rate_hz == seam.profile_rate_hz
+  assert note.method == seam.ByStacks(seam.profile_rate_hz)
   assert note.duration_ms == seam.profile_duration_ms
 }
 
@@ -280,4 +280,151 @@ pub fn the_choice_is_bounded_drawn_from_the_candidates_and_order_free_test() {
     list.any(candidates, fn(c) { c.pid_text == chosen })
   })
   assert list.unique(forward.pids) == forward.pids
+}
+
+// ---------------------------------------------------- tracing the processes
+
+fn spec_of(page: seam.Page) -> policy.ProbeSpec {
+  let assert [#(_, plan)] = page.plans()
+  let assert policy.StartProbe(spec:) = policy.plan_command(plan)
+
+  spec
+}
+
+// The detail page's "Trace calls…" pins the process and plans a call tree of
+// the modules over it, for the window a call trace is run for.
+pub fn the_trace_button_pins_and_plans_a_call_tree_of_one_process_test() {
+  let #(rig, page) = page_over([session(1), session(2)])
+  let _ = fixture.drain(rig.seen, 50)
+  let state =
+    web_mount.ask(
+      on(page, "process-detail"),
+      msg.TraceProcess(key.make(pid(2)), ["lists", "m@n"]),
+    )
+  let spec = spec_of(page)
+
+  assert web_mount.refusal_of(state) == None
+  assert list.contains(fixture.drain(rig.seen, 50), wire.AskPin(pid(2)))
+  assert spec.kind == policy.CallTree
+  assert spec.modules == ["lists", "m@n"]
+  assert spec.duration_ms == seam.trace_duration_ms
+  assert list.length(spec.targets) == 1
+
+  let assert [note] = page.profile_notes()
+
+  assert note.method == seam.ByCalls(["lists", "m@n"])
+}
+
+pub fn the_record_button_pins_and_plans_a_recording_of_one_process_test() {
+  let #(_, page) = page_over([session(1), session(2)])
+  let _ =
+    web_mount.ask(
+      on(page, "process-detail"),
+      msg.RecordProcess(key.make(pid(1))),
+    )
+  let spec = spec_of(page)
+
+  assert spec.kind == policy.SchedulingGc
+  assert spec.modules == []
+  assert spec.duration_ms == seam.recording_duration_ms
+}
+
+// An owner is recorded over up to eight of its processes, the busiest.
+pub fn an_owner_row_plans_a_recording_of_at_most_eight_processes_test() {
+  let rows = list.map(fixture.numbers(12), session)
+  let #(_, page) = page_over(rows)
+  let _ =
+    web_mount.ask(
+      on(page, "owners"),
+      msg.RecordOwner(key.make("owner:session:s1")),
+    )
+  let spec = spec_of(page)
+
+  assert spec.kind == policy.SchedulingGc
+  assert list.length(spec.targets) == seam.recording_limit
+
+  let assert [note] = page.profile_notes()
+
+  assert string.starts_with(
+    note.chosen,
+    "8 of 12 listed processes of session:s1, ",
+  )
+}
+
+pub fn recording_an_owner_with_no_live_processes_says_why_test() {
+  let #(_, page) = page_over([session(1)])
+  let state =
+    web_mount.ask(on(page, "owners"), msg.RecordOwner(key.make("unknown")))
+
+  assert page.plans() == []
+  assert web_mount.refusal_of(state)
+    == Some("the last pass lists no live process of the unknown owner")
+}
+
+// "Trace calls instead" on a pending stack profile keeps its pins and plans a
+// call tree over them; "sample stacks instead" goes back.
+pub fn a_pending_profile_is_swapped_between_stacks_and_calls_test() {
+  let #(rig, page) = page_over([session(1), session(2)])
+  let state =
+    web_mount.ask(
+      on(page, "owners"),
+      msg.ProfileOwner(key.make("owner:session:s1")),
+    )
+  let _ = fixture.drain(rig.seen, 50)
+  let assert [#(first, _)] = page.plans()
+  let plan_key = key.make("plan." <> first)
+
+  let state = web_mount.ask(state, msg.TraceCallsInstead(plan_key, ["lists"]))
+
+  assert web_mount.refusal_of(state) == None
+  assert spec_of(page).kind == policy.CallTree
+  assert spec_of(page).modules == ["lists"]
+  assert spec_of(page).duration_ms == seam.trace_duration_ms
+  assert fixture.drain(rig.seen, 50) == []
+
+  let assert [#(second, _)] = page.plans()
+  let state =
+    web_mount.ask(state, msg.SampleStacksInstead(key.make("plan." <> second)))
+
+  assert web_mount.refusal_of(state) == None
+  assert spec_of(page).kind == policy.Sampling
+  assert spec_of(page).rate_hz == seam.profile_rate_hz
+}
+
+// Five processes are too many for a call trace; the viewer says so and keeps
+// the stack profile the operator had.
+pub fn a_swap_the_agent_would_refuse_is_said_and_changes_nothing_test() {
+  let rows = list.map(fixture.numbers(5), session)
+  let #(_, page) = page_over(rows)
+  let state =
+    web_mount.ask(
+      on(page, "owners"),
+      msg.ProfileOwner(key.make("owner:session:s1")),
+    )
+  let assert [#(first, _)] = page.plans()
+  let state =
+    web_mount.ask(
+      state,
+      msg.TraceCallsInstead(key.make("plan." <> first), ["lists"]),
+    )
+
+  assert string.contains(
+    option.unwrap(web_mount.refusal_of(state), ""),
+    "at most 4 processes",
+  )
+  assert spec_of(page).kind == policy.Sampling
+}
+
+// A key that names no pending plan makes no request.
+pub fn a_swap_of_a_plan_that_is_gone_makes_no_request_test() {
+  let #(rig, page) = page_over([session(1)])
+  let _ = fixture.drain(rig.seen, 50)
+  let _ =
+    web_mount.ask(
+      on(page, "owners"),
+      msg.TraceCallsInstead(key.make("plan.gone"), ["lists"]),
+    )
+
+  assert page.plans() == []
+  assert fixture.drain(rig.seen, 50) == []
 }

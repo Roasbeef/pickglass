@@ -19,6 +19,7 @@ import pickglass_core/identity
 import pickglass_core/measure.{Known, Missing, NotApplicable}
 import pickglass_core/policy
 import pickglass_core/profile
+import pickglass_core/profile/activity
 import pickglass_core/wire
 import pickglass_web/model
 import pickglass_web/msg
@@ -55,6 +56,7 @@ fn inputs(observations: List(observation.Observation)) -> feeds.Inputs {
     marks: [],
     baseline: None,
     probes: [],
+    samples: activity.OnSchedulerOnly,
     chain: [],
     exports: [],
     comparison: feeds.no_comparison,

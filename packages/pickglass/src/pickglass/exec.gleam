@@ -12,12 +12,18 @@
 //// triggers a collection. An export is a write of the viewer's own data and
 //// belongs to the service. Both come back as `NotAnAgentCommand`.
 ////
-//// Probes come in two kinds the agent can run: counters (one module with
-//// the first wire release's request, several with the counter-set request)
-//// and stack sampling. The call-tree and scheduling probes have no agent
-//// request and come back as `Unsupported` with the reason, never as a
-//// silent success. A stop or a poll must go to the right kind of probe, so
-//// the caller says which kind a probe id belongs to.
+//// Probes come in four kinds the agent runs: counters (one module with
+//// the first wire release's request, several with the counter-set request),
+//// stack sampling, a call tree over named modules and scheduling and
+//// collection events. A stop or a poll must go to the right kind of probe,
+//// so the caller says which kind a probe id belongs to.
+////
+//// The tracing probes send the agent the viewer's own budgets (the number of
+//// events and slices to keep), which the plan states, and the events probe
+//// asks for the node-wide long collection and long timeslice thresholds. A
+//// node older than OTP 28 refuses a probe that sets them, and the probe is
+//// then asked again without, because a probe that watches nothing node-wide
+//// is still the probe that was planned for the traced processes.
 ////
 //// A probe's targets are always the pins its plan named. `wire.AllProcesses`
 //// is never constructed here: the agent supports a probe over every
@@ -52,6 +58,12 @@ pub type Outcome {
 
   /// A stack probe stopped, with what it sampled.
   StacksStopped(snapshot: wire.StacksSnapshot)
+
+  /// A call tree probe stopped, with what it traced.
+  CalltraceStopped(snapshot: wire.CalltraceSnapshot)
+
+  /// A scheduling and collection probe stopped, with what it recorded.
+  EventsStopped(snapshot: wire.EventsSnapshot)
 
   /// A targeted collection ran.
   Collected(snapshot: wire.CollectionSnapshot)
@@ -158,12 +170,70 @@ fn start_probe(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
         )),
       )
     policy.Sampling, _ -> stacks_started(remote, spec)
-    policy.CallTree, _ | policy.SchedulingGc, _ ->
-      Unsupported(
-        "the agent has no "
-        <> policy.probe_code(spec.kind)
-        <> " probe; counters and sampling are available",
-      )
+    policy.CallTree, _ -> calltrace_started(remote, spec)
+    policy.SchedulingGc, _ -> events_started(remote, spec)
+  }
+}
+
+// A call tree probe traces every function of each named module. The agent
+// matches the patterns when it starts and refuses a set that is too broad or
+// names a module it has never seen, and the refusal comes back as it is.
+fn calltrace_started(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
+  case
+    remote.ask(
+      wire.Extended(wire.AskStartCalltrace(
+        spec.targets,
+        list.map(spec.modules, fn(module) { wire.CounterPattern(module, "_") }),
+        spec.duration_ms,
+        policy.trace_event_budget,
+        policy.timeline_slice_limit,
+      )),
+      ask_deadline_ms,
+    )
+  {
+    Ok(wire.CalltraceStarted(probe_id, _, matched, duration, ..)) ->
+      ProbeStarted(probe_id, matched, duration)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+// An events probe asks for the two node-wide thresholds. An agent on a node
+// without them refuses with `thresholds_unavailable` and arms nothing, so the
+// probe is asked again with both off.
+fn events_started(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
+  case
+    events_request(remote, spec, policy.long_gc_ms, policy.long_schedule_ms)
+  {
+    Failed(remote.Refusal(code: "thresholds_unavailable", ..)) ->
+      events_request(remote, spec, 0, 0)
+    other -> other
+  }
+}
+
+fn events_request(
+  remote: Remote,
+  spec: policy.ProbeSpec,
+  long_gc_ms: Int,
+  long_schedule_ms: Int,
+) -> Outcome {
+  case
+    remote.ask(
+      wire.Extended(wire.AskStartEvents(
+        spec.targets,
+        spec.duration_ms,
+        policy.trace_event_budget,
+        policy.timeline_slice_limit,
+        long_gc_ms,
+        long_schedule_ms,
+      )),
+      ask_deadline_ms,
+    )
+  {
+    Ok(wire.EventsStarted(probe_id, targets, _, duration, ..)) ->
+      ProbeStarted(probe_id, targets, duration)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
   }
 }
 
@@ -217,7 +287,21 @@ fn stop_probe(
         Ok(other) -> Unexpected(string.inspect(other))
         Error(failure) -> Failed(failure)
       }
-    Ok(id), Some(_) ->
+    Ok(id), Some(policy.CallTree) ->
+      case
+        remote.ask(wire.Extended(wire.AskStopCalltrace(id)), ask_deadline_ms)
+      {
+        Ok(wire.CalltraceReport(snapshot)) -> CalltraceStopped(snapshot)
+        Ok(other) -> Unexpected(string.inspect(other))
+        Error(failure) -> Failed(failure)
+      }
+    Ok(id), Some(policy.SchedulingGc) ->
+      case remote.ask(wire.Extended(wire.AskStopEvents(id)), ask_deadline_ms) {
+        Ok(wire.EventsReport(snapshot)) -> EventsStopped(snapshot)
+        Ok(other) -> Unexpected(string.inspect(other))
+        Error(failure) -> Failed(failure)
+      }
+    Ok(id), Some(policy.Counters) ->
       case remote.ask(wire.AskStopCounters(id), ask_deadline_ms) {
         Ok(wire.CountersReport(snapshot)) -> ProbeStopped(snapshot)
         Ok(other) -> Unexpected(string.inspect(other))
@@ -290,6 +374,12 @@ pub type Poll {
   /// The agent's stack snapshot.
   PolledStacks(snapshot: wire.StacksSnapshot)
 
+  /// The agent's call tree snapshot.
+  PolledCalltrace(snapshot: wire.CalltraceSnapshot)
+
+  /// The agent's scheduling and collection snapshot.
+  PolledEvents(snapshot: wire.EventsSnapshot)
+
   /// The agent no longer has the probe, or refused; the text says why.
   PollRefused(reason: String)
 
@@ -325,7 +415,30 @@ pub fn poll_probe(
               }
             },
           )
-        policy.Counters | policy.CallTree | policy.SchedulingGc ->
+        policy.CallTree ->
+          polled(
+            remote.ask(
+              wire.Extended(wire.AskReadCalltrace(id)),
+              ask_deadline_ms,
+            ),
+            fn(reply) {
+              case reply {
+                wire.CalltraceReport(snapshot) -> Ok(PolledCalltrace(snapshot))
+                _ -> Error(Nil)
+              }
+            },
+          )
+        policy.SchedulingGc ->
+          polled(
+            remote.ask(wire.Extended(wire.AskReadEvents(id)), ask_deadline_ms),
+            fn(reply) {
+              case reply {
+                wire.EventsReport(snapshot) -> Ok(PolledEvents(snapshot))
+                _ -> Error(Nil)
+              }
+            },
+          )
+        policy.Counters ->
           polled(
             remote.ask(wire.AskReadCounters(id), ask_deadline_ms),
             fn(reply) {
@@ -374,8 +487,11 @@ pub fn release_probe(
       let _ = case kind {
         policy.Sampling ->
           remote.ask(wire.Extended(wire.AskStopStacks(id)), ask_deadline_ms)
-        policy.Counters | policy.CallTree | policy.SchedulingGc ->
-          remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
+        policy.CallTree ->
+          remote.ask(wire.Extended(wire.AskStopCalltrace(id)), ask_deadline_ms)
+        policy.SchedulingGc ->
+          remote.ask(wire.Extended(wire.AskStopEvents(id)), ask_deadline_ms)
+        policy.Counters -> remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
       }
 
       Nil

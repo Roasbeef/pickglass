@@ -12,6 +12,13 @@
 //// Passes are taken on the viewer's wall clock, so a step's width is the
 //// time to the next pass, and the last step is as wide as the cadence.
 ////
+//// A scheduling and collection probe, and a call tree probe that kept call
+//// slices, are not readings of passes. Each saw every event of its traced
+//// processes, and its slices count from the probe's own start, so they are
+//// built as a model of their own (`events_of`, `calls_of`) and drawn on an
+//// axis of their own: the newest probe of each kind in the book is the one
+//// the page shows.
+////
 //// The run queue is a track whose steps are all missing: the agent does not
 //// read it yet, and a track that says so is better than one that is absent
 //// and leaves the operator wondering. When the agent reports it the steps
@@ -19,7 +26,7 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import pickglass/marks.{type Mark}
 import pickglass/observation.{type Observation}
 import pickglass/panel
@@ -29,6 +36,7 @@ import pickglass_core/policy
 import pickglass_core/unit
 import pickglass_core/wire
 import pickglass_web/model
+import pickglass_web/timeline_model
 
 /// The categories that get a track of their own, in the order shown.
 const category_tracks = [
@@ -49,7 +57,31 @@ pub fn build(
   probes: List(ProbeRecord),
   cadence_ms: Int,
   now_ms: Int,
-) -> Result(model.TimelineModel, String) {
+) -> Result(timeline_model.TimelineModel, String) {
+  build_labelled(observations, marks, probes, cadence_ms, now_ms, fn(pid) {
+    pid
+  })
+}
+
+/// Build the timeline with a label for each traced process. `label_of` turns
+/// a pid text into the words a track is named with, for instance the pid
+/// and its owner; the pid alone is what `build` uses.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline_build.build_labelled(observations, [], probes, 2000, now, fn(pid) {
+///   pid <> " session s-12"
+/// })
+/// ```
+pub fn build_labelled(
+  observations: List(Observation),
+  marks: List(Mark),
+  probes: List(ProbeRecord),
+  cadence_ms: Int,
+  now_ms: Int,
+  label_of: fn(String) -> String,
+) -> Result(timeline_model.TimelineModel, String) {
   case list.reverse(observations) {
     [] -> Error("the ring holds no observation yet")
     [first, ..] as oldest -> {
@@ -62,7 +94,7 @@ pub fn build(
         Error(Nil) -> 0
       }
 
-      Ok(model.TimelineModel(
+      Ok(timeline_model.TimelineModel(
         info: panel.info(panel.Facts(
           source: "the viewer's ring of observations",
           method: "one reading per collection pass",
@@ -108,6 +140,8 @@ pub fn build(
           [mark_track(marks, origin, width)],
         ]),
         gaps: gaps_of(oldest, times, width),
+        events: newest_events(probes, label_of),
+        calls: newest_calls(probes, label_of),
       ))
     }
   }
@@ -128,11 +162,11 @@ fn steps_of(
   times: List(Int),
   width: Int,
   values: List(Measurement),
-) -> List(model.Step) {
+) -> List(timeline_model.Step) {
   let widths = list.map2(times, list.drop(times, 1), fn(at, next) { next - at })
 
   list.index_map(list.zip(times, values), fn(pair, index) {
-    model.Step(
+    timeline_model.Step(
       at_ms: pair.0,
       width_ms: case list.drop(widths, index) {
         [span, ..] -> int.max(1, span)
@@ -150,8 +184,8 @@ fn counter_track(
   times: List(Int),
   width: Int,
   read: fn(Observation) -> Measurement,
-) -> model.Track {
-  model.CounterTrack(
+) -> timeline_model.Track {
+  timeline_model.CounterTrack(
     label:,
     unit: u,
     steps: steps_of(times, width, list.map(observations, read)),
@@ -167,7 +201,7 @@ fn utilisation_track(
   observations: List(Observation),
   times: List(Int),
   width: Int,
-) -> model.Track {
+) -> timeline_model.Track {
   let pairs =
     list.map2(
       [None, ..list.map(observations, Some)],
@@ -180,7 +214,7 @@ fn utilisation_track(
       },
     )
 
-  model.CounterTrack(
+  timeline_model.CounterTrack(
     label: "scheduler utilisation",
     unit: unit.Ratio(per: 1_000_000),
     steps: steps_of(times, width, pairs),
@@ -212,8 +246,8 @@ fn total_of(
   list.fold(snapshot.readings, 0, fn(sum, reading) { sum + pick(reading) })
 }
 
-fn run_queue_track(times: List(Int), width: Int) -> model.Track {
-  model.CounterTrack(
+fn run_queue_track(times: List(Int), width: Int) -> timeline_model.Track {
+  timeline_model.CounterTrack(
     label: "run queue",
     unit: unit.Count,
     steps: steps_of(
@@ -231,8 +265,8 @@ fn probe_track(
   probes: List(ProbeRecord),
   origin: Int,
   now_ms: Int,
-) -> model.Track {
-  model.SpanTrack(
+) -> timeline_model.Track {
+  timeline_model.SpanTrack(
     label: "probes",
     spans: list.filter_map(list.reverse(probes), fn(probe) {
       case probe.started_ms {
@@ -243,7 +277,7 @@ fn probe_track(
             probe_book.Finished(ended_ms:, ..) -> ended_ms
           }
 
-          Ok(model.Span(
+          Ok(timeline_model.Span(
             at_ms: started - origin,
             length_ms: int.max(1, ended - started),
             label: kind_text(probe.kind) <> " " <> probe.id,
@@ -265,11 +299,15 @@ fn kind_text(kind: policy.ProbeKind) -> String {
 
 // A checkpoint is an instant; it is drawn as a span one cadence wide so it
 // has an extent to select.
-fn mark_track(marks: List(Mark), origin: Int, width: Int) -> model.Track {
-  model.SpanTrack(
+fn mark_track(
+  marks: List(Mark),
+  origin: Int,
+  width: Int,
+) -> timeline_model.Track {
+  timeline_model.SpanTrack(
     label: "checkpoints",
     spans: list.map(marks, fn(mark) {
-      model.Span(
+      timeline_model.Span(
         at_ms: mark.checkpoint.system_ms - origin,
         length_ms: width,
         label: mark.checkpoint.name,
@@ -284,7 +322,7 @@ fn gaps_of(
   observations: List(Observation),
   times: List(Int),
   width: Int,
-) -> List(model.CoverageGap) {
+) -> List(timeline_model.CoverageGap) {
   list.zip(observations, times)
   |> list.filter_map(fn(pair) {
     let #(observation, at) = pair
@@ -292,7 +330,7 @@ fn gaps_of(
     case observation.census, observation.scheduler {
       Ok(_), Ok(_) -> Error(Nil)
       Error(reason), _ | _, Error(reason) ->
-        Ok(model.CoverageGap(
+        Ok(timeline_model.CoverageGap(
           from_ms: at,
           to_ms: at + width,
           dropped: NotApplicable,
@@ -300,4 +338,214 @@ fn gaps_of(
         ))
     }
   })
+}
+
+// ------------------------------------------------------ tracing probes
+
+// The newest finished scheduling probe, from a book that lists newest first.
+fn newest_events(
+  probes: List(ProbeRecord),
+  label_of: fn(String) -> String,
+) -> Option(timeline_model.EventsTimeline) {
+  list.find_map(probes, fn(probe) {
+    case probe.state, probe.detail {
+      probe_book.Finished(outcome:, ..), probe_book.SchedulingDetail(snapshot:)
+      -> Ok(events_of(probe, snapshot, outcome, label_of))
+      _, _ -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+// The newest finished call tree probe that kept call slices.
+fn newest_calls(
+  probes: List(ProbeRecord),
+  label_of: fn(String) -> String,
+) -> Option(timeline_model.CallsTimeline) {
+  list.find_map(probes, fn(probe) {
+    case probe.state, probe.detail {
+      probe_book.Finished(outcome:, ..), probe_book.CallSlices(snapshot:) ->
+        Ok(calls_of(probe, snapshot, outcome, label_of))
+      _, _ -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+/// A scheduling and collection probe's result as the page's timeline model.
+/// One track per traced process, in the order the probe named them, each with
+/// the totals the probe counted and the slices it kept; the node-wide
+/// threshold events as markers; and the sentences about how the probe
+/// ended.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline_build.events_of(probe, snapshot, measure.Complete, fn(pid) { pid })
+/// ```
+pub fn events_of(
+  probe: ProbeRecord,
+  snapshot: wire.EventsSnapshot,
+  outcome: measure.Outcome,
+  label_of: fn(String) -> String,
+) -> timeline_model.EventsTimeline {
+  let meter = snapshot.meter
+  let notes = case probe.state {
+    probe_book.Finished(notes:, ..) -> notes
+    probe_book.Running -> []
+  }
+
+  timeline_model.EventsTimeline(
+    probe: probe.id,
+    info: trace_info(
+      "agent trace session",
+      "running and garbage_collection events, folded in the agent",
+      meter.trace,
+      outcome,
+    ),
+    window_ns: probe.duration_ms * 1_000_000,
+    observed_ns: meter.trace.elapsed_ms * 1_000_000,
+    tracks: list.index_map(snapshot.processes, fn(process, index) {
+      timeline_model.TracedTrack(
+        label: label_of(process.pid_text),
+        runs: process.runs,
+        run_ns: process.run_ns,
+        minor_gcs: process.minor_gcs,
+        major_gcs: process.major_gcs,
+        gc_ns: process.gc_ns,
+        slices: list.filter_map(snapshot.slices, fn(slice) {
+          case slice.process == index {
+            True ->
+              Ok(timeline_model.ActivitySlice(
+                start_ns: slice.start_ns,
+                duration_ns: slice.duration_ns,
+                kind: activity_kind(slice.kind),
+              ))
+            False -> Error(Nil)
+          }
+        }),
+      )
+    }),
+    long: list.map(snapshot.long, fn(event) {
+      case event {
+        wire.LongGc(pid_text:, duration_ms:, heap_words:) ->
+          timeline_model.LongGcMarker(
+            process: pid_text,
+            duration_ms:,
+            heap_words:,
+          )
+        wire.LongSchedule(pid_text:, duration_ms:, function:) ->
+          timeline_model.LongScheduleMarker(
+            process: pid_text,
+            duration_ms:,
+            function:,
+          )
+      }
+    }),
+    long_gc_ms: meter.long_gc_ms,
+    long_schedule_ms: meter.long_schedule_ms,
+    long_seen: meter.long_events_seen,
+    notes:,
+  )
+}
+
+fn activity_kind(kind: wire.ActivityKind) -> timeline_model.ActivityKind {
+  case kind {
+    wire.RunSlice -> timeline_model.RunActivity
+    wire.MinorGcSlice -> timeline_model.MinorGcActivity
+    wire.MajorGcSlice -> timeline_model.MajorGcActivity
+  }
+}
+
+/// A call tree probe's slices as the page's call timeline: a track per
+/// traced process, each call named by its function.
+///
+/// ## Examples
+///
+/// ```gleam
+/// timeline_build.calls_of(probe, snapshot, measure.Complete, fn(pid) { pid })
+/// ```
+pub fn calls_of(
+  probe: ProbeRecord,
+  snapshot: wire.CalltraceSnapshot,
+  outcome: measure.Outcome,
+  label_of: fn(String) -> String,
+) -> timeline_model.CallsTimeline {
+  let notes = case probe.state {
+    probe_book.Finished(notes:, ..) -> notes
+    probe_book.Running -> []
+  }
+  let frames = snapshot.frames
+  let name_of = fn(index) {
+    case list.drop(frames, index) {
+      [frame, ..] ->
+        frame.module
+        <> ":"
+        <> frame.function
+        <> "/"
+        <> int.to_string(frame.arity)
+      [] -> "?"
+    }
+  }
+
+  timeline_model.CallsTimeline(
+    probe: probe.id,
+    info: trace_info(
+      "agent trace session",
+      "call and return_to, folded in the agent",
+      snapshot.meter.trace,
+      outcome,
+    ),
+    window_ns: probe.duration_ms * 1_000_000,
+    observed_ns: snapshot.meter.trace.elapsed_ms * 1_000_000,
+    tracks: list.index_map(snapshot.processes, fn(pid, index) {
+      timeline_model.CallTrack(
+        label: label_of(pid),
+        calls: list.filter_map(snapshot.slices, fn(slice) {
+          case slice.process == index {
+            True ->
+              Ok(timeline_model.CallBox(
+                name: name_of(slice.frame),
+                start_ns: slice.start_ns,
+                duration_ns: slice.duration_ns,
+                depth: slice.depth,
+              ))
+            False -> Error(Nil)
+          }
+        }),
+      )
+    }),
+    notes:,
+  )
+}
+
+// The title-bar line of a tracing probe: what it folded against its budget,
+// how it ended, and how many events arrived after the stop.
+fn trace_info(
+  source: String,
+  method: String,
+  meter: wire.TraceMeter,
+  outcome: measure.Outcome,
+) -> model.PanelInfo {
+  let line =
+    panel.info(panel.Facts(
+      source:,
+      method:,
+      cadence_ms: 0,
+      scope: "events folded",
+      requested: meter.max_events,
+      achieved: meter.events,
+      outcome:,
+      gap_ms: None,
+      took_ms: Some(meter.elapsed_ms),
+    ))
+
+  model.PanelInfo(
+    ..line,
+    coverage: measure.Coverage(
+      ..line.coverage,
+      dropped_events: Known(meter.dropped_events),
+      in_flight_events: Known(meter.in_flight_at_stop),
+    ),
+  )
 }

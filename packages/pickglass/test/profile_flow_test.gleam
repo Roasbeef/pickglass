@@ -210,7 +210,8 @@ pub fn planning_again_replaces_the_plan_and_keeps_the_pins_test() {
   let page = harness.page(rig, "alice", harness.all)
   let first = plan_id(page.profile(ask(["<0.1.0>", "<0.2.0>"])))
   let _ = fixture.drain(rig.seen, 50)
-  let second = plan_id(page.profile(seam.ReplanProfile(first, 30_000, 250)))
+  let second =
+    plan_id(page.profile(seam.ReplanProfile(first, 30_000, seam.ByStacks(250))))
   let requests = fixture.drain(rig.seen, 50)
 
   // The old plan is gone, the new one has the new settings, and no pin was
@@ -229,7 +230,7 @@ pub fn planning_again_replaces_the_plan_and_keeps_the_pins_test() {
   assert note.duration_ms == 30_000
 
   // Planning a plan that is gone changes nothing.
-  assert page.profile(seam.ReplanProfile(first, 10_000, 50))
+  assert page.profile(seam.ReplanProfile(first, 10_000, seam.ByStacks(50)))
     == seam.Rejected("that profile plan is no longer pending")
   let assert [_] = page.plans()
 }

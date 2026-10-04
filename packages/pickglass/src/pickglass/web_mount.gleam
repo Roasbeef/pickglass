@@ -57,6 +57,7 @@ import pickglass/seam
 import pickglass_core/analysis/transform
 import pickglass_core/measure
 import pickglass_core/policy
+import pickglass_core/profile/activity
 import pickglass_core/wire
 import pickglass_web/app
 import pickglass_web/key.{type Key}
@@ -86,6 +87,10 @@ pub opaque type State {
     /// The checkpoint this page compares against, by its index; the newest
     /// when none was chosen or the chosen one is gone.
     baseline: Option(Int),
+    /// Which samples of a sampled profile the page draws. A page starts with
+    /// the samples taken on a scheduler, and the operator can include the
+    /// ones taken while a process waited.
+    samples: activity.Inclusion,
     /// The profile page's filter chain.
     chain: List(transform.Step),
     /// What the profile page was asked to export, newest first.
@@ -234,6 +239,7 @@ fn start_feeder(
         sort: model.ByMemory,
         offset: 0,
         baseline: None,
+        samples: activity.OnSchedulerOnly,
         chain: [],
         exports: [],
         baseline_file: None,
@@ -302,6 +308,7 @@ pub fn new_state(
     sort: model.ByMemory,
     offset: 0,
     baseline: None,
+    samples: activity.OnSchedulerOnly,
     chain: [],
     exports: [],
     baseline_file: None,
@@ -316,6 +323,11 @@ pub fn new_state(
 /// Why the last profile button of the page planned nothing, if it did not.
 pub fn refusal_of(state: State) -> Option(String) {
   state.refusal
+}
+
+/// Which samples of a sampled profile the page draws.
+pub fn samples_of(state: State) -> activity.Inclusion {
+  state.samples
 }
 
 /// The filter chain the page has built.
@@ -356,6 +368,7 @@ fn inputs(state: State) -> feeds.Inputs {
     marks: page.checkpoints(),
     baseline: state.baseline,
     probes: page.probes(),
+    samples: state.samples,
     chain: state.chain,
     exports: state.exports,
     comparison: case state.slug {
@@ -535,6 +548,7 @@ pub fn ask(state: State, request: msg.Request) -> State {
     msg.AddFilterAt(kind, frame) -> add_step_at(state, current, kind, frame)
     msg.TruncateChain(from) ->
       State(..state, chain: list.take(state.chain, int.max(0, from)))
+    msg.ChooseSamples(inclusion) -> State(..state, samples: inclusion)
     msg.ExportProfile(choice) -> export_profile(state, current, choice)
 
     msg.RequestSelfMeasure(pin) ->
@@ -544,18 +558,55 @@ pub fn ask(state: State, request: msg.Request) -> State {
     msg.ProfileBusiest -> profile_busiest(state, current)
     msg.ProfileProcess(row) -> profile_process(state, current, row)
     msg.AdjustProfile(plan, duration, rate) ->
-      case resolve_plan(current, plan) {
-        Ok(plan_id) ->
-          planned(
-            state,
-            state.page.profile(seam.ReplanProfile(
-              plan_id,
-              msg.duration_ms(duration),
-              msg.rate_hz(rate),
-            )),
-          )
-        Error(Nil) -> state
-      }
+      replan(
+        state,
+        current,
+        plan,
+        msg.duration_ms(duration),
+        seam.ByStacks(msg.rate_hz(rate)),
+      )
+    msg.TraceCallsInstead(plan, modules) ->
+      replan(
+        state,
+        current,
+        plan,
+        seam.trace_duration_ms,
+        seam.ByCalls(modules),
+      )
+    msg.SampleStacksInstead(plan) ->
+      replan(
+        state,
+        current,
+        plan,
+        seam.profile_duration_ms,
+        seam.ByStacks(seam.profile_rate_hz),
+      )
+    msg.TraceProcess(row, modules) ->
+      trace_process(state, current, row, modules)
+    msg.RecordProcess(row) -> record_process(state, current, row)
+    msg.RecordOwner(owner) -> record_owner(state, current, owner)
+    msg.ExportTrace(which) -> export_trace(state, current, which)
+  }
+}
+
+// A pending profile plan, planned again by another method. The key is
+// resolved against the plans the viewer holds, and the viewer refuses a swap
+// the agent would refuse (a call trace over too many processes) before it
+// touches the plan.
+fn replan(
+  state: State,
+  current: feeds.Inputs,
+  plan: Key,
+  duration_ms: Int,
+  method: seam.ProfileMethod,
+) -> State {
+  case resolve_plan(current, plan) {
+    Ok(plan_id) ->
+      planned(
+        state,
+        state.page.profile(seam.ReplanProfile(plan_id, duration_ms, method)),
+      )
+    Error(Nil) -> state
   }
 }
 
@@ -602,6 +653,77 @@ fn profile_busiest(state: State, current: feeds.Inputs) -> State {
         profile_scope.candidates_of(rows),
       )
     }
+  }
+}
+
+// A call trace of one process, pinning it first. The modules were checked
+// against the pattern alphabet by the page and are checked again by the gate.
+fn trace_process(
+  state: State,
+  current: feeds.Inputs,
+  row: Key,
+  modules: List(String),
+) -> State {
+  case resolve_row(current, row) {
+    Error(Nil) -> state
+    Ok(pid_text) ->
+      planned(
+        state,
+        state.page.profile(seam.PlanCallTrace(
+          pids: [pid_text],
+          chosen: pid_text,
+          duration_ms: seam.trace_duration_ms,
+          modules:,
+        )),
+      )
+  }
+}
+
+// A recording of one process's runs and collections, pinning it first.
+fn record_process(state: State, current: feeds.Inputs, row: Key) -> State {
+  case resolve_row(current, row) {
+    Error(Nil) -> state
+    Ok(pid_text) ->
+      planned(
+        state,
+        state.page.profile(seam.PlanRecording(
+          pids: [pid_text],
+          chosen: pid_text,
+          duration_ms: seam.recording_duration_ms,
+        )),
+      )
+  }
+}
+
+// A recording of the busiest processes of an owner row, chosen the way a
+// profile button chooses them but up to the events probe's limit.
+fn record_owner(state: State, current: feeds.Inputs, owner: Key) -> State {
+  case current.observations {
+    [] -> state
+    [newest, ..] ->
+      case feeds.owner_members(current, newest, owner) {
+        Error(Nil) -> state
+        Ok(#(label, members)) ->
+          case
+            profile_scope.choose(
+              profile_scope.candidates_of(members),
+              seam.recording_limit,
+              profile_scope.OwnerScope(label),
+            )
+          {
+            Error(profile_scope.NothingToProfile(reason:)) ->
+              State(..state, refusal: Some(reason))
+            Ok(chosen) ->
+              planned(
+                state,
+                state.page.profile(seam.PlanRecording(
+                  pids: chosen.pids,
+                  chosen: chosen.sentence,
+                  duration_ms: seam.recording_duration_ms,
+                )),
+              )
+          }
+      }
   }
 }
 
@@ -791,6 +913,7 @@ fn export_profile(
           span,
           drawn.profile,
           drawn.column,
+          drawn.activity,
         )
       {
         Error(profile_export.Refused(label:, reason:)) ->
@@ -826,6 +949,78 @@ fn export_profile(
       }
     }
     _, _ -> state
+  }
+}
+
+// A tracing probe's timeline as a Chrome trace: the newest probe of the kind
+// that kept what the file needs. The traced processes are named as the
+// timeline names them.
+fn export_trace(
+  state: State,
+  current: feeds.Inputs,
+  which: msg.TraceExport,
+) -> State {
+  let rows = case current.observations {
+    [newest, ..] ->
+      feeds.rated_rows_of(current.observations, word_size(newest, current)).0
+    [] -> []
+  }
+  let label_of = fn(pid: String) {
+    case list.find(rows, fn(row) { row.pid_text == pid }) {
+      Ok(row) -> pid <> " " <> row.owner_label
+      Error(Nil) -> pid
+    }
+  }
+  let holder = fn(probe: probe_book.ProbeRecord) {
+    case which, probe.detail {
+      msg.EventsTrace, probe_book.SchedulingDetail(..) -> True
+      msg.CallsTrace, probe_book.CallSlices(..) -> True
+      _, _ -> False
+    }
+  }
+
+  case list.find(current.probes, holder) {
+    Error(Nil) ->
+      noted(
+        state,
+        model.ExportRefused(
+          label: "Chrome trace",
+          reason: "no probe with a timeline is held to export.",
+        ),
+      )
+    Ok(probe) ->
+      case profile_export.make_trace(which, probe, label_of) {
+        Error(profile_export.Refused(label:, reason:)) ->
+          noted(state, model.ExportRefused(label:, reason:))
+        Ok(built) ->
+          case
+            state.page.submit(seam.ExportProfile(
+              probe.id,
+              policy.ChromeTrace,
+              built.download,
+            ))
+          {
+            seam.DownloadReady(ticket) ->
+              noted(
+                state,
+                model.ExportReady(
+                  label: built.label,
+                  ticket: key.make(ticket),
+                  losses: built.losses,
+                ),
+              )
+            seam.Rejected(reason) ->
+              noted(state, model.ExportRefused(label: built.label, reason:))
+            _ ->
+              noted(
+                state,
+                model.ExportRefused(
+                  label: built.label,
+                  reason: "the viewer did not offer a download",
+                ),
+              )
+          }
+      }
   }
 }
 

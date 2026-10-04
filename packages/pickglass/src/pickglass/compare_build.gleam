@@ -31,6 +31,7 @@ import pickglass_core/analysis/diff
 import pickglass_core/layout/flame
 import pickglass_core/measure.{type Measurement, Known, Missing, NotApplicable}
 import pickglass_core/profile.{type Profile}
+import pickglass_core/profile/activity
 import pickglass_core/unit
 import pickglass_core/wire
 import pickglass_web/model
@@ -199,7 +200,11 @@ fn stack_profile(loaded: Loaded) -> option.Option(Profile) {
     case probe.state {
       probe_book.Finished(profile: Some(found), ..) ->
         case profile.source(found) {
-          profile.SampledStacks(..) -> Ok(found)
+          // Only the samples taken on a scheduler are compared: two idle
+          // profiles differ in how long their processes waited, which is not
+          // what a change to the code shows.
+          profile.SampledStacks(..) ->
+            Ok(activity.restrict(found, activity.OnSchedulerOnly))
           profile.TracedCalls
           | profile.TracedCounters
           | profile.AllocationCounts -> Error(Nil)

@@ -36,6 +36,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import pickglass/audit
+import pickglass/calltrace_profile
 import pickglass/deltas
 import pickglass/gate
 import pickglass/marks.{type Mark}
@@ -52,6 +53,7 @@ import pickglass_core/measure.{type Measurement, Known, Missing, NotApplicable}
 import pickglass_core/owner
 import pickglass_core/policy
 import pickglass_core/profile
+import pickglass_core/profile/activity
 import pickglass_core/unit
 import pickglass_core/wire
 import pickglass_web/build/profile as profile_page
@@ -100,6 +102,8 @@ pub type Inputs {
     baseline: Option(Int),
     /// The probes, newest first.
     probes: List(ProbeRecord),
+    /// Which of a sampled profile's samples the profile page draws.
+    samples: activity.Inclusion,
     /// What the profile page was asked to filter by and export.
     chain: List(transform.Step),
     exports: List(model.ExportNote),
@@ -1287,12 +1291,20 @@ fn plan_cards(
             Error(Nil) -> ""
           },
           adjust: case note {
-            Ok(found) ->
-              model.Adjustable(
-                duration_ms: found.duration_ms,
-                rate_hz: found.rate_hz,
-              )
-            Error(Nil) -> model.NotAdjustable
+            Ok(seam.ProfileNote(
+              method: seam.ByStacks(rate_hz),
+              duration_ms:,
+              processes:,
+              ..,
+            )) -> model.AdjustStacks(duration_ms:, rate_hz:, processes:)
+            Ok(seam.ProfileNote(
+              method: seam.ByCalls(_),
+              duration_ms:,
+              processes:,
+              ..,
+            )) -> model.AdjustCalls(duration_ms:, processes:)
+            Ok(seam.ProfileNote(method: seam.ByEvents, ..)) | Error(Nil) ->
+              model.NotAdjustable
           },
         ),
       )
@@ -1345,57 +1357,116 @@ fn flow(inputs: Inputs) -> model.FlowModel {
       rated_rows_of(inputs.observations, word_size_of(newest, inputs)).0
     [] -> []
   }
-  let profile_plans =
+  let probe_plans =
     list.filter(plan_cards(inputs, rows), fn(card) {
-      card.adjust != model.NotAdjustable
+      case card.what {
+        model.ProbePlan(_) -> True
+        model.GcPlan | model.MeasurePlan -> False
+      }
     })
 
   model.FlowModel(
-    pending: list.first(profile_plans) |> option.from_result,
-    running: list.filter(active_probes(inputs), fn(probe) {
-      probe.kind == policy.Sampling
-    }),
+    pending: list.first(probe_plans) |> option.from_result,
+    running: active_probes(inputs),
     ready: ready_profile(inputs),
     refused: inputs.refusal,
   )
 }
 
-// The newest finished stack probe that has a profile, while it is recent.
+// The newest finished probe that has a result a page shows, while it is
+// recent: a stack profile or a call tree, which the Profile page opens, or a
+// scheduling recording, which the Timeline page opens.
 fn ready_profile(inputs: Inputs) -> Option(model.ReadyProfile) {
   option.from_result(find_ready(inputs))
 }
 
 fn find_ready(inputs: Inputs) -> Result(model.ReadyProfile, Nil) {
   list.find_map(inputs.probes, fn(probe) {
-    case probe.kind, probe.state {
-      policy.Sampling, probe_book.Finished(ended_ms:, profile: Some(found), ..)
-      -> {
+    case probe.state {
+      probe_book.Finished(ended_ms:, profile:, ..) -> {
         let age = int.max(0, inputs.now_ms - ended_ms)
-        let samples = case profile.columns(found) {
-          [first, ..] -> profile.total(found, first)
-          [] -> 0
-        }
-        let rate = case profile.source(found) {
-          profile.SampledStacks(rate:, ..) ->
-            " at " <> int.to_string(rate) <> " Hz"
-          profile.TracedCalls
-          | profile.TracedCounters
-          | profile.AllocationCounts -> ""
-        }
 
-        case age <= ready_ms {
-          True ->
+        case age <= ready_ms, ready_summary(probe, profile) {
+          True, Ok(#(summary, opens)) ->
             Ok(model.ReadyProfile(
               probe: probe.id,
               age_ms: age,
-              summary: fmt.count(samples) <> " samples" <> rate,
+              summary:,
+              opens:,
             ))
-          False -> Error(Nil)
+          _, _ -> Error(Nil)
         }
       }
-      _, _ -> Error(Nil)
+      probe_book.Running -> Error(Nil)
     }
   })
+}
+
+// What a finished probe left that a page can show, and the page. A counters
+// probe's profile is read on the Probes and Profile pages by those who ran
+// it by hand, and is not announced above every page.
+fn ready_summary(
+  probe: ProbeRecord,
+  found: Option(profile.Profile),
+) -> Result(#(String, model.ReadyPage), Nil) {
+  case probe.kind, found, probe.detail {
+    policy.Sampling, Some(sampled), _ ->
+      Ok(#(stack_summary(sampled), model.OpensProfile))
+    policy.CallTree, Some(traced), _ ->
+      Ok(#(call_summary(traced), model.OpensProfile))
+    policy.SchedulingGc, _, probe_book.SchedulingDetail(snapshot:) ->
+      Ok(#(
+        fmt.count(list.length(snapshot.processes))
+          <> " processes, "
+          <> fmt.count(
+          list.fold(snapshot.processes, 0, fn(total, process) {
+            total + process.runs
+          }),
+        )
+          <> " runs",
+        model.OpensTimeline,
+      ))
+    _, _, _ -> Error(Nil)
+  }
+}
+
+// The samples of a stack profile, split by what the processes were doing when
+// the profile carries their statuses.
+fn stack_summary(found: profile.Profile) -> String {
+  let rate = case profile.source(found) {
+    profile.SampledStacks(rate:, ..) -> " at " <> int.to_string(rate) <> " Hz"
+    profile.TracedCalls | profile.TracedCounters | profile.AllocationCounts ->
+      ""
+  }
+
+  case profile.columns(found) {
+    [] -> "no samples"
+    [first, ..] ->
+      case activity.has_status(found) {
+        True -> {
+          let split = activity.split(found, first)
+
+          fmt.count(split.on_scheduler + split.unstated)
+          <> " running or runnable of "
+          <> fmt.count(activity.split_total(split))
+          <> " samples"
+          <> rate
+        }
+        False -> fmt.count(profile.total(found, first)) <> " samples" <> rate
+      }
+  }
+}
+
+fn call_summary(found: profile.Profile) -> String {
+  let calls = case profile.column_named(found, calltrace_profile.calls_column) {
+    Ok(column) -> profile.total(found, column)
+    Error(Nil) -> 0
+  }
+
+  fmt.count(calls)
+  <> " traced calls over "
+  <> fmt.count(list.length(profile.functions(found)))
+  <> " functions"
 }
 
 /// The key of a probe, which names it by the agent's id.
@@ -1551,10 +1622,12 @@ pub fn profile_model(
       case column_of(found) {
         Error(Nil) -> Ok(None)
         Ok(column) ->
-          profile_page.build(
+          profile_page.build_with(
             profile_header(probe, found),
             found,
             column,
+            inputs.samples,
+            processes_of(probe),
             chain,
             inputs.exports,
           )
@@ -1563,13 +1636,26 @@ pub fn profile_model(
   }
 }
 
-// A counters profile is read by call time; any other by its first column,
-// which for sampled stacks is the sample count. Core guarantees a profile has
-// a value type, so the error is not reachable; it is handled as "nothing to
-// draw" and not as a crash.
+// How many processes a stack probe sampled. Its match count is the number of
+// targets; any other kind has no statuses to count them for.
+fn processes_of(probe: ProbeRecord) -> Option(Int) {
+  case probe.kind {
+    policy.Sampling -> Some(probe.matched)
+    policy.Counters | policy.CallTree | policy.SchedulingGc -> None
+  }
+}
+
+// A counters profile is read by call time and a call tree by exclusive time,
+// the column whose sums are the widths of a flame's boxes; any other by its
+// first column, which for sampled stacks is the sample count. Core guarantees
+// a profile has a value type, so the error is not reachable; it is handled as
+// "nothing to draw" and not as a crash.
 fn column_of(found: profile.Profile) -> Result(profile.Column, Nil) {
   result.lazy_or(profile.column_named(found, "call time"), fn() {
-    profile.column(found, 0)
+    result.lazy_or(
+      profile.column_named(found, calltrace_profile.exclusive_column),
+      fn() { profile.column(found, 0) },
+    )
   })
 }
 
@@ -1592,7 +1678,7 @@ fn profile_header(
     )
     profile.TracedCalls -> #(
       "call trace probe",
-      "trace messages to a collector",
+      "call and return_to events, folded in the agent",
     )
     profile.AllocationCounts -> #("allocation counts", "allocator statistics")
   }
@@ -1621,7 +1707,16 @@ fn profile_header(
 
       #("samples", rate * seconds * int.max(1, probe.matched), taken)
     }
-    policy.Counters | policy.CallTree | policy.SchedulingGc -> #(
+
+    // A call tree's coverage is the functions it matched and how many of
+    // them were called in the window, which is what the profile's function
+    // table holds.
+    policy.CallTree -> #(
+      "functions called",
+      probe.matched,
+      list.length(profile.functions(found)),
+    )
+    policy.Counters | policy.SchedulingGc -> #(
       "functions with calls",
       probe.matched,
       list.length(profile.samples(found)),
@@ -1669,13 +1764,19 @@ fn timeline_feed(
   inputs: Inputs,
   observations: List(Observation),
 ) -> List(msg.Feed) {
+  let rows = case observations {
+    [newest, ..] -> rated_rows_of(observations, word_size_of(newest, inputs)).0
+    [] -> []
+  }
+
   case
-    timeline_build.build(
+    timeline_build.build_labelled(
       observations,
       inputs.marks,
       inputs.probes,
       inputs.cadence_ms,
       inputs.now_ms,
+      fn(pid) { pid <> label_for(rows, pid) },
     )
   {
     Ok(page) -> [msg.FedTimeline(page)]

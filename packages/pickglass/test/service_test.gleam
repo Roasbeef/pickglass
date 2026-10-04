@@ -170,19 +170,29 @@ pub fn malformed_requests_are_refused_before_the_gate_test() {
   assert mentions(harness.trail(rig), "request from alice refused")
 }
 
-pub fn a_probe_kind_the_agent_cannot_run_is_refused_in_words_test() {
-  let rig = harness.live(fixture.healthy, None)
+// A call tree start the agent refuses (here, a pattern it matched to nothing)
+// comes back with the agent's own code, and nothing is recorded as running.
+pub fn a_call_tree_the_agent_refuses_is_refused_in_words_test() {
+  let script = fn(request) {
+    case request {
+      wire.Extended(wire.AskStartCalltrace(..)) ->
+        Error(remote.Refusal("no_match", "no function of lists matched"))
+      other -> fixture.healthy(other)
+    }
+  }
+  let rig = harness.live(script, None)
   let page = harness.page(rig, "alice", harness.all)
   let token = pinned_token(page)
   let id =
     plan_id(
-      page.submit(seam.PlanProbe(policy.CallTree, [token], ["lists"], 10_000, 0)),
+      page.submit(seam.PlanProbe(policy.CallTree, [token], ["lists"], 5000, 0)),
     )
 
   assert string.contains(
     rejected(page.submit(seam.ConfirmPlan(id))),
-    "the agent has no call_tree probe",
+    "no_match",
   )
+  assert page.probes() == []
 }
 
 pub fn a_stale_pin_refusal_kills_the_pin_test() {

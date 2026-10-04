@@ -16,14 +16,18 @@
 //// record and its cost a `perturbation` record, tied together by the
 //// probe's id. `to_records` writes them and `of_records` reads them back,
 //// so a capture opened later, or compared against another, has the probe
-//// history it was taken with. What a capture cannot say is when a probe
+//// history it was taken with. A call tree probe adds an `events` record with
+//// the raw slices it kept for a timeline, and a scheduling and collection
+//// probe, which measures per-process time and not call stacks and so has no
+//// profile, is its `events` record alone. What a capture cannot say is when a probe
 //// started or which module it named; those come back unknown and a replayed
 //// probe says so.
 ////
 //// ## Flow
 ////
 //// - `started` records a probe the agent accepted.
-//// - `finish_counters` closes it with the agent's last snapshot.
+//// - `finish_counters`, `finish_stacks`, `finish_calltrace` and
+////   `finish_events` close it with the agent's last snapshot of its kind.
 //// - `to_records` and `of_records` map finished probes to and from a
 ////   capture's records.
 
@@ -31,6 +35,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import pickglass/calltrace_profile
 import pickglass/counters_profile
 import pickglass/profile_from_stacks
 import pickglass_core/capture.{type Record}
@@ -38,6 +43,7 @@ import pickglass_core/measure.{Known, NotApplicable}
 import pickglass_core/policy
 import pickglass_core/profile.{type Profile}
 import pickglass_core/wire
+import pickglass_web/fmt
 
 /// Where a probe is in its life.
 pub type ProbeState {
@@ -61,6 +67,21 @@ pub type ProbeState {
   )
 }
 
+/// What a probe measured that a profile cannot hold.
+pub type Detail {
+  /// Nothing beyond the profile, if there is one.
+  NoDetail
+
+  /// A scheduling and collection probe's whole result: per-process totals,
+  /// the run and collection slices, and the node-wide threshold events.
+  SchedulingDetail(snapshot: wire.EventsSnapshot)
+
+  /// A call tree probe's frame table, traced processes and the raw call
+  /// slices it kept for a timeline. The paths are in its profile, so the
+  /// snapshot held here has none.
+  CallSlices(snapshot: wire.CalltraceSnapshot)
+}
+
 /// One probe.
 pub type ProbeRecord {
   ProbeRecord(
@@ -78,6 +99,9 @@ pub type ProbeRecord {
     /// How many functions matched.
     matched: Int,
     state: ProbeState,
+    /// What the probe measured besides its profile. Empty until the probe
+    /// finishes.
+    detail: Detail,
   )
 }
 
@@ -104,6 +128,7 @@ pub fn started(
     duration_ms:,
     matched:,
     state: Running,
+    detail: NoDetail,
   )
 }
 
@@ -274,6 +299,205 @@ fn closed_finish_stacks(
   }
 }
 
+/// Close a call tree probe with the agent's last snapshot. The paths go
+/// through `calltrace_profile`; a reply core refuses (a path naming a frame
+/// the table does not hold) closes the probe as `Errored` with no profile.
+/// A probe that hit its event budget is `Partial` with that reason, and one
+/// the agent stopped because the collector fell behind is `Partial` with
+/// `CollectorOverrun`; the notes say what was dropped either way. The raw
+/// call slices the probe kept for a timeline are kept as the record's
+/// detail.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probe_book.finish_calltrace(probe, snapshot, 41_000)
+/// ```
+pub fn finish_calltrace(
+  probe: ProbeRecord,
+  snapshot: wire.CalltraceSnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
+  recorded(closed_finish_calltrace(probe, snapshot, now_ms))
+}
+
+fn closed_finish_calltrace(
+  probe: ProbeRecord,
+  snapshot: wire.CalltraceSnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
+  let trace = snapshot.meter.trace
+  let cost =
+    capture.ProbeCost(
+      probe: probe.id,
+      enabled: ["call", "return_to"],
+      events: Known(trace.events),
+      collector_reductions: NotApplicable,
+      bytes: NotApplicable,
+      wall_ms: Known(trace.elapsed_ms),
+      outcome: measure.Unrecorded,
+      matched: None,
+    )
+
+  case calltrace_profile.build(snapshot) {
+    Error(_) ->
+      ProbeRecord(
+        ..probe,
+        state: Finished(
+          ended_ms: now_ms,
+          outcome: measure.Errored(
+            "the call paths could not be read as a profile",
+          ),
+          cost:,
+          profile: None,
+          notes: [],
+        ),
+      )
+    Ok(built) ->
+      ProbeRecord(
+        ..probe,
+        state: Finished(
+          ended_ms: now_ms,
+          outcome: trace_outcome(snapshot.stop),
+          cost:,
+          profile: Some(built),
+          notes: case snapshot.paths {
+            [] -> [
+              "No call to a traced function happened in the window.",
+              ..calltrace_profile.caveats(snapshot)
+            ]
+            [_, ..] -> calltrace_profile.caveats(snapshot)
+          },
+        ),
+        detail: CallSlices(wire.CalltraceSnapshot(..snapshot, paths: [])),
+      )
+  }
+}
+
+/// Close a scheduling and garbage collection probe with the agent's last
+/// snapshot. There is no profile: the result is per-process totals and
+/// slices, kept whole as the record's detail. The outcome and notes follow
+/// the same stop reasons as a call tree probe's.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probe_book.finish_events(probe, snapshot, 41_000)
+/// ```
+pub fn finish_events(
+  probe: ProbeRecord,
+  snapshot: wire.EventsSnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
+  recorded(closed_finish_events(probe, snapshot, now_ms))
+}
+
+fn closed_finish_events(
+  probe: ProbeRecord,
+  snapshot: wire.EventsSnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
+  let trace = snapshot.meter.trace
+  let thresholds =
+    list.flatten([
+      case snapshot.meter.long_gc_ms {
+        0 -> []
+        _ -> ["long_gc"]
+      },
+      case snapshot.meter.long_schedule_ms {
+        0 -> []
+        _ -> ["long_schedule"]
+      },
+    ])
+
+  ProbeRecord(
+    ..probe,
+    state: Finished(
+      ended_ms: now_ms,
+      outcome: trace_outcome(snapshot.stop),
+      cost: capture.ProbeCost(
+        probe: probe.id,
+        enabled: list.append(["running", "garbage_collection"], thresholds),
+        events: Known(trace.events),
+        collector_reductions: NotApplicable,
+        bytes: NotApplicable,
+        wall_ms: Known(trace.elapsed_ms),
+        outcome: measure.Unrecorded,
+        matched: None,
+      ),
+      profile: None,
+      notes: events_notes(snapshot),
+    ),
+    detail: SchedulingDetail(snapshot),
+  )
+  |> recorded
+}
+
+// How a tracing probe's stop reason reads as an outcome. The window, the
+// operator and the exit of every target are complete for what they covered;
+// the event budget and a collector that fell behind each cut the probe short
+// of its window.
+fn trace_outcome(stop: wire.TraceStop) -> measure.Outcome {
+  case stop {
+    wire.TraceBudget ->
+      measure.Partial(measure.Truncated(measure.BudgetReached))
+    wire.TraceOverrun ->
+      measure.Partial(measure.Truncated(measure.CollectorOverrun))
+    wire.TraceRunning
+    | wire.TraceDeadline
+    | wire.TraceTargetsGone
+    | wire.TraceStopped -> measure.Complete
+  }
+}
+
+// What a scheduling probe says about how far to trust it: how it ended, what
+// its queue lost, what its results leave out, and whether the node-wide
+// thresholds were in force.
+fn events_notes(snapshot: wire.EventsSnapshot) -> List(String) {
+  let meter = snapshot.meter
+
+  list.flatten([
+    [calltrace_profile.stop_text(snapshot.stop, meter.trace)],
+    calltrace_profile.lost_text(meter.trace),
+    count_note(
+      meter.unpaired_events,
+      " events had no start or end to pair with, such as a run that began before the probe, and are not in any slice.",
+    ),
+    count_note(
+      meter.dropped_slices,
+      " slices were past the slice limit and are counted in the totals but not drawn.",
+    ),
+    count_note(
+      meter.trace.targets_gone,
+      " traced processes exited while the probe ran.",
+    ),
+    case meter.long_gc_ms, meter.long_schedule_ms {
+      0, 0 -> [
+        "The node-wide long collection and long timeslice thresholds were not set, so no such events were watched for.",
+      ]
+      gc, schedule -> [
+        "Node-wide thresholds: collections of "
+        <> fmt.count(gc)
+        <> " ms or more and timeslices of "
+        <> fmt.count(schedule)
+        <> " ms or more are reported for any process on the node, not only the traced ones; "
+        <> fmt.count(meter.long_events_seen)
+        <> " were seen, and the agent keeps the first 200.",
+      ]
+    },
+    [
+      "Time on a scheduler is the closest the BEAM comes to per-process CPU time, and includes any time the operating system took the scheduler thread away.",
+    ],
+  ])
+}
+
+fn count_note(count: Int, rest: String) -> List(String) {
+  case count {
+    0 -> []
+    _ -> [fmt.count(count) <> rest]
+  }
+}
+
 fn stack_notes(meter: wire.SamplerMeter) -> List(String) {
   let achieved = meter.achieved_millihz / 1000
 
@@ -325,7 +549,11 @@ fn aggregated_of(
         list.drop(frames, index) |> list.first
       })
       |> result.map(fn(resolved) {
-        profile_from_stacks.Stack(frames: resolved, count: stack.count)
+        profile_from_stacks.Stack(
+          frames: resolved,
+          count: stack.count,
+          status: Some(stack.status),
+        )
       })
     })
     |> result.replace_error(
@@ -508,10 +736,25 @@ pub fn to_records(probes: List(ProbeRecord)) -> List(Record(Profile)) {
             ]
             None -> []
           },
+          detail_records(probe.detail),
         ])
       Finished(..), Error(Nil) -> []
     }
   })
+}
+
+// A tracing probe's slices and totals are an `events` record, which carries
+// the probe's whole result so a replay draws what the live page drew.
+fn detail_records(detail: Detail) -> List(Record(Profile)) {
+  case detail {
+    NoDetail -> []
+    SchedulingDetail(snapshot:) -> [
+      capture.EventsRecord(capture.scheduling_events(snapshot)),
+    ]
+    CallSlices(snapshot:) -> [
+      capture.EventsRecord(capture.call_tree_events(snapshot)),
+    ]
+  }
 }
 
 fn source_of(source: profile.Source) -> capture.ProfileSource {
@@ -540,20 +783,50 @@ pub fn of_records(records: List(Record(Profile))) -> List(ProbeRecord) {
       }
     })
 
+  let traced =
+    list.filter_map(records, fn(record) {
+      case record {
+        capture.EventsRecord(capture.Events(traced: Some(found), ..)) ->
+          Ok(found)
+        _ -> Error(Nil)
+      }
+    })
+
   records
   |> list.filter_map(fn(record) {
     case record {
-      capture.ProbeCostRecord(cost) -> Ok(probe_of(cost, profiles))
+      capture.ProbeCostRecord(cost) -> Ok(probe_of(cost, profiles, traced))
       _ -> Error(Nil)
     }
   })
   |> list.reverse
 }
 
+// The tracing result a cost record's probe left, by the probe's id.
+fn detail_of(cost: capture.ProbeCost, traced: List(capture.Traced)) -> Detail {
+  case
+    list.find(traced, fn(found) {
+      case found {
+        capture.SchedulingTraced(snapshot:) ->
+          int.to_string(snapshot.probe_id) == cost.probe
+        capture.CallTreeTraced(snapshot:) ->
+          int.to_string(snapshot.probe_id) == cost.probe
+      }
+    })
+  {
+    Ok(capture.SchedulingTraced(snapshot:)) -> SchedulingDetail(snapshot)
+    Ok(capture.CallTreeTraced(snapshot:)) -> CallSlices(snapshot)
+    Error(Nil) -> NoDetail
+  }
+}
+
 fn probe_of(
   cost: capture.ProbeCost,
   profiles: List(capture.Profile(Profile)),
+  traced: List(capture.Traced),
 ) -> ProbeRecord {
+  let detail = detail_of(cost, traced)
+
   let found =
     int.parse(cost.probe)
     |> result.try(fn(number) {
@@ -568,8 +841,14 @@ fn probe_of(
         policy.Sampling
       Some(capture.Profile(source: capture.TracedCalls, ..)) -> policy.CallTree
       Some(capture.Profile(source: capture.TracedCounters, ..))
-      | Some(capture.Profile(source: capture.AllocationCounts, ..))
-      | None -> policy.Counters
+      | Some(capture.Profile(source: capture.AllocationCounts, ..)) ->
+        policy.Counters
+      None ->
+        case detail {
+          SchedulingDetail(..) -> policy.SchedulingGc
+          CallSlices(..) -> policy.CallTree
+          NoDetail -> policy.Counters
+        }
     },
     modules: [],
     started_ms: 0,
@@ -587,5 +866,6 @@ fn probe_of(
       profile: option.map(found, fn(item) { item.payload }),
       notes: ["Read from a capture: when the probe ran is not recorded."],
     ),
+    detail:,
   )
 }

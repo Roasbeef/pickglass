@@ -698,6 +698,7 @@ fn event_records(
       timestamps_ms: list.map(observations, fn(o) { o.at_ms }),
       durations_ms: list.map(observations, fn(o) { o.elapsed_ms }),
       args: list.map(observations, fn(o) { int.to_string(o.seq) }),
+      traced: None,
     ))
 
   let accounting =
@@ -718,6 +719,7 @@ fn event_records(
         timestamps_ms: list.map(accounting, fn(pair) { pair.0 }),
         durations_ms: list.map(accounting, fn(_) { 0 }),
         args: list.map(accounting, fn(pair) { pair.1 }),
+        traced: None,
       )),
     ]
   }
@@ -740,6 +742,7 @@ fn event_records(
         timestamps_ms: list.map(census, fn(pair) { pair.0 }),
         durations_ms: list.map(census, fn(pair) { pair.1 }),
         args: list.map(census, fn(_) { "" }),
+        traced: None,
       )),
     ]
   }
@@ -766,6 +769,7 @@ fn event_records(
               timestamps_ms: list.map(present, fn(pair) { pair.0 }),
               durations_ms: list.map(present, fn(_) { 0 }),
               args: list.map(present, fn(pair) { pair.1 }),
+              traced: None,
             )),
           )
       }

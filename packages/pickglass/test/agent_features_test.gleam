@@ -17,6 +17,7 @@ import pickglass/supervision_build
 import pickglass_core/measure.{Known, Missing}
 import pickglass_core/policy
 import pickglass_core/profile
+import pickglass_core/profile/activity
 import pickglass_core/wire
 import pickglass_web/model
 import pickglass_web/msg
@@ -299,6 +300,7 @@ fn base_inputs(page: seam.Page) -> feeds.Inputs {
     marks: [],
     baseline: None,
     probes: [],
+    samples: activity.OnSchedulerOnly,
     chain: [],
     exports: [],
     comparison: feeds.no_comparison,

@@ -39,7 +39,9 @@ import pickglass/endpoint
 import pickglass/internal/ffi_dist
 import pickglass/internal/ffi_os
 import pickglass_core/owner
+import pickglass_core/profile/activity
 import pickglass_core/wire
+import pickglass_web/wire as web_wire
 
 /// What to run.
 pub type Command {
@@ -97,22 +99,44 @@ pub type ProfileFormat {
   TextFormat
 }
 
+/// How `pickglass profile` measures the processes it chose.
+pub type ProfileMethod {
+  /// Poll the stacks of the processes at a rate. `samples` is which of the
+  /// samples the summary and the file include: by default only those taken
+  /// while a process was running or runnable, because on an idle node most
+  /// samples find processes waiting in `receive`.
+  SampleStacks(rate_hz: Int, samples: activity.Inclusion)
+
+  /// Trace the calls of the named modules in the processes and build a call
+  /// tree with exact call counts and times. The modules are required: the
+  /// agent refuses to trace every function of a node.
+  TraceCalls(modules: List(String))
+}
+
 /// Options of `pickglass profile`.
 pub type ProfileOptions {
   ProfileOptions(
     selector: Selector,
     agent_ebin: Option(String),
     target: ProfileTarget,
-    /// How long to sample, in seconds.
+    /// How long to sample or trace, in seconds.
     seconds: Int,
-    /// Samples per second per process, as asked.
-    rate_hz: Int,
     /// Where to write the file, or `None` for the format's default name in
     /// the current directory. The text format with no file prints only.
     out: Option(String),
     format: ProfileFormat,
+    method: ProfileMethod,
   )
 }
+
+/// The longest a call trace may run, in seconds: the agent's limit.
+pub const trace_seconds_max = 10
+
+/// How long a call trace runs when `--seconds` is not given.
+pub const trace_seconds_default = 5
+
+/// The most processes a call trace may name: the agent's limit.
+pub const trace_processes_max = 4
 
 /// How the target is found.
 pub type Selector {
@@ -182,7 +206,12 @@ pub const usage =
                         [--probe-counters MODULE --seconds N]
        pickglass attach TARGET --once --out FILE
        pickglass profile TARGET (--owner KIND:ID | --top N | --pid-text PID)
-                         [--seconds S] [--rate HZ] [--out FILE]
+                         [--seconds S] [--rate HZ] [--include-waiting]
+                         [--out FILE]
+                         [--format speedscope|collapsed|chrome|pgcap|text]
+       pickglass profile TARGET (--owner KIND:ID | --top N | --pid-text PID)
+                         --trace-calls --module MODULE [--module MODULE ...]
+                         [--seconds S] [--out FILE]
                          [--format speedscope|collapsed|chrome|pgcap|text]
 
 TARGET is one of
@@ -207,7 +236,17 @@ seconds (default 10) at HZ samples a second per process (default 100). It
 goes through the same plan, confirm and audit path as the pages, as the
 local owner, writes the profile (speedscope JSON by default, which opens at
 speedscope.app) and prints a summary. --format text prints an indented call
-tree instead of writing a file.
+tree instead of writing a file. By default only the samples taken while a
+process was running or runnable are counted, since on an idle node the others
+find processes waiting for a message; --include-waiting counts them too, and
+the summary states how the samples split.
+
+--trace-calls traces the calls of the modules named with --module (a name,
+or a prefix ending in *, repeated or separated by commas) in at most 4
+processes for at most 10 seconds (default 5) and builds a call tree from the
+exact calls and their times. At least one module is required, because the
+agent refuses to trace every function of a node. --rate and --include-waiting
+apply to sampling only.
 
 open attaches, serves the pages on 127.0.0.1 and prints a single-use URL.
 view serves the pages over a capture file with no target. compare prints two
@@ -440,88 +479,237 @@ fn parse_profile(
   arguments: List(String),
   selector: Selector,
 ) -> Result(Command, String) {
-  profile_options(
+  profile_flags(
     arguments,
     ProfileOptions(
       selector:,
       agent_ebin: None,
       target: TopTarget(0),
       seconds: 10,
-      rate_hz: 100,
       out: None,
       format: SpeedscopeFormat,
+      method: SampleStacks(rate_hz: 100, samples: activity.OnSchedulerOnly),
     ),
-    [],
+    no_flags,
   )
 }
 
-fn profile_options(
+// What the flags have said so far that depends on which method is chosen:
+// the method is known only once every flag has been read, so a flag that
+// belongs to one is held here and checked against it at the end.
+type Flags {
+  Flags(
+    targets: List(ProfileTarget),
+    seconds: Option(Int),
+    rate_hz: Option(Int),
+    waiting: Option(Nil),
+    tracing: Option(Nil),
+    modules: List(String),
+  )
+}
+
+const no_flags =
+  Flags(
+    targets: [],
+    seconds: None,
+    rate_hz: None,
+    waiting: None,
+    tracing: None,
+    modules: [],
+  )
+
+fn profile_flags(
   arguments: List(String),
   options: ProfileOptions,
-  targets: List(ProfileTarget),
+  flags: Flags,
 ) -> Result(Command, String) {
   case arguments {
-    [] ->
-      case targets {
-        [one] -> Ok(Profile(ProfileOptions(..options, target: one)))
-        [] -> Error("profile needs one of --owner, --top and --pid-text")
-        _ -> Error("profile takes only one of --owner, --top and --pid-text")
-      }
+    [] -> finish_profile(options, flags)
     ["--agent-ebin", value, ..rest] ->
-      profile_options(
+      profile_flags(
         rest,
         ProfileOptions(..options, agent_ebin: Some(value)),
-        targets,
+        flags,
       )
     ["--out", value, ..rest] ->
-      profile_options(
-        rest,
-        ProfileOptions(..options, out: Some(value)),
-        targets,
-      )
+      profile_flags(rest, ProfileOptions(..options, out: Some(value)), flags)
     ["--owner", value, ..rest] -> {
       use owner_text <- result.try(owner_argument(value))
 
-      profile_options(rest, options, [OwnerTarget(owner_text), ..targets])
+      profile_flags(
+        rest,
+        options,
+        Flags(..flags, targets: [OwnerTarget(owner_text), ..flags.targets]),
+      )
     }
     ["--top", value, ..rest] ->
       case int.parse(value) {
         Ok(count) if count >= 1 && count <= 16 ->
-          profile_options(rest, options, [TopTarget(count), ..targets])
+          profile_flags(
+            rest,
+            options,
+            Flags(..flags, targets: [TopTarget(count), ..flags.targets]),
+          )
         _ -> Error("--top must be between 1 and 16, the agent's limit")
       }
     ["--pid-text", value, ..rest] ->
       case pid_text_shaped(value) {
         True ->
-          profile_options(rest, options, [ProcessTarget(value), ..targets])
+          profile_flags(
+            rest,
+            options,
+            Flags(..flags, targets: [ProcessTarget(value), ..flags.targets]),
+          )
         False -> Error("--pid-text must look like <0.123.0>")
       }
     ["--seconds", value, ..rest] ->
       case int.parse(value) {
         Ok(count) if count >= 1 && count <= 60 ->
-          profile_options(
-            rest,
-            ProfileOptions(..options, seconds: count),
-            targets,
-          )
+          profile_flags(rest, options, Flags(..flags, seconds: Some(count)))
         _ -> Error("--seconds must be between 1 and 60 for a stack probe")
       }
     ["--rate", value, ..rest] ->
       case int.parse(value) {
         Ok(hz) if hz >= 1 && hz <= 1000 ->
-          profile_options(rest, ProfileOptions(..options, rate_hz: hz), targets)
+          profile_flags(rest, options, Flags(..flags, rate_hz: Some(hz)))
         _ -> Error("--rate must be between 1 and 1000 samples a second")
       }
+    ["--include-waiting", ..rest] ->
+      profile_flags(rest, options, Flags(..flags, waiting: Some(Nil)))
+    ["--trace-calls", ..rest] ->
+      profile_flags(rest, options, Flags(..flags, tracing: Some(Nil)))
+    ["--module", value, ..rest] -> {
+      use named <- result.try(module_arguments(value))
+
+      profile_flags(
+        rest,
+        options,
+        Flags(..flags, modules: list.append(flags.modules, named)),
+      )
+    }
     ["--format", value, ..rest] ->
       case profile_format(value) {
         Ok(format) ->
-          profile_options(rest, ProfileOptions(..options, format:), targets)
+          profile_flags(rest, ProfileOptions(..options, format:), flags)
         Error(Nil) ->
           Error(
             "--format must be one of speedscope, collapsed, chrome, pgcap, text",
           )
       }
     [flag, ..] -> Error("unknown or incomplete option: " <> flag)
+  }
+}
+
+// The flags are read; now they are checked against the method they chose.
+// Each flag that belongs to one method only is refused under the other, so a
+// command line never silently ignores part of what it says.
+fn finish_profile(
+  options: ProfileOptions,
+  flags: Flags,
+) -> Result(Command, String) {
+  use target <- result.try(case flags.targets {
+    [one] -> Ok(one)
+    [] -> Error("profile needs one of --owner, --top and --pid-text")
+    _ -> Error("profile takes only one of --owner, --top and --pid-text")
+  })
+
+  case flags.tracing {
+    None -> finish_sampling(options, flags, target)
+    Some(Nil) -> finish_tracing(options, flags, target)
+  }
+}
+
+fn finish_sampling(
+  options: ProfileOptions,
+  flags: Flags,
+  target: ProfileTarget,
+) -> Result(Command, String) {
+  case flags.modules {
+    [_, ..] ->
+      Error("--module applies to --trace-calls, which names what to trace")
+    [] ->
+      Ok(Profile(
+        ProfileOptions(
+          ..options,
+          target:,
+          seconds: option.unwrap(flags.seconds, 10),
+          method: SampleStacks(
+            rate_hz: option.unwrap(flags.rate_hz, 100),
+            samples: case flags.waiting {
+              Some(Nil) -> activity.IncludeWaiting
+              None -> activity.OnSchedulerOnly
+            },
+          ),
+        ),
+      ))
+  }
+}
+
+fn finish_tracing(
+  options: ProfileOptions,
+  flags: Flags,
+  target: ProfileTarget,
+) -> Result(Command, String) {
+  let seconds = option.unwrap(flags.seconds, trace_seconds_default)
+
+  case flags.modules, flags.rate_hz, flags.waiting, target {
+    [], _, _, _ ->
+      Error(
+        "--trace-calls needs at least one --module: the agent refuses to trace every function of a node",
+      )
+    _, Some(_), _, _ ->
+      Error("--rate applies to stack sampling, not to --trace-calls")
+    _, _, Some(_), _ ->
+      Error(
+        "--include-waiting applies to stack sampling: a call trace records no process status",
+      )
+    _, _, _, TopTarget(count) if count > trace_processes_max ->
+      Error(
+        "--top must be between 1 and "
+        <> int.to_string(trace_processes_max)
+        <> " for --trace-calls, the agent's limit",
+      )
+    _, _, _, _ ->
+      case seconds <= trace_seconds_max {
+        False ->
+          Error(
+            "--seconds must be between 1 and "
+            <> int.to_string(trace_seconds_max)
+            <> " for --trace-calls, the agent's limit",
+          )
+        True ->
+          Ok(Profile(
+            ProfileOptions(
+              ..options,
+              target:,
+              seconds:,
+              method: TraceCalls(modules: flags.modules),
+            ),
+          ))
+      }
+  }
+}
+
+// A `--module` value is one name or several joined by commas or spaces, from
+// the alphabet the page's form accepts. A lone `*` would name every module,
+// which the agent refuses, so it is refused here with the reason.
+fn module_arguments(value: String) -> Result(List(String), String) {
+  case web_wire.module_patterns(value) {
+    Error(web_wire.NoPatterns) -> Error("--module needs a module name")
+    Error(web_wire.TooManyPatterns) ->
+      Error("--module names too many modules for one call trace")
+    Error(web_wire.BadPattern(text:)) ->
+      Error(
+        "--module takes letters, digits, _, @ and * only; refused: " <> text,
+      )
+    Ok(names) ->
+      case list.contains(names, "*") {
+        True ->
+          Error(
+            "--module * would trace every module, which the agent refuses; name the modules",
+          )
+        False -> Ok(names)
+      }
   }
 }
 

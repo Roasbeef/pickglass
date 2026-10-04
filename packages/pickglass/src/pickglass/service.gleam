@@ -165,7 +165,7 @@ pub type Held {
     pids: List(String),
     chosen: String,
     duration_ms: Int,
-    rate_hz: Int,
+    method: seam.ProfileMethod,
     stage: Stage,
   )
 }
@@ -378,7 +378,8 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
                 plan_id: held.plan_id,
                 chosen: held.chosen,
                 duration_ms: held.duration_ms,
-                rate_hz: held.rate_hz,
+                method: held.method,
+                processes: list.length(held.pids),
               ))
             _, _ -> Error(Nil)
           }
@@ -685,6 +686,16 @@ fn apply(
       seam.StacksStopped(snapshot),
     )
 
+    exec.CalltraceStopped(snapshot) -> #(
+      State(..state, probes: close_calltrace(state.probes, snapshot, now)),
+      seam.CalltraceStopped(snapshot),
+    )
+
+    exec.EventsStopped(snapshot) -> #(
+      State(..state, probes: close_events(state.probes, snapshot, now)),
+      seam.EventsStopped(snapshot),
+    )
+
     // The agent is told to go, and nothing the viewer holds is valid against
     // it from here. Waiting for the hub to notice would leave three passes
     // in which commands pass the gate and each wait out the agent's deadline.
@@ -913,6 +924,38 @@ fn close_stacks(
   })
 }
 
+fn close_calltrace(
+  probes: List(ProbeRecord),
+  snapshot: wire.CalltraceSnapshot,
+  now: Int,
+) -> List(ProbeRecord) {
+  list.map(probes, fn(probe) {
+    case
+      probe.id == int.to_string(snapshot.probe_id),
+      probe_book.is_running(probe)
+    {
+      True, True -> probe_book.finish_calltrace(probe, snapshot, now)
+      _, _ -> probe
+    }
+  })
+}
+
+fn close_events(
+  probes: List(ProbeRecord),
+  snapshot: wire.EventsSnapshot,
+  now: Int,
+) -> List(ProbeRecord) {
+  list.map(probes, fn(probe) {
+    case
+      probe.id == int.to_string(snapshot.probe_id),
+      probe_book.is_running(probe)
+    {
+      True, True -> probe_book.finish_events(probe, snapshot, now)
+      _, _ -> probe
+    }
+  })
+}
+
 fn close_probe(
   probes: List(ProbeRecord),
   snapshot: wire.CountersSnapshot,
@@ -972,10 +1015,14 @@ fn poll_one(remote: Remote, probe: ProbeRecord) -> exec.Poll {
   case answer {
     exec.Polled(wire.CountersSnapshot(state: wire.ProbeRunning, ..))
     | exec.PolledStacks(wire.StacksSnapshot(state: wire.ProbeRunning, ..))
+    | exec.PolledCalltrace(wire.CalltraceSnapshot(state: wire.ProbeRunning, ..))
+    | exec.PolledEvents(wire.EventsSnapshot(state: wire.ProbeRunning, ..))
     | exec.PollRefused(_)
     | exec.PollPending -> Nil
-    exec.Polled(_) | exec.PolledStacks(_) ->
-      exec.release_probe(remote, probe.id, probe.kind)
+    exec.Polled(_)
+    | exec.PolledStacks(_)
+    | exec.PolledCalltrace(_)
+    | exec.PolledEvents(_) -> exec.release_probe(remote, probe.id, probe.kind)
   }
 
   answer
@@ -1024,6 +1071,18 @@ fn apply_poll(
               wire.ProbeRunning -> probe
               wire.ProbeFinished | wire.ProbeStopped ->
                 probe_book.finish_stacks(probe, snapshot, now)
+            }
+          exec.PolledCalltrace(snapshot) ->
+            case snapshot.state {
+              wire.ProbeRunning -> probe
+              wire.ProbeFinished | wire.ProbeStopped ->
+                probe_book.finish_calltrace(probe, snapshot, now)
+            }
+          exec.PolledEvents(snapshot) ->
+            case snapshot.state {
+              wire.ProbeRunning -> probe
+              wire.ProbeFinished | wire.ProbeStopped ->
+                probe_book.finish_events(probe, snapshot, now)
             }
           exec.PollRefused(reason) -> probe_book.finish_lost(probe, reason, now)
           exec.PollPending -> probe
@@ -1255,34 +1314,96 @@ pub fn profile(
   request: seam.ProfileRequest,
 ) -> Reply {
   case request {
-    seam.PlanProfile(pids:, chosen:, duration_ms:, rate_hz:) -> {
-      let claimed = claim(service, principal, AnyPlan)
-
-      plan_profile(
+    seam.PlanProfile(pids:, chosen:, duration_ms:, rate_hz:) ->
+      plan_fresh(
         service,
         principal,
         pids,
         chosen,
         duration_ms,
-        rate_hz,
-        list.flat_map(claimed, fn(held) { held.taken }),
+        seam.ByStacks(rate_hz),
       )
-    }
 
-    seam.ReplanProfile(plan_id:, duration_ms:, rate_hz:) ->
-      case claim(service, principal, ThisPlan(plan_id)) {
-        [held, ..] ->
-          plan_profile(
-            service,
-            principal,
-            held.pids,
-            held.chosen,
-            duration_ms,
-            rate_hz,
-            held.taken,
-          )
-        [] -> seam.Rejected("that profile plan is no longer pending")
+    seam.PlanCallTrace(pids:, chosen:, duration_ms:, modules:) ->
+      plan_fresh(
+        service,
+        principal,
+        pids,
+        chosen,
+        duration_ms,
+        seam.ByCalls(modules),
+      )
+
+    seam.PlanRecording(pids:, chosen:, duration_ms:) ->
+      plan_fresh(service, principal, pids, chosen, duration_ms, seam.ByEvents)
+
+    seam.ReplanProfile(plan_id:, duration_ms:, method:) ->
+      case replannable(service, principal, plan_id, method) {
+        Error(reason) -> seam.Rejected(reason)
+        Ok(Nil) ->
+          case claim(service, principal, ThisPlan(plan_id)) {
+            [held, ..] ->
+              plan_profile(
+                service,
+                principal,
+                held.pids,
+                held.chosen,
+                duration_ms,
+                method,
+                held.taken,
+              )
+            [] -> seam.Rejected("that profile plan is no longer pending")
+          }
       }
+  }
+}
+
+// A new profile replaces every plan the principal has pending, taking over
+// the pins they held so none is released in between.
+fn plan_fresh(
+  service: Service,
+  principal: Principal,
+  pids: List(String),
+  chosen: String,
+  duration_ms: Int,
+  method: seam.ProfileMethod,
+) -> Reply {
+  let claimed = claim(service, principal, AnyPlan)
+
+  plan_profile(
+    service,
+    principal,
+    pids,
+    chosen,
+    duration_ms,
+    method,
+    list.flat_map(claimed, fn(held) { held.taken }),
+  )
+}
+
+// Whether a pending plan can be planned again by another method. The check is
+// made before the plan is claimed, because a claim cancels it: a call trace
+// takes fewer processes than a stack probe, and a swap the agent would refuse
+// must leave the plan the operator has in place.
+fn replannable(
+  service: Service,
+  principal: Principal,
+  plan_id: String,
+  method: seam.ProfileMethod,
+) -> Result(Nil, String) {
+  let notes =
+    process.call(service.subject, 5000, fn(reply) { Notes(principal.id, reply) })
+
+  case list.find(notes, fn(note) { note.plan_id == plan_id }), method {
+    Error(Nil), _ -> Error("that profile plan is no longer pending")
+    Ok(note), seam.ByCalls(_) if note.processes > seam.trace_limit ->
+      Error(
+        "a call trace takes at most "
+        <> int.to_string(seam.trace_limit)
+        <> " processes and this profile chose "
+        <> int.to_string(note.processes),
+      )
+    Ok(_), _ -> Ok(Nil)
   }
 }
 
@@ -1300,10 +1421,15 @@ fn plan_profile(
   pids: List(String),
   chosen: String,
   duration_ms: Int,
-  rate_hz: Int,
+  method: seam.ProfileMethod,
   inherited: List(String),
 ) -> Reply {
   let wanted = list.unique(pids)
+  let limit = case method {
+    seam.ByStacks(_) -> seam.profile_limit
+    seam.ByCalls(_) -> seam.trace_limit
+    seam.ByEvents -> seam.recording_limit
+  }
 
   case list.length(wanted) {
     0 -> {
@@ -1311,12 +1437,18 @@ fn plan_profile(
 
       seam.Rejected("no process to profile")
     }
-    count if count > seam.profile_limit -> {
+    count if count > limit -> {
       release_now(service, principal, inherited)
 
       seam.Rejected(
-        "a profile takes at most "
-        <> int.to_string(seam.profile_limit)
+        "a "
+        <> case method {
+          seam.ByStacks(_) -> "profile"
+          seam.ByCalls(_) -> "call trace"
+          seam.ByEvents -> "recording"
+        }
+        <> " takes at most "
+        <> int.to_string(limit)
         <> " processes",
       )
     }
@@ -1349,7 +1481,7 @@ fn plan_profile(
             wanted,
             chosen,
             duration_ms,
-            rate_hz,
+            method,
           )
       }
     }
@@ -1405,14 +1537,17 @@ fn plan_over(
   wanted: List(String),
   chosen: String,
   duration_ms: Int,
-  rate_hz: Int,
+  method: seam.ProfileMethod,
 ) -> Reply {
   let planned =
-    submit(
-      service,
-      principal,
-      seam.PlanProbe(policy.Sampling, targets, [], duration_ms, rate_hz),
-    )
+    submit(service, principal, case method {
+      seam.ByStacks(rate_hz) ->
+        seam.PlanProbe(policy.Sampling, targets, [], duration_ms, rate_hz)
+      seam.ByCalls(modules) ->
+        seam.PlanProbe(policy.CallTree, targets, modules, duration_ms, 0)
+      seam.ByEvents ->
+        seam.PlanProbe(policy.SchedulingGc, targets, [], duration_ms, 0)
+    })
 
   case planned {
     seam.PlanReady(plan_id, _) -> {
@@ -1434,7 +1569,7 @@ fn plan_over(
             pids: wanted,
             chosen: sentence,
             duration_ms:,
-            rate_hz:,
+            method:,
             stage: Planned,
           ),
           reply,

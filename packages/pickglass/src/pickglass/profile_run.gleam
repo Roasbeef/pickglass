@@ -18,8 +18,19 @@
 //// The summary says how much was sampled, how well, and what the numbers do
 //// not mean: samples are taken at reduction safe points, so time in long
 //// BIFs and NIFs is under-counted and widths are shares of samples, not of
-//// time. A failure is one typed line, `profile failed (code): reason`, and
-//// a non-zero exit status.
+//// time. By default only the samples taken while a process was running or
+//// runnable are counted, and the summary states how the whole set split
+//// between those and the samples taken while a process waited, because on an
+//// idle node the waits would otherwise be the heaviest functions;
+//// `--include-waiting` counts them all. A profile with no running sample says
+//// so plainly and writes no file of nothing.
+////
+//// With `--trace-calls` the command traces the calls of the named modules
+//// instead and builds a call tree with exact counts and times, over the same
+//// plan, confirm and release path. The summary then says how the probe ended
+//// and what it dropped, and that untraced time counts as the caller's. A
+//// failure is one typed line, `profile failed (code): reason`, and a non-zero
+//// exit status.
 ////
 //// ## Flow
 ////
@@ -38,6 +49,7 @@ import gleam/set
 import gleam/string
 import pickglass/attach
 import pickglass/audit
+import pickglass/calltrace_profile
 import pickglass/capture_build
 import pickglass/capture_file
 import pickglass/cli
@@ -60,8 +72,10 @@ import pickglass_core/measure
 import pickglass_core/owner
 import pickglass_core/policy
 import pickglass_core/profile.{type Profile}
+import pickglass_core/profile/activity
 import pickglass_web/model
 import pickglass_web/msg
+import pickglass_web/view/profile as profile_view
 import pickglass_web/view/ui
 import simplifile
 
@@ -232,7 +246,7 @@ pub fn execute(
     )
 
   use observations <- result.try(observe(page, options.target))
-  use chosen <- result.try(choose(options.target, observations))
+  use chosen <- result.try(choose(options.target, options.method, observations))
   use probe <- result.try(sample(page, options, chosen))
 
   let released = wait_for_release(page)
@@ -306,9 +320,15 @@ fn wait_for_passes(
 // The processes to sample, by the rule the buttons use.
 fn choose(
   target: cli.ProfileTarget,
+  method: cli.ProfileMethod,
   observations: List(Observation),
 ) -> Result(profile_scope.Chosen, Failure) {
   let #(rows, _) = feeds.rated_rows_of(observations, 8)
+
+  let owner_limit = case method {
+    cli.SampleStacks(..) -> seam.profile_limit
+    cli.TraceCalls(..) -> seam.trace_limit
+  }
 
   let chosen = case target {
     cli.TopTarget(count) ->
@@ -320,7 +340,7 @@ fn choose(
     cli.OwnerTarget(text) ->
       profile_scope.choose(
         profile_scope.candidates_of(list.filter(rows, owned_by(text))),
-        seam.profile_limit,
+        owner_limit,
         profile_scope.OwnerScope(text),
       )
     cli.ProcessTarget(pid_text) ->
@@ -368,14 +388,7 @@ fn sample(
   options: cli.ProfileOptions,
   chosen: profile_scope.Chosen,
 ) -> Result(ProbeRecord, Failure) {
-  case
-    page.profile(seam.PlanProfile(
-      pids: chosen.pids,
-      chosen: chosen.sentence,
-      duration_ms: options.seconds * 1000,
-      rate_hz: options.rate_hz,
-    ))
-  {
+  case page.profile(plan_request(options, chosen)) {
     seam.PlanReady(id, plan) -> {
       io.println(plan_line(chosen, options, policy.plan_scope(plan)))
 
@@ -391,6 +404,29 @@ fn sample(
   }
 }
 
+// The profile request of the method the command line chose.
+fn plan_request(
+  options: cli.ProfileOptions,
+  chosen: profile_scope.Chosen,
+) -> seam.ProfileRequest {
+  case options.method {
+    cli.SampleStacks(rate_hz:, ..) ->
+      seam.PlanProfile(
+        pids: chosen.pids,
+        chosen: chosen.sentence,
+        duration_ms: options.seconds * 1000,
+        rate_hz:,
+      )
+    cli.TraceCalls(modules:) ->
+      seam.PlanCallTrace(
+        pids: chosen.pids,
+        chosen: chosen.sentence,
+        duration_ms: options.seconds * 1000,
+        modules:,
+      )
+  }
+}
+
 fn plan_line(
   chosen: profile_scope.Chosen,
   options: cli.ProfileOptions,
@@ -398,15 +434,28 @@ fn plan_line(
 ) -> String {
   let count = list.length(scope.targets)
 
-  "sampling "
-  <> chosen.sentence
-  <> ": "
-  <> int.to_string(count)
-  <> " processes pinned, "
-  <> int.to_string(policy.sampling_rate_hz(options.rate_hz, count))
-  <> " Hz each, "
-  <> int.to_string(options.seconds)
-  <> " s"
+  case options.method {
+    cli.SampleStacks(rate_hz:, ..) ->
+      "sampling "
+      <> chosen.sentence
+      <> ": "
+      <> int.to_string(count)
+      <> " processes pinned, "
+      <> int.to_string(policy.sampling_rate_hz(rate_hz, count))
+      <> " Hz each, "
+      <> int.to_string(options.seconds)
+      <> " s"
+    cli.TraceCalls(modules:) ->
+      "tracing calls of "
+      <> string.join(modules, ", ")
+      <> " in "
+      <> chosen.sentence
+      <> ": "
+      <> int.to_string(count)
+      <> " processes pinned, "
+      <> int.to_string(options.seconds)
+      <> " s"
+  }
 }
 
 fn wait_for_probe(
@@ -464,6 +513,19 @@ fn wait_for_no_pins(page: seam.Page, attempts: Int) -> Bool {
 
 // ----------------------------------------------------------------- finish
 
+// What the probe measured, as the command reports it: the whole profile, the
+// column the views and the summary read, and how its samples split by what the
+// processes were doing.
+type Measured {
+  Measured(
+    whole: Profile,
+    column: profile.Column,
+    /// The samples the files and the summary count.
+    shown: Profile,
+    samples: model.ActivityView,
+  )
+}
+
 fn finish(
   options: cli.ProfileOptions,
   version: String,
@@ -480,10 +542,7 @@ fn finish(
     probe_book.Finished(profile: None, outcome:, ..) ->
       Error(ProbeFailed(ui.truncation_text(outcome)))
     probe_book.Finished(profile: Some(found), outcome:, notes:, ..) -> {
-      use column <- result.try(
-        profile.column(found, 0)
-        |> result.replace_error(ProbeFailed("the profile has no values")),
-      )
+      use measured <- result.try(measure_of(options, probe, found))
       use written <- result.try(write(
         options,
         version,
@@ -491,19 +550,72 @@ fn finish(
         os_pid,
         remote,
         probe,
-        found,
-        column,
+        measured,
         observations,
         entries,
       ))
 
-      Ok(summary(chosen, options, probe, outcome, notes, found, column, written))
+      Ok(summary(chosen, options, probe, outcome, notes, measured, written))
     }
   }
 }
 
+// The column a method reads: a stack profile's sample count, a call tree's
+// exclusive time (the one whose sums are the widths of a flame's boxes). A
+// stack profile is cut to the samples the command line asked to count.
+fn measure_of(
+  options: cli.ProfileOptions,
+  probe: ProbeRecord,
+  found: Profile,
+) -> Result(Measured, Failure) {
+  case options.method {
+    cli.SampleStacks(samples: inclusion, ..) -> {
+      use column <- result.map(
+        profile.column(found, 0)
+        |> result.replace_error(ProbeFailed("the profile has no values")),
+      )
+
+      Measured(
+        whole: found,
+        column:,
+        shown: activity.restrict(found, inclusion),
+        samples: case activity.has_status(found) {
+          True ->
+            model.Statuses(
+              inclusion:,
+              split: activity.split(found, column),
+              processes: Some(probe.matched),
+            )
+          False -> model.NoStatuses
+        },
+      )
+    }
+    cli.TraceCalls(..) -> {
+      use column <- result.map(
+        profile.column_named(found, calltrace_profile.exclusive_column)
+        |> result.replace_error(ProbeFailed("the profile has no exclusive time")),
+      )
+
+      Measured(whole: found, column:, shown: found, samples: model.NoStatuses)
+    }
+  }
+}
+
+// Whether the command counted only running and runnable samples and the
+// processes had none: every sample was a wait.
+fn all_waiting(measured: Measured) -> Bool {
+  case measured.samples {
+    model.Statuses(inclusion: activity.OnSchedulerOnly, split:, ..) ->
+      split.on_scheduler == 0 && split.unstated == 0 && split.waiting > 0
+    model.Statuses(inclusion: activity.IncludeWaiting, ..) | model.NoStatuses ->
+      False
+  }
+}
+
 // What was written, and where, for the summary. A text summary with no file
-// writes nothing.
+// writes nothing, and neither does a profile of processes that never ran: a
+// file of nothing is not a profile, and the capture, which holds every
+// sample, is still written.
 fn write(
   options: cli.ProfileOptions,
   version: String,
@@ -511,8 +623,7 @@ fn write(
   os_pid: Int,
   remote: Remote,
   probe: ProbeRecord,
-  found: Profile,
-  column: profile.Column,
+  measured: Measured,
   observations: List(Observation),
   entries: List(audit.Entry),
 ) -> Result(Option(String), Failure) {
@@ -524,15 +635,6 @@ fn write(
   }
 
   case options.format {
-    cli.TextFormat ->
-      case options.out {
-        None -> Ok(None)
-        Some(path) ->
-          text.export(found, column, text.default_config)
-          |> result.replace_error(WriteFailed("the profile has no call stacks"))
-          |> result.try(fn(made) { to_file(path, made.body) })
-          |> result.map(Some)
-      }
     cli.PgcapFormat -> {
       let path = option.unwrap(options.out, "pickglass-profile.pgcap")
       let facts =
@@ -568,26 +670,46 @@ fn write(
 
       Some(path)
     }
-    cli.SpeedscopeFormat | cli.CollapsedFormat | cli.ChromeFormat -> {
-      let choice = case options.format {
-        cli.CollapsedFormat -> msg.AsCollapsed
-        cli.ChromeFormat -> msg.AsChromeTrace
-        _ -> msg.AsSpeedscope
+    cli.TextFormat ->
+      case options.out, all_waiting(measured) {
+        None, _ | _, True -> Ok(None)
+        Some(path), False ->
+          text.export(measured.shown, measured.column, text.default_config)
+          |> result.replace_error(WriteFailed("the profile has no call stacks"))
+          |> result.try(fn(made) { to_file(path, made.body) })
+          |> result.map(Some)
       }
+    cli.SpeedscopeFormat | cli.CollapsedFormat | cli.ChromeFormat ->
+      case all_waiting(measured) {
+        True -> Ok(None)
+        False -> {
+          let choice = case options.format {
+            cli.CollapsedFormat -> msg.AsCollapsed
+            cli.ChromeFormat -> msg.AsChromeTrace
+            _ -> msg.AsSpeedscope
+          }
 
-      use built <- result.try(
-        profile_export.make(choice, title, span_ms, found, column)
-        |> result.map_error(fn(refused) { WriteFailed(refused.reason) }),
-      )
-      let path =
-        option.lazy_unwrap(options.out, fn() {
-          "pickglass-" <> title <> extension(built)
-        })
+          use built <- result.try(
+            profile_export.make(
+              choice,
+              title,
+              span_ms,
+              measured.shown,
+              measured.column,
+              measured.samples,
+            )
+            |> result.map_error(fn(refused) { WriteFailed(refused.reason) }),
+          )
+          let path =
+            option.lazy_unwrap(options.out, fn() {
+              "pickglass-" <> title <> extension(built)
+            })
 
-      use _ <- result.map(to_file(path, built.download.body))
+          use _ <- result.map(to_file(path, built.download.body))
 
-      Some(path)
-    }
+          Some(path)
+        }
+      }
   }
 }
 
@@ -614,8 +736,8 @@ fn to_file(path: String, body: String) -> Result(String, Failure) {
 
 // ---------------------------------------------------------------- summary
 
-/// The text the command prints: what was sampled, the coverage and its
-/// caveats, the heaviest functions and where the file went. A text format
+/// The text the command prints: what was sampled or traced, the coverage and
+/// its caveats, the heaviest functions and where the file went. A text format
 /// prints the call tree as well.
 fn summary(
   chosen: profile_scope.Chosen,
@@ -623,52 +745,142 @@ fn summary(
   probe: ProbeRecord,
   outcome: measure.Outcome,
   notes: List(String),
-  found: Profile,
-  column: profile.Column,
+  measured: Measured,
   written: Option(String),
 ) -> String {
-  let samples = profile.total(found, column)
+  let lines = case options.method {
+    cli.SampleStacks(..) ->
+      stack_lines(chosen, options, probe, outcome, notes, measured)
+    cli.TraceCalls(modules:) ->
+      call_lines(chosen, options, probe, outcome, notes, measured, modules)
+  }
 
-  let lines = [
-    "profile of " <> chosen.sentence,
-    "probe "
-      <> probe.id
-      <> ": "
-      <> int.to_string(samples)
-      <> " samples over "
-      <> int.to_string(options.seconds)
-      <> " s, "
-      <> ui.truncation_text(outcome),
-    "coverage: "
-      <> case list.find(notes, string.starts_with(_, "Sampled")) {
-      Ok(sampled) -> sampled
-      Error(Nil) -> "no coverage note"
-    },
-    "caveats: sampled at reduction safe points; long BIFs and NIFs are under-counted, and widths are shares of samples, not of time.",
-    ..list.map(
-      list.filter(notes, fn(note) { !string.starts_with(note, "Sampled") }),
-      fn(note) { "  " <> note },
-    )
-  ]
-
-  let body = case options.format {
-    cli.TextFormat ->
-      case text.export(found, column, text.default_config) {
+  let body = case all_waiting(measured), options.format {
+    True, _ -> ""
+    False, cli.TextFormat ->
+      case text.export(measured.shown, measured.column, text.default_config) {
         Ok(made) -> made.body
-        Error(_) -> text.functions(found, column, 15)
+        Error(_) -> text.functions(measured.shown, measured.column, 15)
       }
-    cli.SpeedscopeFormat
-    | cli.CollapsedFormat
-    | cli.ChromeFormat
-    | cli.PgcapFormat -> text.functions(found, column, 15)
+    False, _ -> text.functions(measured.shown, measured.column, 15)
   }
 
   let destination = case written, options.format {
     Some(path), cli.SpeedscopeFormat ->
       "wrote " <> path <> " (open it at https://www.speedscope.app)"
     Some(path), _ -> "wrote " <> path
-    None, _ -> ""
+    None, _ ->
+      case all_waiting(measured), options.format {
+        True, cli.PgcapFormat -> ""
+        True, _ ->
+          "no file was written: no sample caught a process running (--include-waiting writes the waiting samples)"
+        False, _ -> ""
+      }
   }
 
   string.join([string.join(lines, "\n"), "", body, destination], "\n")
+}
+
+// The summary of a stack profile: how many samples were counted and how the
+// whole set split, then the coverage and the caveats.
+fn stack_lines(
+  chosen: profile_scope.Chosen,
+  options: cli.ProfileOptions,
+  probe: ProbeRecord,
+  outcome: measure.Outcome,
+  notes: List(String),
+  measured: Measured,
+) -> List(String) {
+  let counted = profile.total(measured.shown, measured.column)
+
+  list.flatten([
+    [
+      "profile of " <> chosen.sentence,
+      "probe "
+        <> probe.id
+        <> ": "
+        <> int.to_string(counted)
+        <> " samples counted over "
+        <> int.to_string(options.seconds)
+        <> " s, "
+        <> ui.truncation_text(outcome),
+    ],
+    sample_lines(measured),
+    [
+      "coverage: "
+        <> case list.find(notes, string.starts_with(_, "Sampled")) {
+        Ok(sampled) -> sampled
+        Error(Nil) -> "no coverage note"
+      },
+      "caveats: sampled at reduction safe points; long BIFs and NIFs are under-counted, and widths are shares of samples, not of time.",
+    ],
+    list.map(
+      list.filter(notes, fn(note) { !string.starts_with(note, "Sampled") }),
+      fn(note) { "  " <> note },
+    ),
+  ])
+}
+
+// How the samples split, and which of them the command counted. A profile
+// whose processes never ran says so in a sentence of its own.
+fn sample_lines(measured: Measured) -> List(String) {
+  case measured.samples {
+    model.NoStatuses -> []
+    model.Statuses(inclusion:, split:, processes:) ->
+      list.flatten([
+        [
+          "samples: "
+          <> profile_view.split_text(split)
+          <> "; counting "
+          <> activity.inclusion_text(inclusion)
+          <> case inclusion {
+            activity.OnSchedulerOnly -> " (--include-waiting counts the rest)"
+            activity.IncludeWaiting -> ""
+          },
+        ],
+        case all_waiting(measured) {
+          True -> [profile_view.idle_text(processes)]
+          False -> []
+        },
+      ])
+  }
+}
+
+// The summary of a call trace: how it ended and what it lost, then the
+// caveats the folding carries.
+fn call_lines(
+  chosen: profile_scope.Chosen,
+  options: cli.ProfileOptions,
+  probe: ProbeRecord,
+  outcome: measure.Outcome,
+  notes: List(String),
+  measured: Measured,
+  modules: List(String),
+) -> List(String) {
+  let calls = case
+    profile.column_named(measured.whole, calltrace_profile.calls_column)
+  {
+    Ok(column) -> profile.total(measured.whole, column)
+    Error(Nil) -> 0
+  }
+
+  list.flatten([
+    [
+      "traced calls of "
+        <> string.join(modules, ", ")
+        <> " in "
+        <> chosen.sentence,
+      "probe "
+        <> probe.id
+        <> ": "
+        <> int.to_string(calls)
+        <> " calls over "
+        <> int.to_string(list.length(profile.functions(measured.whole)))
+        <> " functions in "
+        <> int.to_string(options.seconds)
+        <> " s, "
+        <> ui.truncation_text(outcome),
+    ],
+    list.map(notes, fn(note) { "  " <> note }),
+  ])
 }
