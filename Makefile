@@ -4,7 +4,7 @@
 # and what you run locally are the same commands. Packages live under
 # packages/; tools/lint is Loom's house lint, vendored.
 
-PACKAGES := pickglass
+PACKAGES := core pickglass
 # The vendored lint is formatted and tested as a package of its own, but it
 # is not part of `check`'s lint run: it is the linter, not its subject.
 TOOLS := lint
