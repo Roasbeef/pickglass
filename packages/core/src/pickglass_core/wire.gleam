@@ -18,8 +18,13 @@
 //// the request that was made (the requested budget lives with the caller),
 //// so that mapping happens in the viewer, not here.
 ////
+//// Requests go the other way. `encode_request` writes the envelope the
+//// agent's `request.decode` reads, again with binaries and integers only, so
+//// the viewer never has to create an atom the agent would not recognise.
+////
 //// ## Flow
 ////
+//// - `encode_request` wraps a request in `{<<"pg">>, 1, ReplyTo, Ref, Body}`.
 //// - `decode_envelope` reads `{<<"pg">>, 1, Ref, Body}` and returns the
 ////   request reference unread beside the decoded reply.
 //// - `reply_decoder` dispatches on the body's tag to one decoder per reply
@@ -27,6 +32,7 @@
 
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode.{type Decoder}
+import gleam/list
 import pickglass_core/identity.{type BootId, type PinToken}
 import pickglass_core/owner.{type Segment}
 
@@ -493,4 +499,113 @@ fn function_row_decoder() -> Decoder(FunctionRow) {
   use time_us <- decode.field(4, decode.int)
 
   decode.success(FunctionRow(module:, function:, arity:, calls:, time_us:))
+}
+
+// ---------------------------------------------------------------- requests
+
+/// What to do with scheduler wall time accounting.
+pub type SchedulerAction {
+  SchedulerOn
+  SchedulerOff
+  SchedulerRead
+}
+
+/// Which processes a counters probe covers.
+pub type Targets {
+  /// Every process on the node except the agent.
+  AllProcesses
+  /// Only the processes behind these pins.
+  PinnedProcesses(tokens: List(PinToken))
+}
+
+/// Everything the viewer may ask the agent.
+pub type Request {
+  AskPing
+  AskCensus(max_scanned: Int, top_k: Int)
+  AskMemory
+  AskPin(pid_text: String)
+  AskUnpin(token: PinToken)
+  AskScheduler(action: SchedulerAction)
+  AskStartCounters(
+    module: String,
+    function: String,
+    targets: Targets,
+    deadline_ms: Int,
+  )
+  AskReadCounters(probe_id: Int)
+  AskStopCounters(probe_id: Int)
+  AskDetach
+}
+
+/// Write a request as the envelope the agent reads. `reply_to` is the pid
+/// the reply should go to and `reference` the tag it will carry; both are
+/// opaque terms the caller owns.
+///
+/// ## Examples
+///
+/// ```gleam
+/// wire.encode_request(reply_to, reference, wire.AskPing)
+/// // -> {<<"pg">>, 1, ReplyTo, Ref, {<<"ping">>}}
+/// ```
+pub fn encode_request(
+  reply_to: Dynamic,
+  reference: Dynamic,
+  request: Request,
+) -> Dynamic {
+  dynamic.array([
+    dynamic.string("pg"),
+    dynamic.int(wire_version),
+    reply_to,
+    reference,
+    request_body(request),
+  ])
+}
+
+fn request_body(request: Request) -> Dynamic {
+  case request {
+    AskPing -> tagged("ping", [])
+    AskCensus(max_scanned, top_k) ->
+      tagged("census", [dynamic.int(max_scanned), dynamic.int(top_k)])
+    AskMemory -> tagged("memory", [])
+    AskPin(pid_text) -> tagged("pin", [dynamic.string(pid_text)])
+    AskUnpin(token) -> tagged("unpin", [token_term(token)])
+    AskScheduler(action) -> tagged("scheduler", [scheduler_action(action)])
+    AskStartCounters(module, function, targets, deadline_ms) ->
+      tagged("start_counters", [
+        dynamic.string(module),
+        dynamic.string(function),
+        targets_term(targets),
+        dynamic.int(deadline_ms),
+      ])
+    AskReadCounters(id) -> tagged("read_counters", [dynamic.int(id)])
+    AskStopCounters(id) -> tagged("stop_counters", [dynamic.int(id)])
+    AskDetach -> tagged("detach", [])
+  }
+}
+
+fn tagged(tag: String, fields: List(Dynamic)) -> Dynamic {
+  dynamic.array([dynamic.string(tag), ..fields])
+}
+
+fn scheduler_action(action: SchedulerAction) -> Dynamic {
+  case action {
+    SchedulerOn -> dynamic.string("on")
+    SchedulerOff -> dynamic.string("off")
+    SchedulerRead -> dynamic.string("read")
+  }
+}
+
+fn token_term(token: PinToken) -> Dynamic {
+  dynamic.array([
+    dynamic.string(identity.boot_id_text(identity.pin_boot(token))),
+    dynamic.int(identity.pin_serial(token)),
+  ])
+}
+
+fn targets_term(targets: Targets) -> Dynamic {
+  case targets {
+    AllProcesses -> tagged("all", [])
+    PinnedProcesses(tokens) ->
+      tagged("pins", [dynamic.list(list.map(tokens, token_term))])
+  }
 }

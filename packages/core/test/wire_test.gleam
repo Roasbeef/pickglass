@@ -365,3 +365,50 @@ pub fn unknown_tags_and_enumerations_are_errors_test() {
     ),
   )
 }
+
+// The request envelope is exactly what the agent's decoder reads.
+pub fn requests_encode_to_the_agent_shape_test() {
+  let reply_to = text("pid")
+  let reference = text("ref")
+
+  assert wire.encode_request(reply_to, reference, wire.AskPing)
+    == tuple([text("pg"), num(1), reply_to, reference, tuple([text("ping")])])
+  assert wire.encode_request(reply_to, reference, wire.AskCensus(100, 10))
+    == tuple([
+      text("pg"),
+      num(1),
+      reply_to,
+      reference,
+      tuple([text("census"), num(100), num(10)]),
+    ])
+
+  let assert Ok(boot) = identity.boot_id("boot-1") as "valid boot id"
+  let assert Ok(token) = identity.pin(boot, 4) as "valid serial"
+
+  assert wire.encode_request(
+      reply_to,
+      reference,
+      wire.AskStartCounters(
+        "lists",
+        "sort",
+        wire.PinnedProcesses([token]),
+        5000,
+      ),
+    )
+    == tuple([
+      text("pg"),
+      num(1),
+      reply_to,
+      reference,
+      tuple([
+        text("start_counters"),
+        text("lists"),
+        text("sort"),
+        tuple([
+          text("pins"),
+          dynamic.list([tuple([text("boot-1"), num(4)])]),
+        ]),
+        num(5000),
+      ]),
+    ])
+}
