@@ -91,6 +91,19 @@ pub fn census(report: census.Report) -> Term {
     ),
     seq.map(report.rows, row),
     seq.map(report.aggregates, aggregate),
+    totals(report.totals),
+  ))
+}
+
+fn totals(totals: census.Totals) -> Term {
+  ffi_term.coerce(#(
+    totals.processes,
+    totals.memory,
+    totals.queue_length,
+    totals.reductions,
+    totals.total_heap_words,
+    totals.owners_tracked,
+    totals.owners_listed,
   ))
 }
 
@@ -117,6 +130,7 @@ fn aggregate(aggregate: census.Aggregate) -> Term {
     aggregate.memory,
     aggregate.queue_length,
     aggregate.reductions,
+    aggregate.total_heap_words,
   ))
 }
 

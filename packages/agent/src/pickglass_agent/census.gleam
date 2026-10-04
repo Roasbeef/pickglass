@@ -63,7 +63,9 @@ pub type Row {
   )
 }
 
-/// The totals for one owner.
+/// The totals for one owner. `total_heap_words` is the sum of the owner's
+/// `total_heap_size`: every heap fragment the owner's processes hold, which
+/// is capacity and not only live data.
 pub type Aggregate {
   Aggregate(
     owner: Owner,
@@ -71,6 +73,23 @@ pub type Aggregate {
     memory: Int,
     queue_length: Int,
     reductions: Int,
+    total_heap_words: Int,
+  )
+}
+
+/// The sums over every process the walk scanned, whether or not its owner is
+/// listed in the report. The viewer's remainder row is these minus the sum of
+/// the listed aggregates, and `owners_tracked - owners_listed` is how many
+/// owners it stands for.
+pub type Totals {
+  Totals(
+    processes: Int,
+    memory: Int,
+    queue_length: Int,
+    reductions: Int,
+    total_heap_words: Int,
+    owners_tracked: Int,
+    owners_listed: Int,
   )
 }
 
@@ -81,7 +100,12 @@ pub type Coverage {
 
 /// The census result.
 pub type Report {
-  Report(rows: List(Row), aggregates: List(Aggregate), coverage: Coverage)
+  Report(
+    rows: List(Row),
+    aggregates: List(Aggregate),
+    totals: Totals,
+    coverage: Coverage,
+  )
 }
 
 type OwnerMap
@@ -101,23 +125,31 @@ const clock_interval = 1024
 /// How many owner aggregates a report carries.
 const max_aggregates = 100
 
-type Totals =
-  #(Int, Int, Int, Int)
+// Per-owner running sums, in the order processes, memory, queue length,
+// reductions and total heap words.
+type Sums =
+  #(Int, Int, Int, Int, Int)
+
+const no_sums = #(0, 0, 0, 0, 0)
+
+// A processes count of -1 is never a real sum, so it marks "absent" in a
+// lookup without a second `maps:is_key` call.
+const absent = #(-1, 0, 0, 0, 0)
 
 @external(erlang, "maps", "new")
 fn new_map() -> OwnerMap
 
 @external(erlang, "maps", "get")
-fn map_get(key: Owner, map: OwnerMap, default: Totals) -> Totals
+fn map_get(key: Owner, map: OwnerMap, default: Sums) -> Sums
 
 @external(erlang, "maps", "put")
-fn map_put(key: Owner, value: Totals, map: OwnerMap) -> OwnerMap
+fn map_put(key: Owner, value: Sums, map: OwnerMap) -> OwnerMap
 
 @external(erlang, "maps", "size")
 fn map_size(map: OwnerMap) -> Int
 
 @external(erlang, "maps", "to_list")
-fn map_to_list(map: OwnerMap) -> List(#(Owner, Totals))
+fn map_to_list(map: OwnerMap) -> List(#(Owner, Sums))
 
 /// Run a census on the calling process.
 ///
@@ -132,10 +164,12 @@ pub fn run(budget: Budget) -> Report {
   let total = ffi_vm.process_count()
   let initial = Walk(topk.new(budget.top_k), new_map(), 0, Finished)
   let walk = step(ffi_proc.processes_iterator(), initial, budget, started)
+  let listed = aggregates(walk.owners)
 
   Report(
     rows: seq.map(topk.descending(walk.top), fn(entry) { entry.1 }),
-    aggregates: aggregates(walk.owners),
+    aggregates: listed,
+    totals: totals(walk.owners, seq.length(listed)),
     coverage: Coverage(
       scanned: walk.scanned,
       total: total,
@@ -234,8 +268,8 @@ fn apply_info(row: Row, info: Info) -> Row {
 
 fn add_to_owner(owners: OwnerMap, row: Row) -> OwnerMap {
   let key = bounded_key(owners, row.owner)
-  let #(processes, memory, queue_length, reductions) =
-    map_get(key, owners, #(0, 0, 0, 0))
+  let #(processes, memory, queue_length, reductions, heap) =
+    map_get(key, owners, no_sums)
 
   map_put(
     key,
@@ -244,6 +278,7 @@ fn add_to_owner(owners: OwnerMap, row: Row) -> OwnerMap {
       memory + row.memory,
       queue_length + row.queue_length,
       reductions + row.reductions,
+      heap + row.total_heap_words,
     ),
     owners,
   )
@@ -256,8 +291,8 @@ fn bounded_key(owners: OwnerMap, key: Owner) -> Owner {
   case map_size(owners) >= max_owners {
     False -> key
     True ->
-      case map_get(key, owners, #(-1, 0, 0, 0)) {
-        #(-1, _, _, _) -> Owned([], "other")
+      case map_get(key, owners, absent) {
+        #(-1, _, _, _, _) -> Owned([], "other")
         _ -> key
       }
   }
@@ -269,7 +304,7 @@ fn aggregates(owners: OwnerMap) -> List(Aggregate) {
   let entries = map_to_list(owners)
   let top =
     seq.fold(entries, topk.new(max_aggregates), fn(top, entry) {
-      let #(key, #(processes, memory, queue_length, reductions)) = entry
+      let #(key, #(processes, memory, queue_length, reductions, heap)) = entry
 
       case key {
         Unknown -> top
@@ -277,19 +312,47 @@ fn aggregates(owners: OwnerMap) -> List(Aggregate) {
           topk.offer(
             top,
             memory,
-            Aggregate(key, processes, memory, queue_length, reductions),
+            Aggregate(key, processes, memory, queue_length, reductions, heap),
           )
       }
     })
   let owned = seq.map(topk.descending(top), fn(entry) { entry.1 })
 
-  case map_get(Unknown, owners, #(-1, 0, 0, 0)) {
-    #(-1, _, _, _) -> owned
-    #(processes, memory, queue_length, reductions) -> [
-      Aggregate(Unknown, processes, memory, queue_length, reductions),
+  case map_get(Unknown, owners, absent) {
+    #(-1, _, _, _, _) -> owned
+    #(processes, memory, queue_length, reductions, heap) -> [
+      Aggregate(Unknown, processes, memory, queue_length, reductions, heap),
       ..owned
     ]
   }
+}
+
+// The sums over every owner in the map, listed or not. `listed` is how many
+// aggregates the report carries, so the viewer can say how many owners its
+// remainder row folds together.
+fn totals(owners: OwnerMap, listed: Int) -> Totals {
+  let sum =
+    seq.fold(map_to_list(owners), no_sums, fn(sum, entry) {
+      let #(_, #(processes, memory, queue_length, reductions, heap)) = entry
+
+      #(
+        sum.0 + processes,
+        sum.1 + memory,
+        sum.2 + queue_length,
+        sum.3 + reductions,
+        sum.4 + heap,
+      )
+    })
+
+  Totals(
+    processes: sum.0,
+    memory: sum.1,
+    queue_length: sum.2,
+    reductions: sum.3,
+    total_heap_words: sum.4,
+    owners_tracked: map_size(owners),
+    owners_listed: listed,
+  )
 }
 
 /// The wire name of a stop reason.

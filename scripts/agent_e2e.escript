@@ -42,12 +42,17 @@ scenario_link_killed(Target, Work) ->
     {<<"pong">>, <<"boot-1">>, _, _, _, _, _} = ask(Target, {<<"ping">>}),
     {<<"memory">>, Cats, _, _, _, _, _} = ask(Target, {<<"memory">>}),
     check("memory reports categories", length(Cats) > 3),
-    {<<"census">>, {Scanned, Total, _, _}, Rows, Aggs} =
+    {<<"census">>, {Scanned, Total, _, _}, Rows, Aggs, Totals} =
         ask(Target, {<<"census">>, 100000, 10}),
     check("census scans processes", Scanned > 0 andalso Total > 0),
     check("census returns at most the top 10", length(Rows) >= 1 andalso length(Rows) =< 10),
     check("an unlabelled node aggregates as unknown",
-          lists:any(fun({{<<"unknown">>}, _, _, _, _}) -> true; (_) -> false end, Aggs)),
+          lists:any(fun({{<<"unknown">>}, _, _, _, _, _}) -> true; (_) -> false end, Aggs)),
+    check("the census totals cover every scanned process",
+          element(1, Totals) =:= Scanned),
+    check("the agent's own processes are their own owner",
+          lists:any(fun({{<<"owner">>, [{<<"tool">>, <<"pickglass">>}], <<"agent">>}, _, _, _, _, _}) -> true;
+                       (_) -> false end, Aggs)),
     {<<"pinned">>, <<"boot-1">>, PinId, _} = ask(Target, {<<"pin">>, pid_text(Target, Work)}),
     {<<"scheduler">>, <<"collecting">>, _} = ask(Target, {<<"scheduler">>, <<"on">>}),
     check("scheduler wall time is on", is_list(statistics_on(Target))),
