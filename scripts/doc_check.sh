@@ -30,8 +30,9 @@
 #   * The document is not under docs/review/ or docs/research/. Review
 #     documents record what a reviewer saw at a commit, and research
 #     documents cite external source trees (pprof, OTP) by path.
-#     Re-pinning either to today's tree would falsify the record. They stay in the warning census, where
-#     their drift is information about how far the tree has moved.
+#     Re-pinning either to today's tree would falsify the record. They
+#     stay in the warning census, where their drift is information about
+#     how far the tree has moved.
 #   * The citation is backticked. Backticks are how these documents
 #     already separate "a real path in this tree" from prose, and bare
 #     prose includes rhetorical examples — a fictional `auth.gleam:42`
