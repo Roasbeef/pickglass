@@ -498,6 +498,10 @@ pub fn a_level_track_prints_its_range_in_one_unit_test() {
   timeline_chart.range_text(steps([57 * mib, 57 * mib]), unit.Bytes)
   |> should.equal("all 57.0 MiB")
   timeline_chart.range_text([], unit.Bytes) |> should.equal("no reading")
+
+  // A few bytes of spread on 1.58 MiB prints as one figure, so it says so.
+  timeline_chart.range_text(steps([1_667_072, 1_667_072 + 40]), unit.Bytes)
+  |> should.equal("about 1.58 MiB")
 }
 
 pub fn a_ratio_below_the_first_decimal_is_not_written_as_zero_test() {

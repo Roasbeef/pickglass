@@ -217,6 +217,8 @@ pub fn range_text(steps: List(Step), u: Unit) -> String {
   case range_of(steps) {
     None -> "no reading"
     Some(#(low, high)) if low == high -> "all " <> fmt.known(low, u)
+    Some(#(low, high)) if high - low < low / 1000 ->
+      "about " <> fmt.known(high, u)
     Some(#(low, high)) -> {
       let first = fmt.known(low, u)
       let last = fmt.known(high, u)
@@ -392,7 +394,9 @@ fn line_y(value: Int, y: Int, range: #(Int, Int)) -> Int {
   let usable = row_height - 8
   let #(low, high) = range
 
-  case high == low {
+  // A spread under a thousandth of the level prints as one figure, so it is
+  // drawn flat; autoscaling it would turn a few bytes into a full-height step.
+  case high - low <= low / 1000 {
     True -> y + 4 + usable / 2
     False -> y + 4 + usable - { value - low } * usable / { high - low }
   }
