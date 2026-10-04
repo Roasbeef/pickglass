@@ -12,6 +12,8 @@
 //// A failure is `{<<"error">>, Code, Detail}` with a short code the viewer
 //// can branch on and a sentence for a person.
 
+import pickglass_agent/activity
+import pickglass_agent/calltree
 import pickglass_agent/census
 import pickglass_agent/counters
 import pickglass_agent/detail
@@ -23,6 +25,7 @@ import pickglass_agent/request
 import pickglass_agent/stacks
 import pickglass_agent/supervision
 import pickglass_agent/system
+import pickglass_agent/tracing
 
 /// A refusal: a stable code and a human sentence.
 pub type Failure {
@@ -502,4 +505,183 @@ fn frame(frame: stacks.Frame) -> Term {
       stacks.At(file, line) -> ffi_term.coerce(#("at", file, line))
     }),
   )
+}
+
+/// The answer to `start_calltrace`, with the values the agent settled on
+/// after clamping. `matched_functions` is how many functions the patterns
+/// armed.
+pub fn calltrace_started(
+  probe_id: Int,
+  targets: Int,
+  matched_functions: Int,
+  duration_ms: Int,
+  max_events: Int,
+  timeline_limit: Int,
+) -> Term {
+  ffi_term.coerce(#(
+    "calltrace_started",
+    probe_id,
+    targets,
+    matched_functions,
+    duration_ms,
+    max_events,
+    timeline_limit,
+  ))
+}
+
+/// The answer to `read_calltrace` and `stop_calltrace`. `phase` is `running`,
+/// `finished` or `stopped`, and `why` the reason tracing ended. Frames have
+/// the shape of the stack probe's, with no location, so a viewer reads both
+/// with one decoder; a path is `{Calls, InclusiveNs, ExclusiveNs, [Frame]}`
+/// with its frames leaf first; the timeline is the targets' pid texts and
+/// then `{Process, Frame, StartNs, DurationNs, Depth}` slices.
+pub fn calltrace(
+  probe_id: Int,
+  phase: String,
+  why: tracing.Stop,
+  meter: tracing.Meter,
+  built: calltree.Built,
+) -> Term {
+  ffi_term.coerce(#(
+    "calltrace",
+    probe_id,
+    phase,
+    tracing.stop_name(why),
+    #(
+      "traced_call_return_to",
+      meter.elapsed_ms,
+      meter.events,
+      meter.max_events,
+      meter.dropped_events,
+      meter.in_flight_at_stop,
+      meter.peak_queue,
+      meter.queue_limit,
+      meter.targets_gone,
+      built.forced_closes,
+      built.distinct_paths,
+      built.dropped_calls,
+      built.elided_calls,
+      built.strays,
+      calltree.max_depth,
+    ),
+    seq.map(built.frames, frame),
+    seq.map(built.paths, fn(path) {
+      ffi_term.coerce(#(
+        path.calls,
+        path.inclusive_ns,
+        path.exclusive_ns,
+        path.frames,
+      ))
+    }),
+    #(
+      built.processes,
+      seq.map(built.timeline, fn(moment) {
+        ffi_term.coerce(#(
+          moment.process,
+          moment.frame,
+          moment.start_ns,
+          moment.duration_ns,
+          moment.depth,
+        ))
+      }),
+    ),
+  ))
+}
+
+/// The answer to `start_events`, with the values the agent settled on after
+/// clamping. A threshold of zero is off.
+pub fn events_started(
+  probe_id: Int,
+  targets: Int,
+  duration_ms: Int,
+  max_events: Int,
+  slice_limit: Int,
+  long_gc_ms: Int,
+  long_schedule_ms: Int,
+) -> Term {
+  ffi_term.coerce(#(
+    "events_started",
+    probe_id,
+    targets,
+    duration_ms,
+    max_events,
+    slice_limit,
+    long_gc_ms,
+    long_schedule_ms,
+  ))
+}
+
+/// The answer to `read_events` and `stop_events`: per-target totals
+/// `{Pid, Runs, RunNs, MinorGcs, MajorGcs, GcNs}`, slices `{Process, Kind,
+/// StartNs, DurationNs}` with `Kind` one of `run`, `gc_minor` and `gc_major`,
+/// and the node-wide threshold events, `{<<"long_gc">>, Pid, Ms, HeapWords}`
+/// or `{<<"long_schedule">>, Pid, Ms, Function}`.
+pub fn events(
+  probe_id: Int,
+  phase: String,
+  why: tracing.Stop,
+  meter: tracing.Meter,
+  built: activity.Built,
+  long_gc_ms: Int,
+  long_schedule_ms: Int,
+) -> Term {
+  ffi_term.coerce(#(
+    "events",
+    probe_id,
+    phase,
+    tracing.stop_name(why),
+    #(
+      "traced_running_gc",
+      meter.elapsed_ms,
+      meter.events,
+      meter.max_events,
+      meter.dropped_events,
+      meter.in_flight_at_stop,
+      meter.peak_queue,
+      meter.queue_limit,
+      meter.targets_gone,
+      built.unpaired,
+      built.slices_dropped,
+      built.long_seen,
+      built.strays,
+      long_gc_ms,
+      long_schedule_ms,
+    ),
+    seq.map(built.totals, fn(totals) {
+      ffi_term.coerce(#(
+        totals.pid,
+        totals.runs,
+        totals.run_ns,
+        totals.minor_gcs,
+        totals.major_gcs,
+        totals.gc_ns,
+      ))
+    }),
+    seq.map(built.timeline, fn(moment) {
+      ffi_term.coerce(#(
+        moment.process,
+        slice_kind(moment.kind),
+        moment.start_ns,
+        moment.duration_ns,
+      ))
+    }),
+    seq.map(built.long, long_event),
+  ))
+}
+
+fn slice_kind(kind: activity.SliceKind) -> String {
+  case kind {
+    activity.Run -> "run"
+    activity.MinorGc -> "gc_minor"
+    activity.MajorGc -> "gc_major"
+  }
+}
+
+fn long_event(event: activity.Long) -> Term {
+  case event {
+    activity.SlowCollection(pid, duration_ms, heap_words) ->
+      ffi_term.coerce(#("long_gc", pid, duration_ms, heap_words))
+    activity.SlowTimeslice(pid, duration_ms, function) ->
+      ffi_term.coerce(#("long_schedule", pid, duration_ms, function))
+  }
 }
