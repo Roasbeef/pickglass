@@ -129,7 +129,7 @@ pub fn the_plan_states_the_processes_rate_duration_and_budget_test() {
   let html = support.html_of(page.Overview)
 
   // The processes, how they were chosen, and each figure of the run.
-  assert string.contains(html, "3 process(es) revalidated")
+  assert string.contains(html, "3 processes revalidated")
   assert string.contains(
     html,
     "3 of 3 processes of session s-12, the busiest by reductions/s",
@@ -241,6 +241,7 @@ pub fn a_refusal_is_said_where_the_button_was_test() {
       pending: None,
       running: [],
       ready: None,
+      collected: None,
       refused: Some("no live process carries that owner"),
     )
   let model =
@@ -258,7 +259,13 @@ pub fn a_refusal_is_said_where_the_button_was_test() {
 
 pub fn an_empty_flow_draws_nothing_test() {
   let data =
-    model.FlowModel(pending: None, running: [], ready: None, refused: None)
+    model.FlowModel(
+      pending: None,
+      running: [],
+      ready: None,
+      collected: None,
+      refused: None,
+    )
   let model =
     app.init(app.Start(page: page.Owners, links: page.Files, feeds: []))
   let #(model, _) =

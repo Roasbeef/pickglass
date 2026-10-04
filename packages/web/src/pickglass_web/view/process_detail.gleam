@@ -269,7 +269,7 @@ fn tracing(
         html.input([
           attribute.class("text mono"),
           attribute.type_("text"),
-          attribute.placeholder("modules to trace, such as loom@runtime@keeper"),
+          attribute.placeholder("modules, e.g. loom@runtime@*"),
           attribute.aria("label", "Modules to trace"),
           attribute.value(modules),
           wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),

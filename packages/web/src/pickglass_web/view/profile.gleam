@@ -573,18 +573,7 @@ fn filter_form(ui_state: UiState) -> Element(Msg) {
       ],
       [element.text("Add step")],
     ),
-    notice(ui_state.notice),
   ])
-}
-
-fn notice(text: Option(String)) -> Element(Msg) {
-  case text {
-    Some(sentence) ->
-      html.span([attribute.class("notice"), attribute.role("status")], [
-        element.text(sentence),
-      ])
-    None -> element.none()
-  }
 }
 
 // The three classes of step, as a table, because the difference between them
@@ -681,6 +670,15 @@ fn open_tab(data: ProfileModel, ui_state: UiState) -> msg.ProfileTab {
 
 fn tab_body(data: ProfileModel, ui_state: UiState, u: Unit) -> Element(Msg) {
   case data.stacks, open_tab(data, ui_state) {
+    // A profile that drew nothing has no frame worth showing on any tab; the
+    // same sentence the Top tab gives says so and names the next step.
+    model.HasStacks(layout:, ..), msg.FlameTab
+    | model.HasStacks(layout:, ..), msg.IcicleTab
+    | model.HasStacks(layout:, ..), msg.GraphTab
+    | model.HasStacks(layout:, ..), msg.PeekTab
+      if layout.total == 0
+    -> nothing_measured(data)
+
     model.HasStacks(layout:, ..), msg.FlameTab ->
       flame_tab(data, layout, flame_chart.RootBelow, ui_state, u)
     model.HasStacks(layout:, ..), msg.IcicleTab ->
@@ -732,7 +730,6 @@ fn flame_tab(
     ui.note(
       "Width is a share of the profile's value, not of time. "
       <> omitted_text(layout.omitted_boxes)
-      <> " than the minimum were folded into their parents. "
       <> "The synthetic root that holds every sample is not drawn.",
     ),
   ])
@@ -767,8 +764,11 @@ pub fn search_text(summary: flame_chart.SearchSummary, u: Unit) -> String {
 
 fn omitted_text(count: Int) -> String {
   case count {
-    1 -> "1 box narrower"
-    n -> int.to_string(n) <> " boxes narrower"
+    0 -> ""
+    1 -> "1 box narrower than the minimum was folded into its parent. "
+    n ->
+      int.to_string(n)
+      <> " boxes narrower than the minimum were folded into their parents. "
   }
 }
 
@@ -969,7 +969,12 @@ fn node_selection(
         ),
         focus_buttons(call_graph.node_key(node.function)),
       ])
-    Error(Nil) -> ui.note("Click a node to select it.")
+    Error(Nil) ->
+      ui.note(
+        "Click a node to select it. Each node reads flat (self) · cumulative, "
+        <> "as a share of the samples; a darker node has a larger "
+        <> "cumulative share.",
+      )
   }
 }
 
@@ -1118,6 +1123,11 @@ fn nothing_measured(data: ProfileModel) -> Element(Msg) {
           <> span
           <> ". A function nobody called has no row."
       }),
+    ]),
+    html.p([], [
+      element.text(
+        "Trace again while the process is doing the work, or widen the module pattern.",
+      ),
     ]),
   ])
 }

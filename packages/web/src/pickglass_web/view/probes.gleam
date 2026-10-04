@@ -21,7 +21,7 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
@@ -88,8 +88,16 @@ pub fn cost_text(
         False ->
           "one request · waits at most " <> fmt.duration_ms(estimate.wall_ms)
       }
-    policy.Passive | policy.Tracing ->
+    policy.Passive ->
       span <> " events · at most " <> fmt.bytes(estimate.bytes_high) <> tail
+    policy.Tracing ->
+      "expected "
+      <> span
+      <> " events (hard stop at "
+      <> fmt.count(policy.trace_event_budget)
+      <> ") · at most "
+      <> fmt.bytes(estimate.bytes_high)
+      <> tail
   }
 }
 
@@ -201,6 +209,21 @@ pub fn perturbation_text(level: policy.Perturbation) -> String {
       "moderate: every traced event is sent to a collector process, and "
       <> "a target that calls very fast stops the probe early"
     policy.ForcedGc -> "intrusive: the process is stopped for the collection"
+  }
+}
+
+// A one-shot read is polling in the policy's classes, but "periodic reads"
+// would be false of it: the sentence follows the plan's shape, as the cost
+// line does.
+fn plan_perturbation_text(card: PlanCard) -> String {
+  let level = policy.plan_perturbation(card.plan)
+
+  case level, card.what {
+    policy.Polling, model.BinariesPlan ->
+      "light: one read of the process's binary references"
+    policy.Polling, model.MeasurePlan ->
+      "light: one request to the process, which answers or does not"
+    _, _ -> perturbation_text(level)
   }
 }
 
@@ -319,7 +342,6 @@ fn draft_form(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
         ],
         [element.text("Plan probe…")],
       ),
-      notice(ui_state.notice),
     ]),
     ui.note(
       "Planning does not start anything. The plan below states what it "
@@ -351,16 +373,6 @@ fn field(label: String, controls: List(Element(Msg))) -> Element(Msg) {
     html.span([attribute.class("field-label")], [element.text(label)]),
     ..controls
   ])
-}
-
-fn notice(text: Option(String)) -> Element(Msg) {
-  case text {
-    Some(sentence) ->
-      html.span([attribute.class("notice"), attribute.role("status")], [
-        element.text(sentence),
-      ])
-    None -> element.none()
-  }
 }
 
 /// Draw a pending plan as a dialog: what it will touch, what it costs, what
@@ -417,9 +429,7 @@ pub fn plan_dialog(card: PlanCard, modules: String) -> Element(Msg) {
             ]),
             html.dt([], [element.text("Perturbation")]),
             html.dd([], [
-              element.text(
-                perturbation_text(policy.plan_perturbation(card.plan)),
-              ),
+              element.text(plan_perturbation_text(card)),
             ]),
             html.dt([], [element.text("Does not prove")]),
             html.dd([attribute.class("does-not-prove")], [
@@ -455,16 +465,25 @@ pub fn plan_dialog(card: PlanCard, modules: String) -> Element(Msg) {
 // profile button chose them, and the modules and matches of a trace probe. A
 // stack probe has no modules, so it does not print an empty list of them.
 fn scope_rows(card: PlanCard, scope: policy.PlanScope) -> List(Element(Msg)) {
+  let count = list.length(scope.targets)
+
   let processes =
-    int.to_string(list.length(scope.targets))
-    <> " process(es) revalidated: "
+    int.to_string(count)
+    <> case count {
+      1 -> " process revalidated: "
+      _ -> " processes revalidated: "
+    }
     <> list.fold(card.target_labels, "", join_words)
 
   let chosen = case card.chosen {
     "" -> []
     text -> [
       html.dt([], [element.text("Chosen")]),
-      html.dd([], [element.text(text)]),
+      html.dd([], [
+        element.text(
+          text <> ". Pinned for this plan; the pin is released when it ends.",
+        ),
+      ]),
     ]
   }
 
@@ -743,7 +762,7 @@ fn prefix_text(modules: List(String)) -> String {
     prefixes ->
       " · "
       <> list.fold(prefixes, "", join_words)
-      <> " matches every module loaded in the target that starts with the text before the *; how many is known when the probe starts"
+      <> " matches every module loaded in the target that starts with the text before the *"
   }
 }
 
