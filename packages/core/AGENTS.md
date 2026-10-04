@@ -16,6 +16,47 @@ for a future offline viewer. Lint R6 enforces that.
 `Bytes`, `Count`, `Reductions`, `Nanoseconds` and `Ratio(per:)`.
 `Reductions` is a work counter and never converts to time.
 
+`measure.Measurement` is `Known(Int)`, `Missing(MissingReason)` or
+`NotApplicable`. There is no accessor that defaults an absent reading:
+`to_option` gives `None`, `render` gives a word, and `sum` counts absent
+rows beside the total. `measure.Additivity` (`Additive` or
+`Overlapping(why)`) is declared per `Series`; `sum` refuses an overlapping
+column, a ratio column, and a column with no known row. `measure.Coverage`
+and `Outcome` (`Complete`, `Partial(PartialReason)`, `Refused`, `Errored`)
+describe what a collection achieved and why it stopped.
+
+`identity.NodeIncarnation` is the node digest, creation and agent
+`BootId`. `identity.OsProcess` pairs a pid with a `StartIdentity` (precise,
+coarse or unreadable). `identity.PinToken` is bound to a boot id;
+`check_pin` turns it into a `LivePin` or refuses a token from another
+incarnation, and `policy` demands a `LivePin` for any command that names a
+target.
+
+`owner.Segment`, `Claim` (path, role, `Source`, `Confidence`) and
+`owner.join` implement Label over Provider over Registry over Supervision,
+keeping disagreeing weaker claims as dissent. `owner.group_by` returns a
+`Grouping` whose `unknown` group is a field, so it exists even when empty.
+
+`capture` is the `pickglass.capture/1` NDJSON format: a `Record(p)` variant
+per kind (the profile payload `p` is a type parameter the analysis modules
+supply), `encode_record`, the total `decode_line`, and an incremental
+`Reader`. A file with no footer reads as `Partial(NoFooter)`; an unknown
+schema major is refused; unknown record kinds are kept as `UnknownRecord`
+and counted. The footer's `Digest` is a slot the I/O side fills; core
+computes no hash. `codec` holds the JSON codecs for the leaf types the
+records share.
+
+`provenance.Provenance` is the header's origin block, and
+`provenance.comparability` compares two of them field by field (`Same`,
+`DiffersExpected`, `DiffersBlocking`). A blocking field withholds any
+direction of change; a cadence mismatch withholds only rates and deltas.
+
+`policy.Command` is the closed set of viewer-to-agent actions.
+`required_capabilities` is an exhaustive `case`. `Authorized(a)` is opaque
+and only `authorize` and `confirm` build it. Probes and targeted GC go
+through `plan` then `confirm` (same principal, unexpired, digest unchanged).
+Every gate returns `Audited(a)`: the decision and its `AuditEntry`.
+
 ## Relationships
 
 Depends on `gleam_stdlib` and `gleam_json`. The viewer (`pickglass`) and the
@@ -32,7 +73,21 @@ None. This package defines wire and capture vocabulary but sends nothing.
 - No I/O, no `@external`, no `gleam_erlang` or `gleam_otp`, in source or in
   `gleam.toml` (lint R6).
 - A unit name read from a capture either parses exactly or is refused;
-  there is no default unit.
+  there is no default unit. The same holds for every closed code
+  (missing reason, source, scope, probe kind): unknown text is an error.
+- A missing reading is never a number: no function turns `Missing` or
+  `NotApplicable` into an `Int`, and a samples column with neither a value
+  nor a reason at a position is refused by the decoder.
+- An `Overlapping` series is never summed, and an owner grouping always
+  has an unknown group.
+- `Authorized` and `Plan` cannot be forged: both are opaque and only
+  `policy` constructs them. A module that tries will not compile.
+- A pin token is only live under the boot id that issued it.
+- Capture decoders are total; a record of a known kind with the wrong
+  shape is an error, never a default-filled record. A plan is single-use
+  only if its caller discards it on confirm: core holds no state.
+- Tests use `qcheck` (a dev dependency) for round trips and decoder
+  totality; generators live in `test/pg_data_gen.gleam`.
 
 ## Deep Docs
 
