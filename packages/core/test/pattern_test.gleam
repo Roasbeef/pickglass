@@ -66,3 +66,42 @@ pub fn source_is_kept_test() {
   let assert Ok(compiled) = pattern.compile("a|b")
   assert pattern.source(compiled) == "a|b"
 }
+
+// A construct the matcher lacks is refused with its position, never read
+// as literal text.
+pub fn unsupported_syntax_is_refused_with_its_position_test() {
+  assert pattern.compile("(a|b)")
+    == Error(pattern.UnsupportedSyntax("(a|b)", "(", 0))
+  assert pattern.compile("ab)")
+    == Error(pattern.UnsupportedSyntax("ab)", ")", 2))
+  assert pattern.compile("[ab]")
+    == Error(pattern.UnsupportedSyntax("[ab]", "[", 0))
+  assert pattern.compile("xy]")
+    == Error(pattern.UnsupportedSyntax("xy]", "]", 2))
+  assert pattern.compile("a{2}")
+    == Error(pattern.UnsupportedSyntax("a{2}", "{", 1))
+  assert pattern.compile("a}") == Error(pattern.UnsupportedSyntax("a}", "}", 1))
+  assert pattern.compile("x\\d")
+    == Error(pattern.UnsupportedSyntax("x\\d", "\\d", 1))
+  assert pattern.compile("\\w")
+    == Error(pattern.UnsupportedSyntax("\\w", "\\w", 0))
+  assert pattern.compile("a|\\s")
+    == Error(pattern.UnsupportedSyntax("a|\\s", "\\s", 2))
+  assert pattern.compile("\\b")
+    == Error(pattern.UnsupportedSyntax("\\b", "\\b", 0))
+}
+
+pub fn misplaced_anchors_are_refused_test() {
+  assert pattern.compile("a^b")
+    == Error(pattern.UnsupportedSyntax("a^b", "^", 1))
+  assert pattern.compile("a$b")
+    == Error(pattern.UnsupportedSyntax("a$b", "$", 1))
+  assert pattern.compile("^a$|^b$") != Error(pattern.NothingToRepeat(""))
+}
+
+pub fn escaped_brackets_stay_literal_test() {
+  assert hit("\\(a\\)", "f(a)")
+  assert hit("\\[x\\]", "[x]")
+  assert hit("a\\{2\\}", "a{2}")
+  assert !hit("\\(a\\)", "fa")
+}

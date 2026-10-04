@@ -209,3 +209,10 @@ pub fn patterns_match_file_names_test() {
   let assert Ok(applied) = transform.apply(p, [Focus("loom/f.gleam")], column)
   assert profile.total(applied.profile, column) == 4
 }
+
+// An unsupported construct reaches the chain as an error naming its step.
+pub fn unsupported_syntax_names_its_step_test() {
+  let p = sample_profile()
+  assert transform.apply(p, [Focus("a"), Ignore("(a|b)")], fixtures.column(p))
+    == Error(InvalidPattern(1, pattern.UnsupportedSyntax("(a|b)", "(", 0)))
+}

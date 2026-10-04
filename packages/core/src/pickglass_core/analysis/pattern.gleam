@@ -68,6 +68,13 @@ pub type PatternError {
 
   /// A trailing backslash with no character to make literal.
   DanglingEscape(pattern: String)
+
+  /// Syntax that RE2 and pprof accept but this matcher does not implement:
+  /// groups, classes, counted repetition, class escapes such as `\d`, and
+  /// an anchor in the middle of an alternative. `text` is the offending
+  /// character or escape sequence and `position` its grapheme offset in the
+  /// pattern, counted from zero.
+  UnsupportedSyntax(pattern: String, text: String, position: Int)
 }
 
 /// Compile pattern text. The empty pattern matches every text.
@@ -78,6 +85,12 @@ pub type PatternError {
 /// let assert Ok(p) = pattern.compile("^loom@.*:run/[0-9]")
 /// ```
 pub fn compile(text: String) -> Result(Pattern, PatternError) {
+  use _ <- result.try(reject_unsupported(
+    string.to_graphemes(text),
+    0,
+    True,
+    text,
+  ))
   let parts = split_alternatives(string.to_graphemes(text), [], [])
   use alternatives <- result.try(
     list.try_map(parts, fn(part) { parse_alternative(part, text) }),
@@ -104,6 +117,57 @@ pub fn matches(pattern: Pattern, text: String) -> Bool {
   list.any(pattern.alternatives, fn(alternative) {
     alternative_matches(alternative, graphemes)
   })
+}
+
+// Refuse every construct the matcher does not implement, so a pattern is
+// never read as something other than what its author wrote. `at_start` is
+// true at the start of an alternative, the only place `^` is an anchor.
+fn reject_unsupported(
+  rest: List(String),
+  position: Int,
+  at_start: Bool,
+  text: String,
+) -> Result(Nil, PatternError) {
+  case rest {
+    [] -> Ok(Nil)
+
+    ["\\"] -> Error(DanglingEscape(text))
+
+    // An escape of a letter or digit is a class or assertion in RE2.
+    ["\\", escaped, ..tail] ->
+      case is_word_character(escaped) {
+        True -> Error(UnsupportedSyntax(text, "\\" <> escaped, position))
+        False -> reject_unsupported(tail, position + 2, False, text)
+      }
+
+    ["|", ..tail] -> reject_unsupported(tail, position + 1, True, text)
+
+    ["^", ..tail] ->
+      case at_start {
+        True -> reject_unsupported(tail, position + 1, True, text)
+        False -> Error(UnsupportedSyntax(text, "^", position))
+      }
+
+    // A `$` is an anchor only at the end of an alternative.
+    ["$", ..tail] ->
+      case tail {
+        [] | ["|", ..] -> reject_unsupported(tail, position + 1, False, text)
+        [_, ..] -> Error(UnsupportedSyntax(text, "$", position))
+      }
+
+    [grapheme, ..tail] ->
+      case list.contains(["(", ")", "[", "]", "{", "}"], grapheme) {
+        True -> Error(UnsupportedSyntax(text, grapheme, position))
+        False -> reject_unsupported(tail, position + 1, False, text)
+      }
+  }
+}
+
+fn is_word_character(grapheme: String) -> Bool {
+  string.contains(
+    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_",
+    grapheme,
+  )
 }
 
 // Split the grapheme list on unescaped `|`. Each part keeps its escapes
