@@ -459,6 +459,7 @@ fn scope_rows(card: PlanCard, scope: policy.PlanScope) -> List(Element(Msg)) {
   let modules = case card.what {
     model.ProbePlan(kind: policy.Sampling)
     | model.ProbePlan(kind: policy.SchedulingGc) -> ""
+
     // A collection or a self-measure acts on the processes only; it names no
     // module and matches no function.
     model.GcPlan | model.MeasurePlan -> ""

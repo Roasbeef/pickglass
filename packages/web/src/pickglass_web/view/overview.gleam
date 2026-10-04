@@ -447,6 +447,7 @@ fn role_row(role: OsRole, anon: Bool) -> Element(Msg) {
 fn start_note(start: identity.StartIdentity) -> String {
   case start {
     identity.PreciseStart(_) -> ""
+
     // The row's note already says so, once.
     identity.CoarseStart(_) -> ""
     identity.UnreadableStart -> "start time unreadable"

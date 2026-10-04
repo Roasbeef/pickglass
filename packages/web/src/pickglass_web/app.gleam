@@ -23,6 +23,18 @@
 //// `init` builds the model from a `Start`; `update` applies one `Msg`,
 //// routing `Fed` to `store`, `Ui` to `ui_event`, and `Ask` to `ask`, which
 //// consults `check_request`; `view` draws the shell and the page body.
+////
+//// ## Flow
+////
+//// - `init` builds the model and stores the first feeds.
+//// - `update` routes a message by family.
+//// - `store` replaces the data of one page.
+//// - `ui_event` applies a view-state change.
+//// - `ask` checks a request and hands it to the viewer.
+//// - `check_request` compares a request's keys with the data drawn.
+//// - `view` draws the shell, the flow and the page body, or the detached
+////   statement when the viewer has lost its node.
+//// - `page_body` chooses the page.
 
 import gleam/int
 import gleam/list
