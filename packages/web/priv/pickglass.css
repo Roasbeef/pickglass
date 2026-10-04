@@ -195,6 +195,7 @@ a:hover { text-decoration: underline; }
 .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .grid.overview > :first-child { grid-row: span 2; }
 .grid.memory { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.grid.memory > .span-all { grid-column: 1 / -1; }
 @media (max-width: 1120px) { .grid, .grid.two { grid-template-columns: 1fr; } .grid.overview > :first-child { grid-row: auto; } }
 
 .panel {

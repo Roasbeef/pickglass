@@ -1,16 +1,21 @@
 //// Tests for what the first end-to-end run left open: the strip after a
 //// detach, a request notice that outlives its answer, and the graph frame.
 
+import gleam/list
 import gleam/option.{None, Some}
+import gleam/set
 import gleam/string
 import lustre/effect
 import lustre/element
+import pickglass_core/policy
 import pickglass_core/profile/activity
 import pickglass_web/app
 import pickglass_web/fixture
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/page
+import pickglass_web/state
+import pickglass_web/view/owners
 
 fn page_html(strip: model.StripModel) -> String {
   let start = app.Start(page: page.Overview, links: page.Files, feeds: [])
@@ -113,4 +118,65 @@ pub fn the_graph_note_says_the_frame_scrolls_test() {
     element.to_string(app.view(model)),
     "scroll the frame sideways",
   )
+}
+
+// An owner row holds no processes itself, so it opens onto its role rows;
+// without a twisty those rows, and the processes under them, cannot be reached.
+pub fn an_owner_row_with_roles_can_be_opened_test() {
+  let data = fixture.owners()
+  let shown =
+    element.to_string(owners.view(
+      data,
+      state.initial(),
+      page.Files,
+      policy.all_capabilities,
+    ))
+  let roles = list.count(data.rows, fn(row) { row.kind == model.RoleGroup })
+
+  assert roles > 0
+  assert string.contains(shown, "aria-expanded=\"false\"")
+
+  let opened_owner_keys =
+    list.filter(data.rows, fn(row) { row.kind == model.OwnerGroup })
+    |> list.map(fn(row) { row.key })
+  let ui_open =
+    state.UiState(..state.initial(), expanded: set.from_list(opened_owner_keys))
+  let open =
+    element.to_string(owners.view(
+      data,
+      ui_open,
+      page.Files,
+      policy.all_capabilities,
+    ))
+
+  assert string.contains(open, "aria-expanded=\"true\"")
+}
+
+// A request the flow answers (a plan, a refusal, a running probe) clears its
+// "Requested" notice when the flow is fed, so the page does not go on saying
+// it asked after the answer is on the screen.
+pub fn the_requested_notice_clears_when_the_flow_is_fed_test() {
+  let start = app.Start(page: page.Overview, links: page.Files, feeds: [])
+  let run = fn(model, message) {
+    app.update(fn(_) { effect.none() }, model, message).0
+  }
+  let asked = app.init(start) |> run(msg.Ask(msg.ProfileBusiest))
+
+  assert asked.ui.notice == Some(app.describe(msg.ProfileBusiest))
+  assert run(asked, msg.Fed(msg.FedFlow(fixture.flow()))).ui.notice == None
+}
+
+// Nothing is fed to a detached page but the strip, which says the node is
+// gone; that answers the detach request that caused it.
+pub fn a_detach_notice_clears_when_the_strip_says_detached_test() {
+  let start = app.Start(page: page.Overview, links: page.Files, feeds: [])
+  let run = fn(model, message) {
+    app.update(fn(_) { effect.none() }, model, message).0
+  }
+  let asked = app.init(start) |> run(msg.Ask(msg.DetachViewer))
+  let detached =
+    model.StripModel(..fixture.strip(), source: model.Detached("detached"))
+
+  assert asked.ui.notice == Some(app.describe(msg.DetachViewer))
+  assert run(asked, msg.Fed(msg.FedStrip(detached))).ui.notice == None
 }

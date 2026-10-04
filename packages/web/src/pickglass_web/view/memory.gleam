@@ -52,9 +52,20 @@ pub fn view(data: MemoryModel) -> Element(Msg) {
   html.div([attribute.class("grid memory")], [
     category_panel("Categories (erlang:memory)", data.categories),
     category_panel("Allocators", data.allocators),
-    category_panel("Tables and binaries", data.tables),
-    ets_panel(data.ets),
+    tables_panel(data.tables),
+    html.div([attribute.class("span-all")], [ets_panel(data.ets)]),
   ])
+}
+
+// The categories table for ETS and binaries has no rows of its own now that
+// the table listing below reads them from the agent, so an empty one is not
+// drawn: a panel that says "the agent does not collect this yet" beside a
+// listing the agent just made would contradict the page.
+fn tables_panel(panel: Panel(List(CategoryRow))) -> Element(Msg) {
+  case panel.body {
+    [] -> element.none()
+    _ -> category_panel("Tables and binaries", panel)
+  }
 }
 
 // The largest ETS tables, by properties. The panel says what the agent's walk

@@ -77,7 +77,7 @@ pub fn view(
     list.flat_map(all, fn(row) {
       let heading = #(
         key.to_string(row.key) <> "/row",
-        group_row(row, ui_state, grants),
+        group_row(row, data.rows, ui_state, grants),
       )
 
       // An open row shows every member. The unknown row shows its largest
@@ -279,6 +279,7 @@ fn opened(ui_state: UiState, row: Key) -> Visibility {
 
 fn group_row(
   row: OwnerRow,
+  all: List(OwnerRow),
   ui_state: UiState,
   grants: List(Capability),
 ) -> Element(Msg) {
@@ -288,9 +289,12 @@ fn group_row(
     model.UnknownGroup -> "group unknown"
   }
 
-  let expandable = case row.members {
-    [] -> twisty_placeholder()
-    _ -> twisty(row.key, ui_state)
+  // An owner row holds no processes itself: opening it shows its role rows.
+  // So it gets a twisty when role rows follow it, and a role or unknown row
+  // when it has members.
+  let expandable = case row.members, roles_follow(row, all) {
+    [], False -> twisty_placeholder()
+    _, _ -> twisty(row.key, ui_state)
   }
 
   html.tr([attribute.class(class)], [
@@ -389,6 +393,14 @@ fn depth(level: Int) -> String {
   case level {
     0 -> "0"
     _ -> "1"
+  }
+}
+
+// Whether the next row after this owner row is one of its roles.
+fn roles_follow(row: OwnerRow, all: List(OwnerRow)) -> Bool {
+  case row.kind, list.drop_while(all, fn(other) { other.key != row.key }) {
+    model.OwnerGroup, [_, next, ..] -> next.kind == model.RoleGroup
+    _, _ -> False
   }
 }
 

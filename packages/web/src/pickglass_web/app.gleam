@@ -197,7 +197,14 @@ pub fn update(
 // A feed replaces the data for its page and nothing else.
 fn store(model: Model, feed: Feed) -> Model {
   case feed {
-    msg.FedStrip(data) -> Model(..model, strip: Ready(data))
+    // A detached page is fed no flow again, so the strip that says the node is
+    // gone is also the answer to whatever was last requested.
+    msg.FedStrip(data) ->
+      case data.source {
+        model.Detached(_) ->
+          Model(..clear_answered(model, answered_by_flow), strip: Ready(data))
+        model.Live | model.Viewing(_) -> Model(..model, strip: Ready(data))
+      }
     msg.FedOverview(data) -> Model(..model, overview: Ready(data))
     msg.FedOwnerMovers(data) -> Model(..model, movers: Ready(data))
     msg.FedOwners(data) -> Model(..model, owners: Ready(data))
@@ -213,7 +220,8 @@ fn store(model: Model, feed: Feed) -> Model {
     msg.FedAudit(data) -> Model(..model, audit: Ready(data))
     msg.FedCaptures(data) -> Model(..model, captures: Ready(data))
     msg.FedPlanTarget(target) -> offer_target(model, target)
-    msg.FedFlow(data) -> Model(..model, flow: Ready(data))
+    msg.FedFlow(data) ->
+      Model(..clear_answered(model, answered_by_flow), flow: Ready(data))
   }
 }
 
@@ -234,6 +242,13 @@ fn clear_answered(model: Model, answers: fn(Request) -> Presence) -> Model {
       }
     _, _ -> model
   }
+}
+
+// Every request the viewer answers shows its outcome in the flow above the
+// page (a plan card, a running probe, a refusal) or in a page's own data, and
+// the flow is fed after each request. So once it arrives the promise is kept.
+fn answered_by_flow(_request: Request) -> Presence {
+  Present
 }
 
 // The requests whose result is a new profile feed: the view of the samples,
