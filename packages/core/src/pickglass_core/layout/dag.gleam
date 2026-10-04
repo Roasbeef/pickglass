@@ -522,19 +522,17 @@ fn box_sizes(
   dict.from_list(list.append(real, dummies))
 }
 
-/// The widest of the lines under a node's name, in characters: the module,
-/// and the two lines "flat (x%)" and "of cum (y%)". A node with a short name
-/// is still as wide as these need.
-pub const min_label_chars: Int = 22
-
-// Those lines are set in the smallest size, 7 units a character with the
-// renderer's allowance, so their width does not grow with the node's font.
+// The width the lines under a node's name need: the module and the two lines
+// "flat (x%)" and "of cum (y%)" are at most 22 characters, set in the smallest
+// size at 7 units a character with the renderer's allowance. Their width does
+// not grow with the node's font, and a node with a short name is still this
+// wide.
 const detail_width: Int = 154
 
 /// The height of the lines under a node's name: the module, flat and
 /// cumulative, one line each, and a little room below them. A box is its
 /// font size plus this.
-pub const lines_below_name: Int = 44
+const lines_below_name: Int = 44
 
 /// The smallest label font size a node gets, in points.
 pub const min_font_size: Int = 11
