@@ -1,0 +1,311 @@
+//// The seam between a page and the viewer: what a page may ask for, what it
+//// is given, and how its asks become `policy` commands.
+////
+//// A page is a Lustre server-component application. The web package builds
+//// it as a closed `Msg` type whose browser events decode to *requests*: pin
+//// a process, plan a probe, confirm a plan, navigate, edit a filter chain.
+//// None of those is an authorized command. This module is where requests
+//// become commands, and it is the only place that does:
+////
+//// - `Request` is the closed set of things a page can ask the viewer to do.
+////   There is no constructor that carries a principal, a grant, a plan's
+////   digest, or a term for the agent. Targets are pin tokens, which are
+////   text a page copied from a pin it was shown.
+//// - `intent` turns a request into a policy command and says whether it is
+////   direct, needs a plan, or acts on a plan. A malformed token or an
+////   invalid name is refused here, before `policy` sees it.
+//// - `Page` is what the host hands a page's application when it starts: a
+////   bundle of closures bound to one principal at WebSocket admission. A
+////   page has no way to name another principal, because none of its
+////   closures takes one.
+//// - `Mount` starts a page's application and carries Lustre's frames; the
+////   host's socket and the application meet only here.
+////
+//// Everything a page reads comes through `Page`: the newest observations,
+//// a subscription to new ones, its pending plans and the pins. A page never
+//// starts a collection; the hub does, once per cadence, whoever is watching.
+////
+//// The web package is not mounted yet. The integration is to give the web
+//// application the `Page` as its start argument (`mount_app`), and to
+//// translate each of its request messages into a `Request` here.
+////
+//// ## Flow
+////
+//// - A page calls the submit closure of its `Page` with a `Request`.
+//// - `intent` names the command and what follows it, using `token_of` and
+////   `valid_name` to refuse a malformed token or name before the gate.
+//// - The service authorizes, executes, and answers with a `Reply`.
+
+import gleam/erlang/process.{type Subject}
+import gleam/json.{type Json}
+import gleam/list
+import gleam/result
+import gleam/string
+import pickglass/audit
+import pickglass/hub
+import pickglass/observation.{type Observation}
+import pickglass_core/capture
+import pickglass_core/identity
+import pickglass_core/policy.{type Command, type PrincipalId}
+import pickglass_core/wire
+
+/// The longest checkpoint name accepted, in characters.
+pub const max_name_length = 64
+
+/// The id the viewer gives the capture of its own live window, which is what
+/// a save or a checkpoint is authorized as exporting.
+pub const live_capture = "live"
+
+/// Everything a page may ask the viewer to do.
+pub type Request {
+  /// Pin a process by the pid text a census row showed.
+  PinProcess(pid_text: String)
+
+  /// Release a pin, named by the token text a pin card showed.
+  UnpinProcess(token: String)
+
+  /// Ask for a plan for a counters probe over pinned processes. The viewer
+  /// offers no probe over every process, so there is no way to ask for one.
+  PlanProbe(
+    kind: policy.ProbeKind,
+    targets: List(String),
+    modules: List(String),
+    duration_ms: Int,
+  )
+
+  /// Ask for a plan for a garbage collection of one pinned process.
+  PlanTargetedGc(token: String)
+
+  /// Confirm a plan this page's principal made, by the id its card showed.
+  ConfirmPlan(plan_id: String)
+
+  /// Withdraw a plan.
+  CancelPlan(plan_id: String)
+
+  /// Stop a running probe by the id it was started with.
+  StopProbe(probe_id: String)
+
+  /// Record a named checkpoint in the live capture.
+  Checkpoint(name: String)
+
+  /// Write the live window to a capture file.
+  SaveCapture
+
+  /// Read the newest audit entries.
+  ReadAudit(count: Int)
+
+  /// Detach from the target.
+  Detach
+}
+
+/// What the viewer answers.
+pub type Reply {
+  /// The request succeeded and has nothing to return.
+  Done(message: String)
+
+  /// A pin was issued.
+  PinIssued(token: String, pid_text: String)
+
+  /// A plan is waiting for this principal's confirmation. `id` is the
+  /// viewer's id for it and `plan` is what `policy.plan` returned.
+  PlanReady(id: String, plan: policy.Plan)
+
+  /// A counters probe started.
+  ProbeStarted(probe_id: String, matched_functions: Int)
+
+  /// A counters probe stopped, with its last reading.
+  ProbeStopped(snapshot: wire.CountersSnapshot)
+
+  /// The newest audit entries, newest first.
+  AuditTail(entries: List(audit.Entry))
+
+  /// A capture was written.
+  CaptureSaved(path: String)
+
+  /// The request was refused. The text is the gate's reason, a validation
+  /// message, or what the agent said.
+  Rejected(reason: String)
+}
+
+/// Whether a pin can still be used.
+pub type PinStatus {
+  PinLive
+  PinGone(reason: String)
+}
+
+/// A pin as a page shows it.
+pub type PinCard {
+  PinCard(token: String, pid_text: String, status: PinStatus, pinned_at_ms: Int)
+}
+
+/// Where the observations come from.
+pub type Mode {
+  /// A live target.
+  Live(
+    node: String,
+    incarnation: identity.NodeIncarnation,
+    os: identity.OsProcess,
+  )
+
+  /// A capture file, with no target. `source` is its file name.
+  Viewing(
+    source: String,
+    incarnation: identity.NodeIncarnation,
+    os: identity.OsProcess,
+  )
+}
+
+/// What the host hands a page's application at start. Every closure is
+/// bound to the principal fixed at WebSocket admission.
+pub type Page {
+  Page(
+    /// The principal's id, for display.
+    principal: PrincipalId,
+    /// The grants, for deciding which controls to draw. Drawing a control is
+    /// cosmetic: the gate checks the grant again on every request.
+    grants: List(policy.Capability),
+    mode: Mode,
+    /// The ring's observations, newest first.
+    latest: fn() -> List(Observation),
+    /// Subscribe a subject to new observations. `Error` when the principal
+    /// may not observe.
+    subscribe: fn(Subject(hub.Update)) -> Result(Nil, String),
+    /// Ask the viewer to do something, as this principal.
+    submit: fn(Request) -> Reply,
+    /// The plans this principal has pending, as `(id, plan)`.
+    plans: fn() -> List(#(String, policy.Plan)),
+    /// The checkpoints recorded in the live capture, oldest first.
+    checkpoints: fn() -> List(capture.Checkpoint),
+    /// The newest audit entries, newest first.
+    audit: fn(Int) -> List(audit.Entry),
+    /// The pins, oldest first.
+    pins: fn() -> List(PinCard),
+  )
+}
+
+// ------------------------------------------------------------------ intent
+
+/// What a request needs from the gate.
+pub type Intent {
+  /// Authorize the command, run it, then do the follow-up if the command is
+  /// one the viewer answers itself.
+  Run(command: Command, follow: Follow)
+
+  /// Plan the command and hold the plan for confirmation.
+  Plan(command: Command)
+
+  /// Confirm a plan by id.
+  Confirm(plan_id: String)
+
+  /// Withdraw a plan by id.
+  Cancel(plan_id: String)
+}
+
+/// What the viewer does itself after a command that never reaches the agent.
+pub type Follow {
+  NoFollow
+  AddCheckpoint(name: String)
+  WriteCapture
+  TailAudit(count: Int)
+}
+
+/// The most audit entries a page may ask for at once.
+pub const max_audit_count = 200
+
+/// Turn a request into an intent, or refuse it with a reason. Nothing here
+/// authorizes anything: the result is what the gate will be asked.
+///
+/// ## Examples
+///
+/// ```gleam
+/// seam.intent(PinProcess("<0.12.0>"))
+/// // -> Ok(Run(policy.PinProcess("<0.12.0>"), NoFollow))
+///
+/// seam.intent(PlanTargetedGc("not a token"))
+/// // -> Error("malformed pin token")
+/// ```
+pub fn intent(request: Request) -> Result(Intent, String) {
+  case request {
+    PinProcess(pid_text) -> Ok(Run(policy.PinProcess(pid_text), NoFollow))
+    UnpinProcess(token) ->
+      token_of(token)
+      |> result.map(fn(token) { Run(policy.UnpinProcess(token), NoFollow) })
+    PlanProbe(kind, targets, modules, duration_ms) -> {
+      use tokens <- result.try(result.all(list.map(targets, token_of)))
+
+      Ok(
+        Plan(
+          policy.StartProbe(policy.ProbeSpec(
+            kind:,
+            targets: tokens,
+            modules:,
+            duration_ms:,
+          )),
+        ),
+      )
+    }
+    PlanTargetedGc(token) ->
+      token_of(token)
+      |> result.map(fn(token) { Plan(policy.TargetedGc(token)) })
+    ConfirmPlan(id) -> Ok(Confirm(id))
+    CancelPlan(id) -> Ok(Cancel(id))
+    StopProbe(id) -> Ok(Run(policy.StopProbe(id), NoFollow))
+    Checkpoint(name) -> {
+      use name <- result.try(valid_name(name))
+
+      Ok(Run(
+        policy.ExportCapture(live_capture, policy.CaptureFile),
+        AddCheckpoint(name),
+      ))
+    }
+    SaveCapture ->
+      Ok(Run(
+        policy.ExportCapture(live_capture, policy.CaptureFile),
+        WriteCapture,
+      ))
+    ReadAudit(count) ->
+      case count >= 1 && count <= max_audit_count {
+        True -> Ok(Run(policy.ReadAudit(count), TailAudit(count)))
+        False -> Error("an audit read is between 1 and 200 entries")
+      }
+    Detach -> Ok(Run(policy.Detach, NoFollow))
+  }
+}
+
+fn token_of(text: String) -> Result(identity.PinToken, String) {
+  identity.parse_pin(text) |> result.replace_error("malformed pin token")
+}
+
+fn valid_name(name: String) -> Result(String, String) {
+  let trimmed = string.trim(name)
+  let printable =
+    string.to_utf_codepoints(trimmed)
+    |> list.all(fn(point) { string.utf_codepoint_to_int(point) >= 32 })
+
+  case
+    string.length(trimmed) >= 1 && string.length(trimmed) <= max_name_length,
+    printable
+  {
+    True, True -> Ok(trimmed)
+    _, _ -> Error("a checkpoint name is 1 to 64 printable characters")
+  }
+}
+
+// ------------------------------------------------------------------- mount
+
+/// A started page application and the two things the socket does with it.
+pub type Running {
+  Running(
+    /// Hand it one text frame from the browser.
+    forward: fn(String) -> Nil,
+    /// Stop it. The socket calls this when the browser goes away.
+    shutdown: fn() -> Nil,
+  )
+}
+
+/// Start the application for one page of the viewer: the `Page` the
+/// principal was admitted with, the page's route slug (`overview`, `owners`,
+/// ...), and where to send each frame for the browser, already encoded.
+/// `Error` when the application did not start.
+pub type Mount =
+  fn(Page, String, fn(Json) -> Nil) -> Result(Running, String)
