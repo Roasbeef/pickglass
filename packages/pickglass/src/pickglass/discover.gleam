@@ -22,7 +22,7 @@
 //// - `choose` matches candidates with cookie directories and picks one.
 //// - `find` reads the process table, lists the cookie directories and
 ////   calls `choose`.
-//// - `read_cookie` checks the cookie file's permissions and reads it.
+//// - `read_cookie_file` checks a cookie file's permissions and reads it.
 
 import gleam/int
 import gleam/list
@@ -44,9 +44,11 @@ pub type Candidate {
   Candidate(os_pid: Int, node: String, role: Role, command: String)
 }
 
-/// A profiled node with the directory holding its cookie.
+/// A node with the file holding its cookie. For a profiled Loom node the
+/// file is `<cookie directory>/.erlang.cookie`; for a node named with
+/// `--node` it is the file the operator chose.
 pub type Target {
-  Target(os_pid: Int, node: String, home: String)
+  Target(os_pid: Int, node: String, cookie_file: String)
 }
 
 /// Why no target was chosen.
@@ -149,7 +151,7 @@ fn is_hex32(text: String) -> Bool {
 ///
 /// ```gleam
 /// discover.choose(candidates, ["/state/tokens/loom-daemon-profile.AbC"], None)
-/// // -> Ok(Target(123, node, "/state/tokens/loom-daemon-profile.AbC"))
+/// // -> Ok(Target(123, node, "/state/tokens/loom-daemon-profile.AbC/.erlang.cookie"))
 /// ```
 pub fn choose(
   candidates: List(Candidate),
@@ -165,7 +167,12 @@ pub fn choose(
             case
               string.contains(candidate.command, " -home " <> directory <> " ")
             {
-              True -> Ok(Target(candidate.os_pid, candidate.node, directory))
+              True ->
+                Ok(Target(
+                  candidate.os_pid,
+                  candidate.node,
+                  directory <> "/.erlang.cookie",
+                ))
               False -> Error(Nil)
             }
           })
@@ -233,19 +240,18 @@ fn is_cookie_directory(entry: String) -> Bool {
 /// group or others.
 const others_mask = 0o77
 
-/// Read a cookie from `<home>/.erlang.cookie`, refusing a file that group
-/// or others can read. The cookie grants full control of the target, so a
-/// file anyone can read is not a credential this program will use.
+/// Read a cookie from a file, refusing one that group or others can read.
+/// The cookie grants full control of the target, so a file anyone can read
+/// is not a credential this program will use. The cookie is trimmed of its
+/// trailing newline and never appears in an error.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// discover.read_cookie("/state/tokens/loom-daemon-profile.AbC")
+/// discover.read_cookie_file("/home/me/.erlang.cookie")
 /// // -> Ok("...")
 /// ```
-pub fn read_cookie(home: String) -> Result(String, DiscoverError) {
-  let path = home <> "/.erlang.cookie"
-
+pub fn read_cookie_file(path: String) -> Result(String, DiscoverError) {
   use info <- result.try(
     simplifile.file_info(path)
     |> result.replace_error(CookieRefused("the cookie file cannot be read")),

@@ -17,6 +17,7 @@ import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/list
+import gleam/result
 import gleam/string
 
 /// Identity cast to `Dynamic`, used to place pids and references into the
@@ -60,13 +61,17 @@ pub fn has_private_cookie() -> Bool {
 /// so nothing connects to it, and the one cookie it uses is the target's,
 /// set per peer by `set_cookie`.
 ///
+/// `domain` is OTP's `name_domain` option, `"longnames"` or `"shortnames"`,
+/// and must match the target's: a `-name` node and a `-sname` node refuse
+/// each other's handshake. A short name is given without its host.
+///
 /// ## Examples
 ///
 /// ```gleam
-/// start_hidden_node("pickglass_viewer_1@127.0.0.1")
+/// start_hidden_node("pickglass_viewer_1@127.0.0.1", "longnames")
 /// // -> Ok(Nil)
 /// ```
-pub fn start_hidden_node(name: String) -> Result(Nil, String) {
+pub fn start_hidden_node(name: String, domain: String) -> Result(Nil, String) {
   case is_alive(), has_private_cookie() {
     True, _ -> Ok(Nil)
     False, False ->
@@ -78,7 +83,7 @@ pub fn start_hidden_node(name: String) -> Result(Nil, String) {
     False, True -> {
       let options =
         dynamic.properties([
-          #(key("name_domain"), to_dynamic(atom.create("longnames"))),
+          #(key("name_domain"), to_dynamic(atom.create(domain))),
           #(key("hidden"), to_dynamic(True)),
           #(key("dist_listen"), to_dynamic(False)),
         ])
@@ -117,12 +122,87 @@ pub fn set_cookie(node: Atom, cookie: Atom) -> Nil {
 @external(erlang, "net_kernel", "connect_node")
 fn connect_node(node: Atom) -> Dynamic
 
-/// Connect to a node. `Error` when it is unreachable or refuses the cookie.
-pub fn connect(node: Atom) -> Result(Nil, String) {
+/// Connect to a node. `Error` when it is unreachable, refuses the cookie, or
+/// uses the other naming mode: OTP answers `false` for all three, so the
+/// caller works out which.
+pub fn connect(node: Atom) -> Result(Nil, Nil) {
   case connect_node(node) == to_dynamic(True) {
     True -> Ok(Nil)
-    False -> Error("could not connect to " <> atom.to_string(node))
+    False -> Error(Nil)
   }
+}
+
+@external(erlang, "net_kernel", "stop")
+fn net_kernel_stop() -> Dynamic
+
+/// Stop this VM's distribution, so it can be started again under the other
+/// naming mode. Only the failure diagnosis does this.
+pub fn stop_distribution() -> Nil {
+  let _ = net_kernel_stop()
+
+  Nil
+}
+
+@external(erlang, "erl_epmd", "names")
+fn epmd_names(host: Dynamic) -> Dynamic
+
+@external(erlang, "inet", "gethostname")
+fn gethostname() -> Dynamic
+
+/// The node names `epmd` on `host` has registered, or `Error` when `epmd`
+/// cannot be asked. A node that is up and distributed is in this list; one
+/// that is not running, or was started without distribution, is not.
+///
+/// ## Examples
+///
+/// ```gleam
+/// registered_names("127.0.0.1")
+/// // -> Ok(["app", "other"])
+/// ```
+pub fn registered_names(host: String) -> Result(List(String), Nil) {
+  let reply = epmd_names(to_charlist(host))
+  let names =
+    decode.list(decode.field(
+      0,
+      decode.list(decode.int) |> decode.map(of_codes),
+      decode.success,
+    ))
+
+  case decode.run(reply, decode.field(0, atom.decoder(), decode.success)) {
+    Ok(tag) ->
+      case atom.to_string(tag) {
+        "ok" ->
+          decode.run(reply, decode.field(1, names, decode.success))
+          |> result.replace_error(Nil)
+        _ -> Error(Nil)
+      }
+    Error(_) -> Error(Nil)
+  }
+}
+
+// Names are ASCII, so a code that is not a character is dropped.
+fn of_codes(codes: List(Int)) -> String {
+  codes
+  |> list.filter_map(string.utf_codepoint)
+  |> string.from_utf_codepoints
+}
+
+/// This machine's host name as the operating system reports it, which may be
+/// a short name or a full one.
+///
+/// ## Examples
+///
+/// ```gleam
+/// local_hostname()
+/// // -> Ok("mybox")
+/// ```
+pub fn local_hostname() -> Result(String, Nil) {
+  decode.run(
+    gethostname(),
+    decode.field(1, decode.list(decode.int), decode.success),
+  )
+  |> result.replace_error(Nil)
+  |> result.map(of_codes)
 }
 
 @external(erlang, "rpc", "call")

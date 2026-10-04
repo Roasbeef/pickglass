@@ -61,8 +61,7 @@ pub fn main() -> Nil {
     Ok(cli.Attach(cli.AttachOptions(once: Some(out), ..) as options)) ->
       ffi_os.halt(
         once.run(once.Request(
-          state_dir: options.state_dir,
-          pid: options.pid,
+          selector: options.selector,
           agent_ebin: options.agent_ebin,
           out:,
           version:,

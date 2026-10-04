@@ -2,8 +2,8 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import pickglass/cli.{
-  Attach, AttachOptions, Open, OpenOptions, ProbeOptions, ShowBanner, ShowHelp,
-  View, ViewOptions,
+  Attach, AttachOptions, LoomTarget, NamedNode, Open, OpenOptions, ProbeOptions,
+  ShowBanner, ShowHelp, View, ViewOptions,
 }
 import pickglass_core/identity
 import pickglass_core/owner
@@ -17,16 +17,22 @@ pub fn no_arguments_print_the_banner_test() {
 
 pub fn attach_options_parse_test() {
   assert cli.parse(["attach"])
-    == Ok(Attach(AttachOptions(None, None, None, None, None)))
+    == Ok(Attach(AttachOptions(LoomTarget(None, None), None, None, None)))
   assert cli.parse([
       "attach", "--state-dir", "/s", "--pid", "42", "--agent-ebin", "/e",
     ])
-    == Ok(Attach(AttachOptions(Some("/s"), Some(42), Some("/e"), None, None)))
+    == Ok(
+      Attach(AttachOptions(
+        LoomTarget(Some("/s"), Some(42)),
+        Some("/e"),
+        None,
+        None,
+      )),
+    )
   assert cli.parse(["attach", "--probe-counters", "lists", "--seconds", "5"])
     == Ok(
       Attach(AttachOptions(
-        None,
-        None,
+        LoomTarget(None, None),
         None,
         Some(ProbeOptions("lists", 5)),
         None,
@@ -125,9 +131,24 @@ pub fn the_report_names_unknown_owners_and_truncation_test() {
 
 pub fn once_and_open_and_view_parse_test() {
   assert cli.parse(["attach", "--once", "--out", "cut.pgcap"])
-    == Ok(Attach(AttachOptions(None, None, None, None, Some("cut.pgcap"))))
+    == Ok(
+      Attach(AttachOptions(
+        LoomTarget(None, None),
+        None,
+        None,
+        Some("cut.pgcap"),
+      )),
+    )
   assert cli.parse(["open", "--pid", "7", "--port", "8080", "--cadence", "5"])
-    == Ok(Open(OpenOptions(None, Some(7), None, Some(8080), None, Some(5))))
+    == Ok(
+      Open(OpenOptions(
+        LoomTarget(None, Some(7)),
+        None,
+        Some(8080),
+        None,
+        Some(5),
+      )),
+    )
   assert cli.parse(["view", "cut.pgcap", "--port", "9000"])
     == Ok(View(ViewOptions("cut.pgcap", Some(9000))))
 }
@@ -164,4 +185,86 @@ pub fn compare_without_two_files_or_with_options_is_refused_test() {
     == Error("compare needs two capture files")
   assert cli.parse(["compare", "--out", "b"])
     == Error("compare takes two capture files and no options")
+}
+
+// A node named with --node is the second way to find a target, and the
+// cookie file is optional (the default is ~/.erlang.cookie).
+pub fn named_node_options_parse_test() {
+  assert cli.parse(["attach", "--node", "app@127.0.0.1"])
+    == Ok(
+      Attach(AttachOptions(NamedNode("app@127.0.0.1", None), None, None, None)),
+    )
+  assert cli.parse([
+      "attach", "--node", "app@myhost", "--cookie-file", "/c/.cookie", "--once",
+      "--out", "cut.pgcap",
+    ])
+    == Ok(
+      Attach(AttachOptions(
+        NamedNode("app@myhost", Some("/c/.cookie")),
+        None,
+        None,
+        Some("cut.pgcap"),
+      )),
+    )
+  assert cli.parse([
+      "open",
+      "--cookie-file",
+      "/c",
+      "--node",
+      "a@b",
+      "--port",
+      "9",
+    ])
+    == Ok(
+      Open(OpenOptions(NamedNode("a@b", Some("/c")), None, Some(9), None, None)),
+    )
+}
+
+// The two ways to find a target do not mix, and the messages say why.
+pub fn the_two_selection_strategies_are_exclusive_test() {
+  let exclusive =
+    Error(
+      "--node cannot be combined with --state-dir or --pid; choose one way "
+      <> "to find the target",
+    )
+
+  assert cli.parse(["attach", "--node", "a@127.0.0.1", "--pid", "7"])
+    == exclusive
+  assert cli.parse(["open", "--state-dir", "/s", "--node", "a@127.0.0.1"])
+    == exclusive
+  assert cli.parse(["attach", "--cookie-file", "/c"])
+    == Error("--cookie-file needs --node")
+  assert cli.parse(["attach", "--node", "no-at-sign"]) != cli.parse(["attach"])
+  assert is_error(cli.parse(["attach", "--node", "a@"]))
+  assert is_error(cli.parse(["attach", "--node"]))
+}
+
+// A cookie on the command line is refused in every spelling, and the
+// message points at the file instead. The cookie value is not echoed.
+pub fn a_cookie_argument_is_refused_test() {
+  list.each(
+    [
+      ["attach", "--node", "a@127.0.0.1", "--cookie", "SECRETVALUE"],
+      ["open", "--node", "a@127.0.0.1", "--cookie=SECRETVALUE"],
+      ["attach", "--setcookie", "SECRETVALUE", "--node", "a@127.0.0.1"],
+    ],
+    fn(arguments) {
+      let assert Error(message) = cli.parse(arguments)
+        as "a cookie argument must be refused"
+
+      assert string.contains(message, "--cookie-file")
+      assert !string.contains(message, "SECRETVALUE")
+    },
+  )
+}
+
+pub fn usage_says_where_the_cookie_comes_from_test() {
+  assert string.contains(cli.usage, "never from an argument or the")
+  assert string.contains(cli.usage, "~/.erlang.cookie")
+  assert string.contains(cli.usage, "--node NAME@HOST")
+}
+
+pub fn the_capture_role_follows_the_selector_test() {
+  assert cli.role(LoomTarget(None, None)) == "loomd"
+  assert cli.role(NamedNode("a@127.0.0.1", None)) == "node"
 }

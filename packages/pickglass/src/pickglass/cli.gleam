@@ -2,8 +2,11 @@
 ////
 //// `pickglass open` and `pickglass view` start the host (`serve` runs them),
 //// and `pickglass attach --once --out` writes one capture (`once` runs it).
-//// `pickglass attach` joins a profiled Loom daemon, prints what the agent
-//// reports, and detaches. `pickglass attach --probe-counters MODULE
+//// `pickglass attach` joins a node, prints what the agent
+//// reports, and detaches. The node is found one of two ways: the Loom way
+//// (`--state-dir` and `--pid`, a `loomd --profile` daemon) or by name
+//// (`--node NAME@HOST` with a cookie file), which reaches any Erlang, Elixir
+//// or Gleam node on this machine. `pickglass attach --probe-counters MODULE
 //// --seconds N` also runs a counters probe over every process for N seconds
 //// and prints the functions that spent the most time. With no arguments the
 //// program prints its banner, which is what the release smoke test checks.
@@ -15,8 +18,12 @@
 ////
 //// ## Flow
 ////
-//// - `parse` turns arguments into a `Command`.
-//// - `run_attach` discovers the target, attaches, calls `observe` (which
+//// - `parse` turns arguments into a `Command`. `extract_selection` takes the
+////   target-selecting flags out first, so `selector_of` can check them
+////   together: the two ways of finding a target are mutually exclusive, and a
+////   cookie is only ever named by a file.
+//// - `connect` resolves a `Selector` to an endpoint and attaches.
+//// - `run_attach` connects, calls `observe` (which
 ////   calls `run_probe` when a probe was asked for), and detaches.
 //// - `render_report` and `render_probe` format what the agent returned.
 
@@ -28,6 +35,8 @@ import gleam/result
 import gleam/string
 import pickglass/attach.{type Session}
 import pickglass/discover
+import pickglass/endpoint
+import pickglass/internal/ffi_dist
 import pickglass/internal/ffi_os
 import pickglass_core/owner
 import pickglass_core/wire
@@ -53,11 +62,32 @@ pub type Command {
   Compare(baseline: String, candidate: String)
 }
 
+/// How the target is found.
+pub type Selector {
+  /// A profiled Loom daemon, found from the process table and a Loom state
+  /// directory (default `~/.loom`), optionally by process id.
+  LoomTarget(state_dir: Option(String), pid: Option(Int))
+
+  /// Any node on this machine, by `NAME@HOST`, with its cookie read from a
+  /// file: the named one, or `~/.erlang.cookie`.
+  NamedNode(node: String, cookie_file: Option(String))
+}
+
+/// The target-selecting flags as typed, before they are checked against one
+/// another.
+pub type Selection {
+  Selection(
+    state_dir: Option(String),
+    pid: Option(Int),
+    node: Option(String),
+    cookie_file: Option(String),
+  )
+}
+
 /// Options of `pickglass open`.
 pub type OpenOptions {
   OpenOptions(
-    state_dir: Option(String),
-    pid: Option(Int),
+    selector: Selector,
     agent_ebin: Option(String),
     /// The port to listen on, or `None` for any free one.
     port: Option(Int),
@@ -77,8 +107,7 @@ pub type ViewOptions {
 /// Options of `pickglass attach`.
 pub type AttachOptions {
   AttachOptions(
-    state_dir: Option(String),
-    pid: Option(Int),
+    selector: Selector,
     agent_ebin: Option(String),
     probe: Option(ProbeOptions),
     /// With `--once`, the file to write one capture to.
@@ -93,22 +122,36 @@ pub type ProbeOptions {
 
 /// The usage text.
 pub const usage =
-  "usage: pickglass open [--state-dir DIR] [--pid PID] [--agent-ebin DIR]
+  "usage: pickglass open TARGET [--agent-ebin DIR]
                       [--port N] [--save-dir DIR] [--cadence SECONDS]
        pickglass view FILE [--port N]
        pickglass compare BASELINE CANDIDATE
-       pickglass attach [--state-dir DIR] [--pid PID] [--agent-ebin DIR]
+       pickglass attach TARGET [--agent-ebin DIR]
                         [--probe-counters MODULE --seconds N]
-       pickglass attach --once --out FILE [--state-dir DIR] [--pid PID]
+       pickglass attach TARGET --once --out FILE
 
-open attaches to a profiled Loom daemon (loomd --profile), serves the pages
-on 127.0.0.1 and prints a single-use URL. view serves the pages over a
-capture file with no target. compare prints two capture files side by
-side: which fields of their provenance differ, which of those block a
-statement of direction, and each figure with its verdict. attach prints memory, the top processes and the
-owner totals and detaches; with --once --out it writes one capture and
-detaches; with --probe-counters it also runs a counters probe over every
-process for N seconds. The state directory defaults to ~/.loom."
+TARGET is one of
+  [--state-dir DIR] [--pid PID]
+      a profiled Loom daemon (loomd --profile); the state directory defaults
+      to ~/.loom
+  --node NAME@HOST [--cookie-file PATH]
+      any Erlang, Elixir or Gleam node on this machine, with NAME@HOST as
+      its node name (app@127.0.0.1 for -name, app@myhost for -sname)
+The two are mutually exclusive.
+
+The cookie is read from a file and never from an argument or the
+environment, because argument lists and environments are readable by other
+local users and end up in shell history. --cookie and --setcookie are
+refused. The file must be readable by its owner alone. Without
+--cookie-file the cookie is read from ~/.erlang.cookie.
+
+open attaches, serves the pages on 127.0.0.1 and prints a single-use URL.
+view serves the pages over a capture file with no target. compare prints two
+capture files side by side: which fields of their provenance differ, which
+of those block a statement of direction, and each figure with its verdict.
+attach prints memory, the top processes and the owner totals and detaches;
+with --once --out it writes one capture and detaches; with --probe-counters
+it also runs a counters probe over every process for N seconds."
 
 /// Parse arguments.
 ///
@@ -122,15 +165,18 @@ pub fn parse(arguments: List(String)) -> Result(Command, String) {
   case arguments {
     [] -> Ok(ShowBanner)
     ["--help"] | ["-h"] | ["help"] -> Ok(ShowHelp)
-    ["attach", ..rest] ->
-      parse_attach(
-        rest,
-        AttachOptions(None, None, None, None, None),
-        None,
-        None,
-      )
-    ["open", ..rest] ->
-      parse_open(rest, OpenOptions(None, None, None, None, None, None))
+    ["attach", ..rest] -> {
+      use #(selection, rest) <- result.try(extract_selection(rest))
+      use selector <- result.try(selector_of(selection))
+
+      parse_attach(rest, AttachOptions(selector, None, None, None), None, None)
+    }
+    ["open", ..rest] -> {
+      use #(selection, rest) <- result.try(extract_selection(rest))
+      use selector <- result.try(selector_of(selection))
+
+      parse_open(rest, OpenOptions(selector, None, None, None, None))
+    }
     ["view", file, ..rest] ->
       case string.starts_with(file, "-") {
         True -> Error("view needs a capture file")
@@ -149,6 +195,82 @@ pub fn parse(arguments: List(String)) -> Result(Command, String) {
   }
 }
 
+/// Take the target-selecting flags (`--state-dir`, `--pid`, `--node`,
+/// `--cookie-file`) out of an argument list, returning them and the
+/// arguments that remain. A cookie given as an argument is refused here,
+/// whatever its spelling.
+///
+/// ## Examples
+///
+/// ```gleam
+/// cli.extract_selection(["--node", "app@127.0.0.1", "--once"])
+/// // -> Ok(#(Selection(None, None, Some("app@127.0.0.1"), None), ["--once"]))
+/// ```
+pub fn extract_selection(
+  arguments: List(String),
+) -> Result(#(Selection, List(String)), String) {
+  extract(arguments, Selection(None, None, None, None), [])
+}
+
+fn extract(
+  arguments: List(String),
+  selection: Selection,
+  kept: List(String),
+) -> Result(#(Selection, List(String)), String) {
+  case arguments {
+    [] -> Ok(#(selection, list.reverse(kept)))
+    ["--state-dir", value, ..rest] ->
+      extract(rest, Selection(..selection, state_dir: Some(value)), kept)
+    ["--node", value, ..rest] ->
+      extract(rest, Selection(..selection, node: Some(value)), kept)
+    ["--cookie-file", value, ..rest] ->
+      extract(rest, Selection(..selection, cookie_file: Some(value)), kept)
+    ["--pid", value, ..rest] ->
+      case int.parse(value) {
+        Ok(pid) if pid > 0 ->
+          extract(rest, Selection(..selection, pid: Some(pid)), kept)
+        _ -> Error("--pid must be a positive integer")
+      }
+    ["--cookie", ..] | ["--setcookie", ..] -> Error(cookie_argument_refused)
+    [flag, ..rest] ->
+      case string.starts_with(flag, "--cookie=") {
+        True -> Error(cookie_argument_refused)
+        False -> extract(rest, selection, [flag, ..kept])
+      }
+  }
+}
+
+const cookie_argument_refused =
+  "a cookie is never taken from the command line, where other local users can read it; put it in a file readable by you alone and pass --cookie-file PATH (the default is ~/.erlang.cookie)"
+
+/// Check the selecting flags against one another and choose how to find the
+/// target. `--node` and the Loom flags are alternatives, and a cookie file
+/// belongs to `--node` alone.
+///
+/// ## Examples
+///
+/// ```gleam
+/// cli.selector_of(Selection(None, Some(7), Some("app@127.0.0.1"), None))
+/// // -> Error("--node cannot be combined with --state-dir or --pid; ...")
+/// ```
+pub fn selector_of(selection: Selection) -> Result(Selector, String) {
+  case selection {
+    Selection(state_dir:, pid:, node: None, cookie_file: None) ->
+      Ok(LoomTarget(state_dir, pid))
+    Selection(node: None, cookie_file: Some(_), ..) ->
+      Error("--cookie-file needs --node")
+    Selection(state_dir: None, pid: None, node: Some(node), cookie_file:) ->
+      endpoint.parse(node, "")
+      |> result.map(fn(_) { NamedNode(node, cookie_file) })
+      |> result.map_error(endpoint.describe_error)
+    Selection(node: Some(_), ..) ->
+      Error(
+        "--node cannot be combined with --state-dir or --pid; choose one way "
+        <> "to find the target",
+      )
+  }
+}
+
 fn parse_attach(
   arguments: List(String),
   options: AttachOptions,
@@ -157,13 +279,6 @@ fn parse_attach(
 ) -> Result(Command, String) {
   case arguments {
     [] -> finish_attach(options, module, seconds)
-    ["--state-dir", value, ..rest] ->
-      parse_attach(
-        rest,
-        AttachOptions(..options, state_dir: Some(value)),
-        module,
-        seconds,
-      )
     ["--agent-ebin", value, ..rest] ->
       parse_attach(
         rest,
@@ -171,17 +286,6 @@ fn parse_attach(
         module,
         seconds,
       )
-    ["--pid", value, ..rest] ->
-      case int.parse(value) {
-        Ok(pid) if pid > 0 ->
-          parse_attach(
-            rest,
-            AttachOptions(..options, pid: Some(pid)),
-            module,
-            seconds,
-          )
-        _ -> Error("--pid must be a positive integer")
-      }
     ["--out", value, ..rest] ->
       parse_attach(
         rest,
@@ -225,18 +329,10 @@ fn parse_open(
 ) -> Result(Command, String) {
   case arguments {
     [] -> Ok(Open(options))
-    ["--state-dir", value, ..rest] ->
-      parse_open(rest, OpenOptions(..options, state_dir: Some(value)))
     ["--agent-ebin", value, ..rest] ->
       parse_open(rest, OpenOptions(..options, agent_ebin: Some(value)))
     ["--save-dir", value, ..rest] ->
       parse_open(rest, OpenOptions(..options, save_dir: Some(value)))
-    ["--pid", value, ..rest] ->
-      case int.parse(value) {
-        Ok(pid) if pid > 0 ->
-          parse_open(rest, OpenOptions(..options, pid: Some(pid)))
-        _ -> Error("--pid must be a positive integer")
-      }
     ["--port", value, ..rest] ->
       case int.parse(value) {
         Ok(port) if port >= 1 && port <= 65_535 ->
@@ -269,29 +365,93 @@ fn parse_view(
   }
 }
 
-/// Discover the target and attach to it. The state directory defaults to
-/// `~/.loom`.
+/// Find the target and attach to it. A Loom target is discovered under the
+/// state directory, which defaults to `~/.loom`. A named node is checked
+/// against the loopback scope, its cookie file is resolved, and its
+/// operating-system process id is read once attached.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// cli.connect(None, None, None)
+/// cli.connect(LoomTarget(None, None), None)
+/// cli.connect(NamedNode("app@127.0.0.1", None), None)
 /// ```
 pub fn connect(
-  state_dir: Option(String),
-  pid: Option(Int),
+  selector: Selector,
   agent_ebin: Option(String),
 ) -> Result(#(discover.Target, Session), String) {
-  use state_dir <- result.try(state_directory(state_dir))
-  use target <- result.try(
-    discover.find(state_dir, pid) |> result.map_error(describe_discovery),
-  )
-  use session <- result.map(attach.attach(
-    target,
-    option.to_result(agent_ebin, Nil),
-  ))
+  let beams = option.to_result(agent_ebin, Nil)
 
-  #(target, session)
+  case selector {
+    LoomTarget(state_dir, pid) -> {
+      use state_dir <- result.try(state_directory(state_dir))
+      use target <- result.try(
+        discover.find(state_dir, pid) |> result.map_error(describe_discovery),
+      )
+      use named <- result.try(
+        endpoint.parse(target.node, target.cookie_file)
+        |> result.map_error(endpoint.describe_error),
+      )
+      use session <- result.map(
+        attach.attach(named, beams) |> result.map_error(attach.describe),
+      )
+
+      #(target, session)
+    }
+    NamedNode(node, cookie_file) -> {
+      use cookie_file <- result.try(cookie_file_of(cookie_file))
+      use named <- result.try(
+        endpoint.parse(node, cookie_file)
+        |> result.map_error(endpoint.describe_error),
+      )
+      use _ <- result.try(
+        endpoint.check_loopback(
+          named.host,
+          result.unwrap(ffi_dist.local_hostname(), ""),
+        )
+        |> result.map_error(endpoint.describe_error),
+      )
+      use session <- result.try(
+        attach.attach(named, beams) |> result.map_error(attach.describe),
+      )
+
+      // The process id comes from the node itself. A node that cannot say
+      // is detached from, so the failed command leaves no agent behind.
+      case attach.os_pid(session) {
+        Ok(os_pid) -> Ok(#(discover.Target(os_pid, node, cookie_file), session))
+        Error(message) -> {
+          let _ = attach.detach(session)
+
+          Error(message)
+        }
+      }
+    }
+  }
+}
+
+fn cookie_file_of(named: Option(String)) -> Result(String, String) {
+  case named {
+    Some(path) -> Ok(path)
+    None ->
+      endpoint.default_cookie_file(ffi_os.getenv("HOME"))
+      |> result.replace_error("HOME is unset; pass --cookie-file")
+  }
+}
+
+/// The role a capture records for the target: `loomd` for a profiled Loom
+/// daemon, `node` for a node named with `--node`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// cli.role(NamedNode("app@127.0.0.1", None))
+/// // -> "node"
+/// ```
+pub fn role(selector: Selector) -> String {
+  case selector {
+    LoomTarget(..) -> "loomd"
+    NamedNode(..) -> "node"
+  }
 }
 
 /// Run an attach command and return the process exit status.
@@ -318,11 +478,7 @@ pub fn run_attach(options: AttachOptions) -> Int {
 }
 
 fn attach_and_report(options: AttachOptions) -> Result(String, String) {
-  use #(_, session) <- result.try(connect(
-    options.state_dir,
-    options.pid,
-    options.agent_ebin,
-  ))
+  use #(_, session) <- result.try(connect(options.selector, options.agent_ebin))
 
   // Detach runs whether or not the requests succeed, so an error never
   // leaves a probe counting on the target.

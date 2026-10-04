@@ -68,8 +68,7 @@ pub fn run_open(options: cli.OpenOptions, version: String) -> Int {
 
 fn open(options: cli.OpenOptions, version: String) -> Result(Nil, String) {
   use #(target, session) <- result.try(cli.connect(
-    options.state_dir,
-    options.pid,
+    options.selector,
     options.agent_ebin,
   ))
   use remote <- result.try(remote.of_session(session))
@@ -89,7 +88,7 @@ fn open(options: cli.OpenOptions, version: String) -> Result(Nil, String) {
       node: target.node,
       os_pid: target.os_pid,
       boot: remote.boot,
-      role: "loomd",
+      role: cli.role(options.selector),
       workload: "",
       top_k: 200,
       deadline_ms: 15_000,

@@ -65,7 +65,11 @@ pub fn choose_matches_a_cookie_directory_test() {
   ]
 
   assert discover.choose(candidates, directories, None)
-    == Ok(Target(100, node("daemon", "100"), "/s/tokens/loom-daemon-profile.A"))
+    == Ok(Target(
+      100,
+      node("daemon", "100"),
+      "/s/tokens/loom-daemon-profile.A/.erlang.cookie",
+    ))
   assert discover.choose(candidates, ["/s/tokens/loom-daemon-profile.B"], None)
     == Error(NoTarget)
 }
@@ -89,9 +93,17 @@ pub fn choose_filters_by_role_and_pid_test() {
   assert discover.choose(candidates, directories, None)
     == Error(Ambiguous([100, 101]))
   assert discover.choose(candidates, directories, Some(101))
-    == Ok(Target(101, node("daemon", "101"), "/s/tokens/loom-daemon-profile.B"))
+    == Ok(Target(
+      101,
+      node("daemon", "101"),
+      "/s/tokens/loom-daemon-profile.B/.erlang.cookie",
+    ))
   assert discover.choose(candidates, directories, Some(102))
-    == Ok(Target(102, node("client", "102"), "/s/tokens/loom-client-profile.C"))
+    == Ok(Target(
+      102,
+      node("client", "102"),
+      "/s/tokens/loom-client-profile.C/.erlang.cookie",
+    ))
 }
 
 // A directory name that is a prefix of another must not match its sibling:
@@ -121,15 +133,15 @@ pub fn cookie_permissions_are_enforced_test() {
   let assert Ok(Nil) = simplifile.set_permissions_octal(path, 0o600)
     as "private permissions"
 
-  assert discover.read_cookie(directory) == Ok("SECRETCOOKIE")
+  assert discover.read_cookie_file(path) == Ok("SECRETCOOKIE")
 
   let assert Ok(Nil) = simplifile.set_permissions_octal(path, 0o644)
     as "open permissions"
 
-  assert discover.read_cookie(directory)
+  assert discover.read_cookie_file(path)
     == Error(discover.CookieRefused(
       "the cookie file is readable by group or others",
     ))
-  assert discover.read_cookie("build/no_such_directory")
+  assert discover.read_cookie_file("build/no_such_directory/.erlang.cookie")
     == Error(discover.CookieRefused("the cookie file cannot be read"))
 }

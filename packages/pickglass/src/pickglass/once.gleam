@@ -38,8 +38,7 @@ import pickglass_core/measure
 /// What `once` needs to know about the version and the destination.
 pub type Request {
   Request(
-    state_dir: Option(String),
-    pid: Option(Int),
+    selector: cli.Selector,
     agent_ebin: Option(String),
     out: String,
     /// The viewer's version, for the capture's producer block.
@@ -52,11 +51,11 @@ pub type Request {
 /// ## Examples
 ///
 /// ```gleam
-/// once.run(Request(None, None, None, "cut.pgcap", "0.1.0"))
+/// once.run(Request(cli.LoomTarget(None, None), None, "cut.pgcap", "0.1.0"))
 /// // -> 0
 /// ```
 pub fn run(request: Request) -> Int {
-  case cli.connect(request.state_dir, request.pid, request.agent_ebin) {
+  case cli.connect(request.selector, request.agent_ebin) {
     Error(message) -> fail(message)
     Ok(#(target, session)) -> {
       // Detach runs whether or not the capture was written.
@@ -103,7 +102,7 @@ fn capture_once(
       node: target.node,
       os_pid: target.os_pid,
       boot: remote.boot,
-      role: "loomd",
+      role: cli.role(request.selector),
       workload: "",
       top_k: 200,
       deadline_ms: observation.ask_deadline_ms,

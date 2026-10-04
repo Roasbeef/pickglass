@@ -8,7 +8,7 @@ pub fn distribution_is_refused_without_a_private_cookie_test() {
   assert !ffi_dist.has_private_cookie()
 
   let assert Error(message) =
-    ffi_dist.start_hidden_node("pickglass_cookie_test@127.0.0.1")
+    ffi_dist.start_hidden_node("pickglass_cookie_test@127.0.0.1", "longnames")
 
   assert string.contains(message, "-nocookie")
   assert string.contains(message, "~/.erlang.cookie")

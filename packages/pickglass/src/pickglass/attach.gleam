@@ -3,7 +3,8 @@
 ////
 //// Pickglass is an independent program. It does not ask the target to embed
 //// it. It joins the target's distribution as a hidden node that does not
-//// listen, reads the target's cookie from an owner-only file, loads the
+//// listen, using the target's naming mode, reads the target's cookie from an
+//// owner-only file, loads the
 //// agent's modules into the target with `code:load_binary`, and starts the
 //// agent as one registered process that monitors the viewer's link process.
 //// From then on the target holds nothing the viewer did not put there, and
@@ -16,7 +17,12 @@
 ////
 //// ## Flow
 ////
-//// - `attach` runs the steps below in order and returns a `Session`.
+//// - `attach` runs the steps below in order and returns a `Session`, or an
+////   `AttachError` whose `describe` is one line for the operator.
+//// - `join` starts the viewer's node and connects. When the connection is
+////   refused, `diagnose` asks the port mapper and tries the other naming mode to say
+////   which of three causes it was, since OTP gives the same answer for all
+////   of them.
 //// - `prepare_target` checks the release and clears a stale agent.
 //// - `push` loads every beam, and `start_agent` starts the agent with the
 ////   link process as its monitored viewer.
@@ -31,7 +37,8 @@ import gleam/list
 import gleam/result
 import gleam/string
 import pickglass/agent_beams.{type Beam}
-import pickglass/discover.{type Target}
+import pickglass/discover
+import pickglass/endpoint.{type Endpoint, type Naming, LongNames, ShortNames}
 import pickglass/internal/ffi_dist
 import pickglass/link.{type Link}
 import pickglass_core/identity
@@ -71,8 +78,76 @@ pub type Unload {
   ModulesUnreadable
 }
 
-/// Attach to a discovered target, pushing the agent from `beams_directory`
-/// or from the default location.
+/// Why an attach failed. Each variant is a cause the operator can act on;
+/// `describe` gives the one-line message.
+pub type AttachError {
+  /// The cookie file is missing, unreadable, or readable by others.
+  CookieUnusable(path: String, reason: String)
+
+  /// This VM could not start distribution.
+  DistributionUnavailable(detail: String)
+
+  /// `epmd` has no node of that name: it is not running, or was started
+  /// without distribution.
+  NodeNotRunning(node: String)
+
+  /// The node is registered but refused the connection, and the other naming
+  /// mode did not reach it either, so the cookie differs.
+  CookieMismatch(node: String)
+
+  /// The node is registered and answers in the other naming mode.
+  NamingModeMismatch(node: String, given: Naming, reachable_as: String)
+
+  /// The target's OTP release is older than the agent supports.
+  OtpTooOld(release: Int, minimum: Int)
+
+  /// Another viewer's agent is already running on the target.
+  AgentAlreadyAttached
+
+  /// Any other failure, already in words.
+  Failed(detail: String)
+}
+
+/// A one-line message for an operator. It never contains the cookie.
+///
+/// ## Examples
+///
+/// ```gleam
+/// attach.describe(attach.NodeNotRunning("app@127.0.0.1"))
+/// ```
+pub fn describe(error: AttachError) -> String {
+  case error {
+    CookieUnusable(path, reason) -> "cookie file " <> path <> ": " <> reason
+    DistributionUnavailable(detail) -> detail
+    NodeNotRunning(node) ->
+      node
+      <> " is not running, or is not registered with epmd; check the name "
+      <> "with `epmd -names` and that the node was started with -name or -sname"
+    CookieMismatch(node) ->
+      node
+      <> " refused the connection: its cookie differs from the one in the "
+      <> "cookie file"
+    NamingModeMismatch(node, given, reachable_as) ->
+      node
+      <> " was treated as a "
+      <> endpoint.domain(given)
+      <> " node but is not; it answers as "
+      <> reachable_as
+      <> ", so pass that as --node"
+    OtpTooOld(release, minimum) ->
+      "the target runs OTP "
+      <> int.to_string(release)
+      <> "; pickglass needs OTP "
+      <> int.to_string(minimum)
+      <> " or newer"
+    AgentAlreadyAttached ->
+      "another pickglass agent is already attached to this node"
+    Failed(detail) -> detail
+  }
+}
+
+/// Attach to a node, pushing the agent from `beams_directory` or from the
+/// default location.
 ///
 /// ## Examples
 ///
@@ -80,53 +155,150 @@ pub type Unload {
 /// let assert Ok(session) = attach.attach(target, Error(Nil))
 /// ```
 pub fn attach(
-  target: Target,
+  target: Endpoint,
   beams_directory: Result(String, Nil),
-) -> Result(Session, String) {
+) -> Result(Session, AttachError) {
   use cookie <- result.try(
-    discover.read_cookie(target.home)
-    |> result.map_error(fn(_) { "the target's cookie file was refused" }),
+    discover.read_cookie_file(target.cookie_file)
+    |> result.map_error(fn(refused) {
+      case refused {
+        discover.CookieRefused(reason) ->
+          CookieUnusable(target.cookie_file, reason)
+        discover.NoTarget
+        | discover.Ambiguous(_)
+        | discover.StateUnreadable(_) ->
+          CookieUnusable(target.cookie_file, "the cookie cannot be read")
+      }
+    }),
   )
-  use beams <- result.try(agent_beams.load(beams_directory))
+  use beams <- result.try(
+    agent_beams.load(beams_directory) |> result.map_error(Failed),
+  )
   use node <- result.try(join(target, cookie))
   use _ <- result.try(prepare_target(node))
-  use _ <- result.try(push(node, beams))
-  use link <- result.try(link.start(node))
-  use boot_id <- result.try(start_agent(node, link))
+  use _ <- result.try(push(node, beams) |> result.map_error(Failed))
+  use link <- result.try(link.start(node) |> result.map_error(Failed))
+  use boot_id <- result.try(start_agent(node, link) |> result.map_error(Failed))
   let session = Session(node:, link:, boot_id:)
 
-  use _ <- result.try(verify(session))
+  use _ <- result.try(verify(session) |> result.map_error(Failed))
 
   Ok(session)
 }
 
-// The viewer's own node name is unique per attach, and the cookie is set for
-// this one peer, so the target's cookie never becomes the viewer's own.
-fn join(target: Target, cookie: String) -> Result(Atom, String) {
-  use _ <- result.try(ffi_dist.start_hidden_node(
-    "pickglass_viewer_" <> ffi_dist.random_id() <> "@127.0.0.1",
-  ))
+/// The target's operating-system process id, read over the connection. A
+/// node named with `--node` has no process table entry to discover it from.
+///
+/// ## Examples
+///
+/// ```gleam
+/// attach.os_pid(session)
+/// // -> Ok(12345)
+/// ```
+pub fn os_pid(session: Session) -> Result(Int, String) {
+  use chars <- result.try(ffi_dist.call(session.node, "os", "getpid", [], 5000))
 
-  let node = atom.create(target.node)
-
-  ffi_dist.set_cookie(node, atom.create(cookie))
-  use _ <- result.try(ffi_dist.connect(node))
-
-  Ok(node)
+  ffi_dist.text_of(chars)
+  |> result.try(int.parse)
+  |> result.replace_error("could not read the target's OS process id")
 }
 
-fn prepare_target(node: Atom) -> Result(Nil, String) {
-  use release <- result.try(otp_release(node))
+// The viewer's own node name is unique per attach, and the cookie is set for
+// this one peer, so the target's cookie never becomes the viewer's own.
+fn join(target: Endpoint, cookie: String) -> Result(Atom, AttachError) {
+  use _ <- result.try(start_viewer(target.naming))
+
+  let node = atom.create(endpoint.node_name(target))
+
+  ffi_dist.set_cookie(node, atom.create(cookie))
+
+  case ffi_dist.connect(node) {
+    Ok(Nil) -> Ok(node)
+    Error(Nil) -> Error(diagnose(target, cookie))
+  }
+}
+
+// A short name is given without its host; a long name carries the loopback
+// address, which is where the viewer lives.
+fn start_viewer(naming: Naming) -> Result(Nil, AttachError) {
+  let id = "pickglass_viewer_" <> ffi_dist.random_id()
+  let name = case naming {
+    LongNames -> id <> "@127.0.0.1"
+    ShortNames -> id
+  }
+
+  ffi_dist.start_hidden_node(name, endpoint.domain(naming))
+  |> result.map_error(DistributionUnavailable)
+}
+
+// OTP's `connect_node` answers `false` when the node is down, when the
+// cookie differs and when the naming mode differs. `epmd` separates the
+// first: a node it has not registered is not running. For the other two the
+// viewer restarts its own distribution in the opposite mode and tries the
+// same node name under that mode's host, which is the loopback address for
+// a long name and this machine's short host name for a short name. A node
+// reached that way is a naming mismatch; one that is not is a cookie
+// mismatch.
+fn diagnose(target: Endpoint, cookie: String) -> AttachError {
+  let node = endpoint.node_name(target)
+
+  case ffi_dist.registered_names(target.host) {
+    Ok(names) ->
+      case list.contains(names, target.name) {
+        True -> probe_other_mode(target, cookie)
+        False -> NodeNotRunning(node)
+      }
+    Error(Nil) -> NodeNotRunning(node)
+  }
+}
+
+fn probe_other_mode(target: Endpoint, cookie: String) -> AttachError {
+  let node = endpoint.node_name(target)
+  let other = case target.naming {
+    LongNames -> ShortNames
+    ShortNames -> LongNames
+  }
+
+  ffi_dist.stop_distribution()
+
+  let reached = {
+    use _ <- result.try(start_viewer(other) |> result.replace_error(Nil))
+    use host <- result.try(other_host(other))
+
+    let candidate = target.name <> "@" <> host
+    let peer = atom.create(candidate)
+
+    ffi_dist.set_cookie(peer, atom.create(cookie))
+    use _ <- result.map(ffi_dist.connect(peer))
+
+    candidate
+  }
+
+  case reached {
+    Ok(candidate) -> NamingModeMismatch(node, target.naming, candidate)
+    Error(Nil) -> CookieMismatch(node)
+  }
+}
+
+fn other_host(naming: Naming) -> Result(String, Nil) {
+  case naming {
+    LongNames -> Ok("127.0.0.1")
+    ShortNames ->
+      ffi_dist.local_hostname()
+      |> result.map(fn(name) {
+        case string.split_once(name, ".") {
+          Ok(#(label, _)) -> label
+          Error(Nil) -> name
+        }
+      })
+  }
+}
+
+fn prepare_target(node: Atom) -> Result(Nil, AttachError) {
+  use release <- result.try(otp_release(node) |> result.map_error(Failed))
 
   case release >= minimum_otp {
-    False ->
-      Error(
-        "the target runs OTP "
-        <> int.to_string(release)
-        <> "; pickglass needs OTP "
-        <> int.to_string(minimum_otp)
-        <> " or newer",
-      )
+    False -> Error(OtpTooOld(release, minimum_otp))
     True -> clear_stale_agent(node)
   }
 }
@@ -148,22 +320,27 @@ fn otp_release(node: Atom) -> Result(Int, String) {
 // A registered agent means another viewer is attached. Agent modules with
 // no registered agent are what a killed agent leaves behind, and are
 // unloaded before the new push.
-fn clear_stale_agent(node: Atom) -> Result(Nil, String) {
-  use running <- result.try(ffi_dist.call(
-    node,
-    "erlang",
-    "whereis",
-    [ffi_dist.to_dynamic(atom.create("pickglass_agent"))],
-    5000,
-  ))
+fn clear_stale_agent(node: Atom) -> Result(Nil, AttachError) {
+  use running <- result.try(
+    ffi_dist.call(
+      node,
+      "erlang",
+      "whereis",
+      [ffi_dist.to_dynamic(atom.create("pickglass_agent"))],
+      5000,
+    )
+    |> result.map_error(Failed),
+  )
 
   case
     decode.run(running, decode.dynamic)
     == Ok(ffi_dist.to_dynamic(atom.create("undefined")))
   {
-    False -> Error("another pickglass agent is already attached to this node")
+    False -> Error(AgentAlreadyAttached)
     True -> {
-      use modules <- result.try(loaded_agent_modules(node))
+      use modules <- result.try(
+        loaded_agent_modules(node) |> result.map_error(Failed),
+      )
 
       list.each(modules, fn(module) { unload(node, module) })
 
