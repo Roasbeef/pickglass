@@ -199,15 +199,17 @@ fn ets_row(table: ets.Table) -> Term {
   ))
 }
 
-/// The answer to `binaries`: the process, how many binary references it holds,
-/// their total size in bytes, and the largest as `{Address, Bytes, RefCount}`
-/// with `Address` in hexadecimal text.
+/// The answer to `binaries`: the process, how many different binaries it
+/// holds, their total size in bytes, how many references it holds to them, and
+/// the largest as `{Address, Bytes, RefCount}` with `Address` in hexadecimal
+/// text. A binary held through several references is counted once.
 pub fn binaries(pid_text: String, report: binaries.Report) -> Term {
   ffi_term.coerce(#(
     "binaries",
     pid_text,
-    report.count,
+    report.distinct,
     report.bytes,
+    report.references,
     seq.map(report.entries, fn(entry) {
       ffi_term.coerce(#(entry.address, entry.bytes, entry.refc))
     }),

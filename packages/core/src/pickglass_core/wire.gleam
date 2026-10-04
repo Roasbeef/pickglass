@@ -377,15 +377,19 @@ pub type BinaryRef {
   BinaryRef(address_text: String, bytes: Int, refc: Int)
 }
 
-/// The answer to `binaries`: how many binary references the process holds,
-/// their total size in bytes, and the largest ones. `count` minus the length
-/// of `binaries` is how many the listing leaves out. A binary referenced twice
-/// is counted twice, and a sub-binary counts the whole binary's size.
+/// The answer to `binaries`: how many different binaries the process holds,
+/// their total size in bytes, how many references it holds to them, and the
+/// largest ones. A binary held through several references is counted once, so
+/// `references` is at least `distinct`, and `distinct` minus the length of
+/// `binaries` is how many the listing leaves out. A sub-binary counts the
+/// whole binary's size, so `bytes` is what the process keeps alive and not
+/// memory unique to it.
 pub type BinariesSnapshot {
   BinariesSnapshot(
     pid_text: String,
-    count: Int,
+    distinct: Int,
     bytes: Int,
+    references: Int,
     binaries: List(BinaryRef),
   )
 }
@@ -1332,15 +1336,23 @@ fn ets_totals_decoder() -> Decoder(EtsTotals) {
 
 // ------------------------------------------------------------- binaries
 
-// `{<<"binaries">>, PidText, Count, Bytes, [{AddressText, Bytes, RefCount}]}`.
+// `{<<"binaries">>, PidText, Distinct, Bytes, References, [{AddressText,
+// Bytes, RefCount}]}`.
 fn binaries_decoder() -> Decoder(Reply) {
   use pid_text <- decode.field(1, decode.string)
-  use count <- decode.field(2, decode.int)
+  use distinct <- decode.field(2, decode.int)
   use bytes <- decode.field(3, decode.int)
-  use binaries <- decode.field(4, decode.list(binary_ref_decoder()))
+  use references <- decode.field(4, decode.int)
+  use binaries <- decode.field(5, decode.list(binary_ref_decoder()))
 
   decode.success(
-    BinariesReport(BinariesSnapshot(pid_text:, count:, bytes:, binaries:)),
+    BinariesReport(BinariesSnapshot(
+      pid_text:,
+      distinct:,
+      bytes:,
+      references:,
+      binaries:,
+    )),
   )
 }
 

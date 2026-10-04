@@ -5,10 +5,14 @@
 //// process holds a small reference to it. `process_info(Pid, binary)` lists
 //// those references as `{Address, Size, RefCount}`, which is how a leak of
 //// large binaries through a long-lived process is told from a leak of heap.
-//// The list's length is the number of references the process holds. It can be
-//// the same binary several times, and a sub-binary shows the whole binary's
-//// size, so the byte total is what the process keeps alive, not memory unique
-//// to it.
+//// The list is one entry per reference, and a process often holds the same
+//// binary through many references (a sub-binary, or a copy of a message that
+//// carried it): measured on an idle Loom daemon, one supervisor held a 121 KB
+//// binary through 100 references, so summing the entries would report 3.9 MB
+//// for 121 KB. The read therefore counts a binary once, by its address, for
+//// the total and the listing, and reports the number of references beside
+//// it. A sub-binary shows the whole binary's size, so the total is what the
+//// process keeps alive, not memory unique to it.
 ////
 //// This read is costly for a process that holds many binaries. The target
 //// builds a list with a tuple for every reference and the answer is copied
@@ -24,6 +28,7 @@
 //// process holds more than the agent will read, and gets no partial figure
 //// that might be mistaken for a total.
 
+import pickglass_agent/internal/ffi_map
 import pickglass_agent/internal/ffi_proc
 import pickglass_agent/internal/ffi_term.{type Pid, type Term}
 import pickglass_agent/internal/seq
@@ -38,16 +43,19 @@ pub const max_top_k = 200
 
 /// One binary the process references. `address` is the binary's address in
 /// hexadecimal, which identifies the same binary across processes and across
-/// reads while it lives.
+/// reads while it lives, and `refc` is how many references to it exist in the
+/// whole node.
 pub type Entry {
   Entry(address: String, bytes: Int, refc: Int)
 }
 
-/// What a process holds. `count` and `bytes` cover every reference, and
-/// `entries` is the largest ones, so `count` minus the length of `entries` is
-/// how many the listing leaves out.
+/// What a process holds. `distinct` is the number of different binaries and
+/// `bytes` their total size. `references` is how many references the process
+/// holds to them, at least `distinct`. `entries` is the largest binaries, so
+/// `distinct` minus the length of `entries` is how many the listing leaves
+/// out.
 pub type Report {
-  Report(count: Int, bytes: Int, entries: List(Entry))
+  Report(distinct: Int, bytes: Int, references: Int, entries: List(Entry))
 }
 
 /// Why a read gave no report.
@@ -96,38 +104,51 @@ fn bounded(references: List(Term), top_k: Int) -> Result(Report, Failure) {
   case count > max_binaries {
     True -> Error(TooMany(count))
     False -> {
-      let initial = #(topk.new(top_k), 0)
-      let #(top, bytes) = seq.fold(references, initial, fold_reference)
+      let initial = Tally(topk.new(top_k), ffi_map.new(), 0, 0)
+      let tally = seq.fold(references, initial, fold_reference)
 
       Ok(Report(
-        count: count,
-        bytes: bytes,
-        entries: seq.map(topk.descending(top), fn(entry) { entry.1 }),
+        distinct: tally.distinct,
+        bytes: tally.bytes,
+        references: count,
+        entries: seq.map(topk.descending(tally.top), fn(entry) { entry.1 }),
       ))
     }
   }
 }
 
+// The running result of the fold: the largest binaries, the addresses already
+// counted, and the distinct count and byte total.
+type Tally {
+  Tally(top: topk.Top(Entry), seen: ffi_map.Map, distinct: Int, bytes: Int)
+}
+
 // A reference of any shape but `{Address, Size, RefCount}` with integers is
-// skipped from the listing and the sum, which can only understate: the count
-// still includes it.
-fn fold_reference(
-  acc: #(topk.Top(Entry), Int),
-  reference: Term,
-) -> #(topk.Top(Entry), Int) {
-  let #(top, bytes) = acc
-
+// left out of the listing and the sums, which can only understate. A binary
+// whose address was already counted adds nothing, so the same binary held
+// through many references is one binary of its own size.
+fn fold_reference(tally: Tally, reference: Term) -> Tally {
   case is_reference_triple(reference) {
-    False -> acc
+    False -> tally
     True -> {
-      let size: Int = ffi_term.coerce(ffi_term.element(2, reference))
-      let address: Int = ffi_term.coerce(ffi_term.element(1, reference))
-      let refc: Int = ffi_term.coerce(ffi_term.element(3, reference))
+      let address = ffi_term.element(1, reference)
 
-      #(
-        topk.offer(top, size, Entry(ffi_term.hex_text(address), size, refc)),
-        bytes + size,
-      )
+      case ffi_map.has_key(address, tally.seen) {
+        True -> tally
+        False -> {
+          let size: Int = ffi_term.coerce(ffi_term.element(2, reference))
+          let refc: Int = ffi_term.coerce(ffi_term.element(3, reference))
+          let entry =
+            Entry(ffi_term.hex_text(ffi_term.coerce(address)), size, refc)
+
+          Tally(
+            top: topk.offer(tally.top, size, entry),
+            seen: ffi_map.put(address, ffi_term.coerce(True), tally.seen),
+            distinct: tally.distinct + 1,
+            bytes: tally.bytes + size,
+          )
+        }
+      }
     }
   }
 }

@@ -1123,7 +1123,14 @@ fn added_examples() -> List(Dynamic) {
       [],
       wire.EtsTotals(2, 10, 800),
     )),
-    tuple([text("binaries"), text("<0.1.0>"), num(1), num(2), dynamic.list([])]),
+    tuple([
+      text("binaries"),
+      text("<0.1.0>"),
+      num(1),
+      num(2),
+      num(3),
+      dynamic.list([]),
+    ]),
     encode_owners_detail(wire.OwnersDetailSnapshot(
       wire.CensusCoverage(1, 2, wire.WalkFinished, 3),
       [],
@@ -2014,10 +2021,10 @@ fn binary_ref() -> Generator(wire.BinaryRef) {
 fn binaries_snapshot() -> Generator(wire.BinariesSnapshot) {
   qcheck.map3(
     gen.ident(),
-    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
     gen.small_list(binary_ref()),
     fn(pid, totals, binaries) {
-      wire.BinariesSnapshot(pid, totals.0, totals.1, binaries)
+      wire.BinariesSnapshot(pid, totals.0, totals.1, totals.2, binaries)
     },
   )
 }
@@ -2030,8 +2037,9 @@ pub fn property_binaries_round_trip_test() {
         tuple([
           text("binaries"),
           text(snapshot.pid_text),
-          num(snapshot.count),
+          num(snapshot.distinct),
           num(snapshot.bytes),
+          num(snapshot.references),
           dynamic.list(
             list.map(snapshot.binaries, fn(ref) {
               tuple([text(ref.address_text), num(ref.bytes), num(ref.refc)])

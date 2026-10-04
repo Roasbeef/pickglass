@@ -177,16 +177,20 @@ Totals}`:
 - Errors: `busy`, `ets_failed`.
 
 **Binaries of a pinned process.** `{<<"binaries">>, Token, TopK}` (1 to 200,
-clamped) gives `{<<"binaries">>, PidText, Count, Bytes, Binaries}` with a
-binary `{Address, Bytes, RefCount}`, largest first:
+clamped) gives `{<<"binaries">>, PidText, Distinct, Bytes, References,
+Binaries}` with a binary `{Address, Bytes, RefCount}`, largest first:
 - It reads `process_info(P, binary)` of the pinned process only, in a worker
-  with a 2 s deadline. It is never part of a census. `Count` is the number of
-  reference-counted binary references the process holds and `Bytes` their sum;
-  a binary referenced twice is counted twice, and a sub-binary counts the whole
-  binary's size, so `Bytes` is what the process keeps alive and not memory
-  unique to it. `Address` is hexadecimal text and identifies the same binary
-  across processes while it lives. `Count` minus the length of the list is how
-  many the list leaves out.
+  with a 2 s deadline. It is never part of a census. The VM lists one entry per
+  reference, and a process often holds one binary through many references, so
+  the agent counts each binary once by its address: `Distinct` is the number
+  of different binaries, `Bytes` their total size, and `References` how many
+  references the process holds to them. Measured on an idle Loom daemon, one
+  supervisor held a 121 KB binary through 100 references; summing entries would
+  have said 3.9 MB. A sub-binary counts the whole binary's size, so `Bytes` is
+  what the process keeps alive and not memory unique to it. `Address` is
+  hexadecimal text and identifies the same binary across processes while it
+  lives, and `RefCount` is how many references to it exist on the whole node.
+  `Distinct` minus the length of the list is how many the list leaves out.
 - It is costly for a process that holds many binaries: the target builds a
   tuple per reference and the answer is copied into the worker, so the cost
   grows with the count and is paid by the target as well. The count is not known
@@ -194,9 +198,9 @@ binary `{Address, Bytes, RefCount}`, largest first:
   50,000 references is refused with `too_many_binaries` after the list arrives,
   and a process with so many that receiving the list passes the worker's
   1,000,000-word heap cap (between 80,000 and 100,000 references, measured with
-  70-byte binaries) has its
-  worker killed, which the agent also reports as `too_many_binaries`. No
-  partial figure is ever returned for a process over the budget.
+  70-byte binaries) has its worker killed, which the agent also reports as
+  `too_many_binaries`. No partial figure is ever returned for a process over
+  the budget.
 - Errors: `stale_pin`, `busy`, `target_gone`, `deadline`, `too_many_binaries`.
 
 **Process detail.** `{<<"process_detail">>, Token}` gives

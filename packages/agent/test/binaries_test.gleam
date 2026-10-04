@@ -1,7 +1,7 @@
 import gleam/list
 import pickglass_agent/binaries
 import pickglass_agent/internal/ffi_proc
-import pickglass_agent/internal/ffi_term.{type Pid}
+import pickglass_agent/internal/ffi_term.{type Pid, coerce}
 
 @external(erlang, "binary", "copy")
 fn copy(text: String, times: Int) -> String
@@ -42,7 +42,8 @@ pub fn a_holder_reports_its_binaries_test() {
   let pid = holder(30, 1000)
   let assert Ok(report) = binaries.read(pid, 5)
 
-  assert report.count >= 30
+  assert report.distinct >= 30
+  assert report.references >= report.distinct
   assert report.bytes >= 30_000
   assert list.length(report.entries) == 5
 
@@ -74,4 +75,30 @@ pub fn an_exited_process_is_gone_test() {
   sleep(100)
 
   assert binaries.read(pid, 5) == Error(binaries.Gone)
+}
+
+// The same binary held through many references is counted once: summing the
+// references would multiply its size. Forty copies of one binary sit in the
+// mailbox of a process that never receives, each a reference to the same
+// binary.
+pub fn a_shared_binary_is_counted_once_test() {
+  let #(pid, _) =
+    ffi_proc.spawn_opt(fn() { sleep(30_000) |> ignore }, [ffi_proc.Monitor])
+  let one = copy("x", 5000)
+
+  list.each(list.repeat(0, 40), fn(_) { ffi_proc.send(pid, coerce(one)) })
+  sleep(100)
+
+  let assert Ok(report) = binaries.read(pid, 10)
+
+  assert report.distinct == 1
+  assert report.bytes == 5000
+  assert report.references > 1
+  assert list.length(report.entries) == 1
+
+  stop(pid)
+}
+
+fn ignore(_value: a) -> Nil {
+  Nil
 }

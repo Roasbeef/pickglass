@@ -578,14 +578,15 @@ scenario_binaries(Target) ->
     Small = erpc:call(Target, pg_e2e_ets, hold, [100, 1000]),
     Few = erpc:call(Target, pg_e2e_ets, hold, [3, 200000]),
     timer:sleep(200),
-    {<<"binaries">>, SmallText, Count, Bytes, Rows} =
+    {<<"binaries">>, SmallText, Count, Bytes, Refs, Rows} =
         ask(Target, {<<"binaries">>, Pin(Small), 5}),
     check("the binaries of a pinned process are summed",
-          SmallText =:= pid_text(Target, Small) andalso Count >= 100 andalso Bytes >= 100000),
+          SmallText =:= pid_text(Target, Small) andalso Count >= 100 andalso
+          Bytes >= 100000 andalso Refs >= Count),
     check("the listing is bounded and largest first",
           length(Rows) =:= 5 andalso
           lists:all(fun({A, B, R}) -> is_binary(A) andalso B >= 1000 andalso R >= 1 end, Rows)),
-    {<<"binaries">>, _, 3, FewBytes, [{_, 200000, _} | _] = FewRows} =
+    {<<"binaries">>, _, 3, FewBytes, _, [{_, 200000, _} | _] = FewRows} =
         ask(Target, {<<"binaries">>, Pin(Few), 200}),
     check("large binaries are listed with their sizes",
           FewBytes >= 600000 andalso length(FewRows) =:= 3),
