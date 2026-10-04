@@ -1,0 +1,21 @@
+name = "pickglass_web"
+version = "0.1.0"
+licences = ["Apache-2.0"]
+description = "Every pickglass page as Lustre views, plus a static preview renderer."
+target = "erlang"
+
+gleam = ">= 1.18.0"
+
+repository = { type = "github", user = "Roasbeef", repo = "pickglass" }
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+lustre = "== 5.7.1"
+pickglass_core = { path = "../core" }
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
+qcheck = ">= 1.0.5 and < 2.0.0"
+simplifile = ">= 2.0.0 and < 3.0.0"
+argv = ">= 1.0.0 and < 2.0.0"
+gleam_json = ">= 3.0.0 and < 4.0.0"
