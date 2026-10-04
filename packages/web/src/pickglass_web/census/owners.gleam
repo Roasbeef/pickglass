@@ -75,6 +75,7 @@ pub fn build(
     baseline:,
     labelled: #(list.length(census) - unlabelled, unlabelled),
     remainder: model.NoRemainder,
+    rate_ms: None,
   )
 }
 

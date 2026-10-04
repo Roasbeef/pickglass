@@ -65,6 +65,10 @@ pub type MissingReason {
 
   /// The agent's reply for this row did not decode.
   DecodeFailed
+
+  /// A rate needs the subject in two consecutive passes, and it was in only
+  /// one of them, or there was no earlier pass.
+  NotInBothPasses
 }
 
 /// Every missing reason, for codecs and exhaustive tests.
@@ -76,6 +80,7 @@ pub const all_missing_reasons: List(MissingReason) = [
   BudgetExhausted,
   DeadlineReached,
   DecodeFailed,
+  NotInBothPasses,
 ]
 
 /// The stable code of a missing reason, used in capture files.
@@ -95,6 +100,7 @@ pub fn missing_reason_code(reason: MissingReason) -> String {
     BudgetExhausted -> "budget_exhausted"
     DeadlineReached -> "deadline_reached"
     DecodeFailed -> "decode_failed"
+    NotInBothPasses -> "not_in_both_passes"
   }
 }
 

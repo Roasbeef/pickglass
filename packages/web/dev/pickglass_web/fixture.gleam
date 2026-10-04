@@ -690,6 +690,7 @@ pub fn processes() -> model.ProcessesModel {
     sort: model.ByMemory,
     window: model.Window(offset: 0, size: 100, total: 3412),
     rows:,
+    rate_ms: Some(2000),
   )
 }
 

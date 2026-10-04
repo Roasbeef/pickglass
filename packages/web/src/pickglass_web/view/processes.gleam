@@ -20,7 +20,7 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
@@ -43,7 +43,7 @@ const binary_why: String =
 pub fn view(data: ProcessesModel, links: Links) -> Element(Msg) {
   ui.panel(title: "Processes", info: data.info, controls: [pager(data)], body: [
     html.table([attribute.class("tbl processes")], [
-      head(data.sort),
+      head(data.sort, data.rate_ms),
       keyed.tbody(
         [],
         list.map(data.rows, fn(process) {
@@ -104,7 +104,16 @@ fn pager(data: ProcessesModel) -> Element(Msg) {
   ])
 }
 
-fn head(sort: SortColumn) -> Element(Msg) {
+// The reduction column says what its rate is over: the change between the
+// last two passes, not the count since the process started.
+fn rate_label(rate_ms: Option(Int)) -> String {
+  case rate_ms {
+    Some(ms) -> "red/s over last " <> fmt.duration_ms(ms)
+    None -> "red/s (needs two passes)"
+  }
+}
+
+fn head(sort: SortColumn, rate_ms: Option(Int)) -> Element(Msg) {
   html.thead([], [
     html.tr([], [
       ui.th("pid", None),
@@ -112,7 +121,7 @@ fn head(sort: SortColumn) -> Element(Msg) {
       sortable("memory", model.ByMemory, sort),
       ui.th_num("heap capacity", None),
       sortable("mailbox", model.ByMailbox, sort),
-      sortable("red/s", model.ByReductions, sort),
+      sortable(rate_label(rate_ms), model.ByReductions, sort),
       ui.th_num("binary refs ≈", Some(binary_why)),
       ui.th("current function", None),
       ui.th("", None),

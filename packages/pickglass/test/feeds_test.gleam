@@ -552,3 +552,64 @@ pub fn a_failed_comparison_is_a_note_with_its_reason_test() {
 
   assert offers.note == "the file is not a readable capture"
 }
+
+fn processes_of(feeds: List(msg.Feed)) -> model.ProcessesModel {
+  let assert Ok(found) =
+    list.find_map(feeds, fn(feed) {
+      case feed {
+        msg.FedProcesses(data) -> Ok(data)
+        _ -> Error(Nil)
+      }
+    })
+
+  found
+}
+
+fn reductions_of(
+  page: model.ProcessesModel,
+  pid: String,
+) -> measure.Measurement {
+  let assert Ok(row) = list.find(page.rows, fn(row) { row.pid_text == pid })
+
+  row.reductions
+}
+
+pub fn reductions_are_a_rate_over_the_last_two_passes_test() {
+  // The fixture's rows have reductions of three times their memory. The
+  // first process went from 48 000 to 144 000 reductions in two seconds, the
+  // second did not move, and the third was not in the earlier pass.
+  let before = growing(0, 1000, 16_000)
+  let after =
+    Observation(
+      ..growing(1, 3000, 48_000),
+      census: Ok(
+        fixture.census([
+          fixture.row(
+            "<0.10.0>",
+            48_000,
+            fixture.labelled("session", "s1", "worker"),
+          ),
+          fixture.row("<0.11.0>", 4000, wire.Unlabelled),
+          fixture.row("<0.12.0>", 9000, wire.Unlabelled),
+        ]),
+      ),
+    )
+  let page =
+    processes_of(feeds.feeds_for(feeds.Processes, inputs([after, before])))
+
+  assert page.rate_ms == Some(2000)
+  assert reductions_of(page, "<0.10.0>") == Known(48_000)
+  assert reductions_of(page, "<0.11.0>") == Known(0)
+  assert reductions_of(page, "<0.12.0>") == Missing(measure.NotInBothPasses)
+}
+
+pub fn there_is_no_rate_from_a_single_pass_test() {
+  let page =
+    processes_of(feeds.feeds_for(
+      feeds.Processes,
+      inputs([growing(0, 1000, 16_000)]),
+    ))
+
+  assert page.rate_ms == None
+  assert reductions_of(page, "<0.10.0>") == Missing(measure.NotInBothPasses)
+}

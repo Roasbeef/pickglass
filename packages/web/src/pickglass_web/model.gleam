@@ -295,7 +295,8 @@ pub type ProcRow {
     heap_cap: Measurement,
     /// Messages waiting.
     mailbox: Measurement,
-    /// Reductions per second, a work counter.
+    /// Reductions per second over the interval between the last two passes,
+    /// a work counter. Absent for a process that was not in both passes.
     reductions: Measurement,
     /// References to reference-counted binaries; overlaps other processes.
     binary_refs: Measurement,
@@ -339,6 +340,9 @@ pub type ProcessesModel {
     window: Window,
     /// The rows inside the window.
     rows: List(ProcRow),
+    /// The milliseconds between the two passes the reduction rates are the
+    /// change over, when there are two.
+    rate_ms: Option(Int),
   )
 }
 
@@ -383,7 +387,8 @@ pub type OwnerRow {
     delta: Measurement,
     /// Total mailbox length.
     mailbox: Measurement,
-    /// Reductions per second.
+    /// Reductions per second, summed over the members that were in both
+    /// passes.
     reductions: Measurement,
     /// Binary references. Overlaps between processes, so a group has no
     /// total for it.
@@ -428,6 +433,10 @@ pub type OwnersModel {
     labelled: #(Int, Int),
     /// What lies outside the rows, from the agent's per-owner aggregate.
     remainder: Remainder,
+    /// The milliseconds between the two passes the reduction rates are the
+    /// change over, when there are two. A group's rate sums the processes
+    /// that were in both.
+    rate_ms: Option(Int),
   )
 }
 

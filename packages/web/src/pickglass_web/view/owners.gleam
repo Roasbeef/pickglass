@@ -98,7 +98,7 @@ pub fn view(
     controls: controls(data),
     body: [
       html.table([attribute.class("tbl owners")], [
-        head(),
+        head(data.rate_ms),
         keyed.tbody([], body_rows),
       ]),
       ui.note(
@@ -151,7 +151,7 @@ fn option_for(
   )
 }
 
-fn head() -> Element(Msg) {
+fn head(rate_ms: Option(Int)) -> Element(Msg) {
   html.thead([], [
     html.tr([], [
       ui.th("owner", None),
@@ -159,7 +159,16 @@ fn head() -> Element(Msg) {
       ui.th_num("heap capacity", Some("process_info(memory), bytes")),
       ui.th_num("Δ", Some("change of heap capacity since the checkpoint")),
       ui.th_num("mailbox", Some("messages waiting")),
-      ui.th_num("red/s", Some("reductions per second: work, not CPU time")),
+      ui.th_num(
+        case rate_ms {
+          Some(ms) -> "red/s over last " <> fmt.duration_ms(ms)
+          None -> "red/s (needs two passes)"
+        },
+        Some(
+          "reductions per second between the last two passes, summed over the "
+          <> "processes that were in both: work, not CPU time",
+        ),
+      ),
       ui.th_num("binary refs ≈", Some(binary_why)),
     ]),
   ])

@@ -680,7 +680,9 @@ fn total_of(
 // ---------------------------------------------------------- owners, rows
 
 /// The census of an observation as process rows, in the agent's order. A
-/// failed census has none.
+/// failed census has none. A row's reductions are the process's lifetime
+/// count, which the agent reads, and a rate needs two passes, so they are
+/// absent here; `rated_rows_of` fills them in.
 pub fn rows_of(newest: Observation, word_size: Int) -> List(model.ProcRow) {
   case newest.census {
     Error(_) -> []
@@ -696,7 +698,7 @@ pub fn rows_of(newest: Observation, word_size: Int) -> List(model.ProcRow) {
           memory: Known(row.memory),
           heap_cap: Known(row.total_heap_words * word_size),
           mailbox: Known(row.queue_length),
-          reductions: Known(row.reductions),
+          reductions: Missing(measure.NotInBothPasses),
           binary_refs: Missing(measure.UnsupportedOnRuntime),
           current: case row.current_function {
             "" -> None
@@ -704,6 +706,72 @@ pub fn rows_of(newest: Observation, word_size: Int) -> List(model.ProcRow) {
           },
         )
       })
+  }
+}
+
+/// The process rows of the newest census with each row's reductions as a
+/// rate per second: the change since the pass before, over the time between
+/// the two. A process that was not in both passes has no rate, which is not
+/// a rate of zero. The interval is returned so a page can say what the
+/// rates are over.
+///
+/// ## Examples
+///
+/// ```gleam
+/// feeds.rated_rows_of(observations, 8)
+/// // -> #(rows, Some(2000))
+/// ```
+pub fn rated_rows_of(
+  observations: List(Observation),
+  word_size: Int,
+) -> #(List(model.ProcRow), Option(Int)) {
+  case observations {
+    [newest, earlier, ..] -> {
+      let rows = rows_of(newest, word_size)
+
+      case earlier.census, newest.at_ms - earlier.at_ms {
+        Ok(census), interval if interval > 0 -> {
+          let before =
+            list.map(census.rows, fn(row) { #(row.pid_text, row.reductions) })
+          let now = case newest.census {
+            Ok(current) ->
+              list.map(current.rows, fn(row) { #(row.pid_text, row.reductions) })
+            Error(_) -> []
+          }
+
+          #(
+            list.map(rows, fn(row) {
+              model.ProcRow(
+                ..row,
+                reductions: rate(
+                  list.key_find(before, row.pid_text),
+                  list.key_find(now, row.pid_text),
+                  interval,
+                ),
+              )
+            }),
+            Some(interval),
+          )
+        }
+        _, _ -> #(rows, None)
+      }
+    }
+    [newest] -> #(rows_of(newest, word_size), None)
+    [] -> #([], None)
+  }
+}
+
+// The change in a process's lifetime reductions per second. A count that went
+// down is a different process under a reused id, so it has no rate either.
+fn rate(
+  before: Result(Int, Nil),
+  now: Result(Int, Nil),
+  interval_ms: Int,
+) -> measure.Measurement {
+  case before, now {
+    Ok(first), Ok(second) if second >= first ->
+      Known({ second - first } * 1000 / interval_ms)
+    _, _ -> Missing(measure.NotInBothPasses)
   }
 }
 
@@ -749,7 +817,7 @@ fn owners_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
 // change since the chosen checkpoint when that checkpoint kept a census.
 fn owners_page(inputs: Inputs, newest: Observation) -> model.OwnersModel {
   let word_size = word_size_of(newest, inputs)
-  let rows = rows_of(newest, word_size)
+  let #(rows, rate_ms) = rated_rows_of(inputs.observations, word_size)
   let chosen = chosen_mark(inputs)
   let without_change =
     owners_builder.build(
@@ -765,6 +833,7 @@ fn owners_page(inputs: Inputs, newest: Observation) -> model.OwnersModel {
       with_changes(inputs, newest, earlier, rows, without_change, word_size)
     _ -> without_change
   }
+  let page = model.OwnersModel(..page, rate_ms:)
 
   // The census lists only the top rows. What was scanned and not listed is
   // the remainder; the agent's per-owner aggregate carries memory and not
@@ -836,7 +905,8 @@ fn with_changes(
 }
 
 fn processes_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
-  let all = rows_of(newest, word_size_of(newest, inputs))
+  let #(all, rate_ms) =
+    rated_rows_of(inputs.observations, word_size_of(newest, inputs))
   let sorted =
     list.sort(all, fn(a, b) {
       int.compare(sort_value(inputs.sort, b), sort_value(inputs.sort, a))
@@ -850,6 +920,7 @@ fn processes_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
       sort: inputs.sort,
       window: model.Window(offset:, size: window_size, total:),
       rows: list.take(list.drop(sorted, offset), window_size),
+      rate_ms:,
     )),
   ]
 }
@@ -996,7 +1067,7 @@ fn carrier_row(row: wire.CarrierRow) -> model.CategoryRow {
 // ----------------------------------------------------------------- probes
 
 fn probes(inputs: Inputs, newest: Observation) -> model.ProbesModel {
-  let rows = rows_of(newest, word_size_of(newest, inputs))
+  let rows = rated_rows_of(inputs.observations, word_size_of(newest, inputs)).0
   let live_pins =
     list.filter(inputs.pins, fn(pin) { pin.status == seam.PinLive })
   let pending =
@@ -1406,7 +1477,9 @@ fn detail_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
     None -> []
     Some(subject) ->
       case
-        list.find(rows_of(newest, word_size), fn(row) { row.key == subject })
+        list.find(rated_rows_of(inputs.observations, word_size).0, fn(row) {
+          row.key == subject
+        })
       {
         Error(Nil) -> []
         Ok(row) -> [
