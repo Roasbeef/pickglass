@@ -3,6 +3,8 @@ import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+import pg_data_gen as gen
+import pickglass_core/capture
 import pickglass_core/profile.{
   Exact, Function, FunctionLevel, NoLine, Sample, ValueType,
 }
@@ -205,4 +207,25 @@ fn is_error(result: Result(a, b)) -> Bool {
     Ok(_) -> False
     Error(_) -> True
   }
+}
+
+// The profile codec is the payload codec of a capture's profile record: a
+// capture written with `encode` reads back with `decoder`.
+pub fn a_capture_carries_a_profile_record_test() {
+  let p = fixtures.calls([#(["a", "b"], 5), #(["a"], 2)])
+  let header =
+    capture.Header(
+      capture_id: "cap-1",
+      provenance: gen.sample_provenance(),
+      redaction: "none",
+    )
+  let record =
+    capture.ProfileRecord(capture.Profile(
+      id: 1,
+      source: capture.SampledStacks,
+      payload: p,
+    ))
+  let text = capture.body_text(header, [record], codec.encode)
+  let assert Ok(read) = capture.read(text, codec.decoder())
+  assert read.records == [record]
 }

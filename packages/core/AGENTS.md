@@ -51,6 +51,36 @@ records share.
 `DiffersExpected`, `DiffersBlocking`). A blocking field withholds any
 direction of change; a cadence mismatch withholds only rates and deltas.
 
+`profile.Profile` is opaque: samples (leaf-first frames, one value per
+`ValueType`, owner labels) over a function table, validated by
+`profile.new`. Analyses take a `profile.Column`, a handle minted by the
+profile, so a value index cannot be out of range. `profile/codec` is the
+JSON payload of a capture's `profile` record (`encode`, total `decoder`).
+`Source` decides what may be drawn: counters and allocation counts have no
+stacks, so flame, graph and stack exports refuse them with `NoCallStacks`.
+Totals sum absolute values and, when a sample carries `profile.base_label`,
+only those samples (pprof's `-diff_base` percentages).
+
+`analysis/transform` applies a chain of `Step`s, each classed
+`SampleFilter` (focus, ignore, show_from, tagfocus, tagignore: totals
+change), `StackRewrite` (hide, show: totals change only by emptied samples)
+or `DisplayPrune` (collected into `Display`), and reports totals and
+`MatchedNothing` per step. Patterns are `analysis/pattern`, a regex subset
+(no groups or classes) because core has no regexp dependency.
+`analysis/graph` is pprof's trimmed call graph (node fraction 0.005, edge
+fraction 0.001, node count 80, residual and redundant edges, entropy
+order); nodelets and inline frames are not modelled. `analysis/diff.merge`
+negates and merges a base into a candidate; `analysis/top` and
+`analysis/peek` are the Top table and Peek.
+
+`layout/dag` is a deterministic layered layout of a `Graph` (cycle
+breaking, longest-path layers, barycentre sweeps, no overlap in a layer).
+`layout/flame` builds the merged stack tree, folds boxes under a minimum
+width into their parent, caps the box count, and reports omitted boxes
+(drawn plus omitted equals the tree's size); icicle only changes `row`.
+`export` and `export/{collapsed,speedscope,chrome_trace}` return an
+`Export` with text and a loss list.
+
 `policy.Command` is the closed set of viewer-to-agent actions.
 `required_capabilities` is an exhaustive `case`. `Authorized(a)` is opaque
 and only `authorize` and `confirm` build it. Probes and targeted GC go
