@@ -28,9 +28,22 @@
 ////    neighbouring layers.
 //// 4. `reduce_crossings` orders the nodes in each layer by the average
 ////    position of their neighbours, sweeping down and up a few times.
-//// 5. `assign_x` packs each layer left to right and pulls nodes toward
-////    their neighbours without overlap, and `build_layout` turns each chain
-////    into a polyline.
+//// 5. `assign_x` packs each layer, then alternately places each layer as
+////    close as its order and gaps allow to the centres of its neighbours,
+////    and `build_layout` turns each chain into a polyline.
+////
+//// ## Why the drawing stays narrow
+////
+//// Width is what a reader scrolls, so three things keep it down. A box is as
+//// wide as its first line and its second line need, and the caller passes the
+//// function name without its module for the first. An invisible node that
+//// routes a long edge through a layer takes `edge_gap` of room, not
+//// `node_gap`, because a layer of a real trace holds dozens of them. And a
+//// layer is placed by `place_layer`, which finds the placement nearest the
+//// wishes that keeps the order and the gaps. The greedy placement it
+//// replaced only ever moved a node right, so every sweep pushed whole layers
+//// further from the origin and a 46 function graph came out 17,000 units
+//// wide.
 ////
 //// After stage 1 every oriented edge goes from a lower layer to a higher
 //// one; `PlacedEdge.direction` records which edges were reversed, so a
@@ -53,13 +66,18 @@ pub type Config {
     layer_gap: Int,
     /// Horizontal space between two boxes in a layer.
     node_gap: Int,
+    /// Horizontal space between an invisible edge-routing node and the node
+    /// beside it. It is smaller than `node_gap` because a long edge adds one
+    /// such node to every layer it crosses.
+    edge_gap: Int,
     /// How many down-and-up sweeps to run in both ordering and placement.
     sweeps: Int,
   )
 }
 
 /// Defaults that suit a 14 point label.
-pub const default_config: Config = Config(layer_gap: 40, node_gap: 16, sweeps: 4)
+pub const default_config: Config =
+  Config(layer_gap: 40, node_gap: 16, edge_gap: 4, sweeps: 4)
 
 /// Whether an edge was drawn the way it was given or against its
 /// direction to break a cycle.
@@ -131,8 +149,8 @@ pub type Layout {
   )
 }
 
-/// Lay out a graph. `label` gives the text of a function's box, used only
-/// to size it.
+/// Lay out a graph. `label` gives the first line of a function's box, which
+/// is the function's name with no module, used only to size the box.
 ///
 /// ## Examples
 ///
@@ -495,18 +513,28 @@ fn box_sizes(
   let real =
     list.index_map(nodes, fn(node, position) {
       let font = font_size(node.flat, max_flat)
-      let chars = int.max(string.length(label(node.function)), min_label_chars)
-      #(position, #(chars * font * 6 / 10 + 8, font * 2 + 14, font))
+      let name_width = string.length(label(node.function)) * font * 6 / 10
+      let width = int.max(name_width, detail_width) + 8
+      #(position, #(width, font + lines_below_name, font))
     })
   let dummies =
     list.map(span(list.length(nodes), next_id - 1), fn(id) { #(id, #(2, 0, 0)) })
   dict.from_list(list.append(real, dummies))
 }
 
-/// The widest label a node box is sized for at the least, in characters. A
-/// box also carries a second line, "flat (x%) · cum (y%)", and that line is
-/// about this long, so a node with a short name is still wide enough for it.
-pub const min_label_chars: Int = 28
+/// The widest of the lines under a node's name, in characters: the module,
+/// and the two lines "flat (x%)" and "of cum (y%)". A node with a short name
+/// is still as wide as these need.
+pub const min_label_chars: Int = 22
+
+// Those lines are set in the smallest size, 7 units a character with the
+// renderer's allowance, so their width does not grow with the node's font.
+const detail_width: Int = 154
+
+/// The height of the lines under a node's name: the module, flat and
+/// cumulative, one line each, and a little room below them. A box is its
+/// font size plus this.
+pub const lines_below_name: Int = 44
 
 /// The smallest label font size a node gets, in points.
 pub const min_font_size: Int = 11
@@ -549,7 +577,7 @@ fn assign_x(
   let #(above, below) = neighbours(segments)
   let packed =
     list.fold(orders, dict.new(), fn(lefts, layer) {
-      place_layer(layer, sizes, config.node_gap, lefts, fn(_) { None })
+      place_layer(layer, sizes, config, lefts, fn(_) { None })
     })
   let settled =
     list.fold(span(1, config.sweeps), packed, fn(lefts, _) {
@@ -577,7 +605,7 @@ fn pull_layers(
   lefts: Dict(Int, Int),
 ) -> Dict(Int, Int) {
   list.fold(layers, lefts, fn(current, layer) {
-    place_layer(layer, sizes, config.node_gap, current, fn(node) {
+    place_layer(layer, sizes, config, current, fn(node) {
       let centres =
         neighbours
         |> dict.get(node)
@@ -601,34 +629,101 @@ fn centre(
   left + size.0 / 2
 }
 
-// Place one layer left to right. A node goes at its wished centre, or
-// where it already is, but never closer to its left neighbour than the
-// gap, so boxes in a layer cannot overlap.
+// Place one layer. Each node has a wished centre, or none, in which case it
+// wishes to stay where it is. The layer keeps its order and keeps each pair
+// of neighbours a gap apart, and within those limits it is placed as near the
+// wishes as it can be, in the least-squares sense.
+//
+// That is an isotonic regression. Write each node's left edge as its offset
+// (the room the nodes before it need) plus a shift. The gap limits say only
+// that shifts do not decrease from left to right, and the nearest such shifts
+// to the wished ones are found by pooling neighbours that are out of order.
 fn place_layer(
   layer: List(Int),
   sizes: Dict(Int, #(Int, Int, Int)),
-  gap: Int,
+  config: Config,
   lefts: Dict(Int, Int),
   wish: fn(Int) -> Option(Int),
 ) -> Dict(Int, Int) {
-  let #(_, placed) =
-    list.fold(layer, #(None, lefts), fn(state, node) {
-      let #(previous_right, table) = state
-      let width =
-        dict.get(sizes, node)
-        |> result.map(fn(size) { size.0 })
-        |> result.unwrap(0)
+  let offsets = layer_offsets(layer, sizes, config)
+
+  let targets =
+    list.map(offsets, fn(entry) {
+      let #(node, offset) = entry
       let wanted = case wish(node) {
-        Some(centre) -> centre - width / 2
-        None -> option.unwrap(option.from_result(dict.get(table, node)), 0)
+        Some(centre) -> centre - width_of(sizes, node) / 2
+        None -> result.unwrap(dict.get(lefts, node), 0)
       }
-      let left = case previous_right {
-        Some(right) -> int.max(wanted, right + gap)
-        None -> wanted
-      }
-      #(Some(left + width), dict.insert(table, node, left))
+      wanted - offset
     })
-  placed
+
+  let shifts = nondecreasing(targets)
+
+  list.zip(offsets, shifts)
+  |> list.fold(lefts, fn(table, entry) {
+    dict.insert(table, entry.0.0, entry.0.1 + entry.1)
+  })
+}
+
+fn width_of(sizes: Dict(Int, #(Int, Int, Int)), node: Int) -> Int {
+  dict.get(sizes, node)
+  |> result.map(fn(size) { size.0 })
+  |> result.unwrap(0)
+}
+
+// An invisible edge-routing node has no height, and no real box does.
+fn is_dummy(sizes: Dict(Int, #(Int, Int, Int)), node: Int) -> Bool {
+  dict.get(sizes, node)
+  |> result.map(fn(size) { size.1 == 0 })
+  |> result.unwrap(False)
+}
+
+// Each node of the layer with the room the nodes before it take, which is
+// its left edge when the layer is packed as tightly as the gaps allow.
+fn layer_offsets(
+  layer: List(Int),
+  sizes: Dict(Int, #(Int, Int, Int)),
+  config: Config,
+) -> List(#(Int, Int)) {
+  let #(_, reversed) =
+    list.fold(layer, #(None, []), fn(state, node) {
+      let #(previous, acc) = state
+      let offset = case previous {
+        None -> 0
+        Some(#(before, before_offset)) -> {
+          let gap = case is_dummy(sizes, before) || is_dummy(sizes, node) {
+            True -> config.edge_gap
+            False -> config.node_gap
+          }
+          before_offset + width_of(sizes, before) + gap
+        }
+      }
+      #(Some(#(node, offset)), [#(node, offset), ..acc])
+    })
+  list.reverse(reversed)
+}
+
+// The sequence nearest to `targets` that never decreases, by pooling
+// adjacent runs whose means are out of order. A pooled run takes its mean,
+// rounded toward zero, which keeps the sequence non-decreasing.
+fn nondecreasing(targets: List(Int)) -> List(Int) {
+  targets
+  |> list.fold([], fn(runs, target) { pool([#(target, 1), ..runs]) })
+  |> list.reverse
+  |> list.flat_map(fn(run) { list.repeat(run.0 / run.1, run.1) })
+}
+
+// Runs are kept newest first as #(sum, count). While the newest run's mean
+// is below the one before it, merge them.
+fn pool(runs: List(#(Int, Int))) -> List(#(Int, Int)) {
+  case runs {
+    [#(sum, count), #(before_sum, before_count), ..rest] ->
+      case before_sum * count > sum * before_count {
+        True -> pool([#(before_sum + sum, before_count + count), ..rest])
+        False -> runs
+      }
+    _ -> runs
+  }
 }
 
 // ----------------------------------------------------------------- output

@@ -39,6 +39,7 @@ import pickglass_core/layout/dag
 import pickglass_core/layout/flame
 import pickglass_core/profile.{type Column, type Profile}
 import pickglass_core/profile/activity
+import pickglass_web/chart/names
 import pickglass_web/model
 
 /// Why the model could not be built.
@@ -161,7 +162,11 @@ fn stacks_of(
       model.HasStacks(
         layout:,
         graph: call_graph,
-        dag: dag.layout(call_graph, name_of, dag.default_config),
+        dag: dag.layout(
+          call_graph,
+          fn(id) { names.short(name_of(id)) },
+          dag.default_config,
+        ),
         peeks: list.filter_map(call_graph.nodes, fn(node) {
           peek.at(call_graph, node.function)
         }),

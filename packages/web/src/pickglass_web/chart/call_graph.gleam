@@ -6,15 +6,20 @@
 //// a node's text size comes from its flat value (the layout computed
 //// `font_size`, never below 11), its fill from its cumulative share of the
 //// total, an edge's width from its weight, and a residual edge, one that
-//// stands for removed nodes between its ends, is dotted. A node has two
-//// lines, the name and then "flat (x%) · cum (y%)", as in pprof. An edge
-//// whose weight is at least `label_share_permille` of the total carries its
-//// weight as text at its midpoint, so a width never has to be read off by
-//// eye.
+//// stands for removed nodes between its ends, is dotted. A node is written
+//// as pprof writes one: the function and arity in the large face, the
+//// module on a smaller line under it, and then "flat (x%)" and "of cum (y%)".
+//// The module line is left out when the node's heaviest caller is in the
+//// same module, because a column of boxes that all say
+//// `runtime@strand_runtime` says nothing. The hover title has the whole
+//// name. An edge whose weight is at least `label_share_permille` of the
+//// total carries its weight as text at its midpoint, so a width never has to
+//// be read off by eye.
 ////
-//// The drawing has the size of its coordinate space, not the width of the
-//// page. The page puts it in a scrolling frame, so a wide graph is scrolled
-//// at natural size and the text is never shrunk to fit.
+//// The drawing carries its natural size as `width` and `height` and a
+//// `viewBox` of the same box, so the page can show it at that size or scaled
+//// down to the frame; the stylesheet chooses, and the page has a control
+//// for it.
 ////
 //// The layout is bounded by the graph's own node cap of 80, so the element
 //// count is bounded without a limit here. Every node has a click handler
@@ -35,6 +40,7 @@ import lustre/event
 import pickglass_core/analysis/graph
 import pickglass_core/layout/dag.{type Layout, type PlacedEdge, type PlacedNode}
 import pickglass_core/unit.{type Unit}
+import pickglass_web/chart/names
 import pickglass_web/chart/svg_util
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
@@ -81,7 +87,7 @@ pub fn view(
     list.map(layout.nodes, fn(node) {
       #(
         key.to_string(node_key(node.function)),
-        node_element(node, total, name_of, u, selected, on_select),
+        node_element(layout, node, total, name_of, u, selected, on_select),
       )
     })
 
@@ -98,9 +104,9 @@ pub fn view(
           <> " "
           <> int.to_string(min_y - margin)
           <> " "
-          <> int.to_string(max_x - min_x + 2 * margin)
+          <> int.to_string(width)
           <> " "
-          <> int.to_string(max_y - min_y + 2 * margin),
+          <> int.to_string(height),
       ),
       attribute.class("graph call-graph"),
       attribute.attribute("role", "img"),
@@ -263,6 +269,7 @@ fn digits(n: Int) -> Int {
 }
 
 fn node_element(
+  layout: Layout,
   node: PlacedNode,
   total: Int,
   name_of: fn(Int) -> String,
@@ -292,42 +299,100 @@ fn node_element(
       svg.text(
         [
           svg_util.num("x", node.x + node.width / 2),
-          svg_util.num("y", node.y + node.font_size + 5),
+          svg_util.num("y", node.y + node.font_size + 3),
           svg_util.num("font-size", node.font_size),
           attribute.attribute("text-anchor", "middle"),
           attribute.class("node-label"),
         ],
-        name,
+        names.short(name),
       ),
-      svg.text(
-        [
-          svg_util.num("x", node.x + node.width / 2),
-          svg_util.num("y", node.y + node.height - 6),
-          svg_util.num("font-size", detail_font),
-          attribute.attribute("text-anchor", "middle"),
-          attribute.class("node-detail"),
-        ],
-        detail_text(node, total, u),
-      ),
+      module_line(layout, node, name, name_of),
+      ..detail_lines(node, total, u)
     ],
   )
 }
 
-// The second line of a node, like pprof's: flat then cumulative, each with
-// its share of the total.
-fn detail_text(node: PlacedNode, total: Int, u: Unit) -> String {
-  fmt.known(node.flat, u)
-  <> " ("
-  <> fmt.share(node.flat, of: total)
-  <> ") · "
-  <> fmt.known(node.cum, u)
-  <> " ("
-  <> fmt.share(node.cum, of: total)
-  <> ")"
+// The module under the name, in the small face and cut to the box. It is
+// absent when the node's heaviest caller is in the same module.
+fn module_line(
+  layout: Layout,
+  node: PlacedNode,
+  name: String,
+  name_of: fn(Int) -> String,
+) -> Element(msg) {
+  let module = names.split(name).module
+
+  case module == "" || module == caller_module(layout, node, name_of) {
+    True -> element.none()
+    False ->
+      svg.text(
+        [
+          svg_util.num("x", node.x + node.width / 2),
+          svg_util.num("y", node.y + node.font_size + 3 + detail_pitch),
+          svg_util.num("font-size", detail_font),
+          attribute.attribute("text-anchor", "middle"),
+          attribute.class("node-module"),
+        ],
+        svg_util.fit(module, node.width, 7),
+      )
+  }
 }
 
-// The size of the second line: the smallest label size, so it is never
-// below 11 either.
+// The module of the caller that sends the most weight to this node, or an
+// empty string for a node nobody calls.
+fn caller_module(
+  layout: Layout,
+  node: PlacedNode,
+  name_of: fn(Int) -> String,
+) -> String {
+  let callers = list.filter(layout.edges, fn(edge) { edge.to == node.function })
+
+  case list.sort(callers, fn(a, b) { int.compare(b.weight, a.weight) }) {
+    [heaviest, ..] -> names.split(name_of(heaviest.from)).module
+    [] -> ""
+  }
+}
+
+// The two lines under the module, like pprof's: the node's own value and its
+// share, then the value of everything under it and its share.
+fn detail_lines(node: PlacedNode, total: Int, u: Unit) -> List(Element(msg)) {
+  let line = fn(row, text) {
+    svg.text(
+      [
+        svg_util.num("x", node.x + node.width / 2),
+        svg_util.num(
+          "y",
+          node.y + node.font_size + 3 + detail_pitch * { row + 1 },
+        ),
+        svg_util.num("font-size", detail_font),
+        attribute.attribute("text-anchor", "middle"),
+        attribute.class("node-detail"),
+      ],
+      text,
+    )
+  }
+
+  [
+    line(
+      1,
+      fmt.known(node.flat, u) <> " (" <> fmt.share(node.flat, of: total) <> ")",
+    ),
+    line(
+      2,
+      "of "
+        <> fmt.known(node.cum, u)
+        <> " ("
+        <> fmt.share(node.cum, of: total)
+        <> ")",
+    ),
+  ]
+}
+
+// The distance between the baselines of the small lines.
+const detail_pitch: Int = 12
+
+// The size of the lines under the name: the smallest label size, so it is
+// never below 11 either.
 const detail_font: Int = 11
 
 fn selection_class(selected: Option(Key), id: Key) -> attribute.Attribute(msg) {

@@ -889,6 +889,7 @@ fn graph_tab(
 
   html.div([], [
     single_path_note(g, u),
+    size_toggle(),
     html.div([attribute.class("graph-frame scroll")], [
       call_graph.view(
         layout: placed,
@@ -913,8 +914,32 @@ fn graph_tab(
       <> "between its ends. Text size follows flat value; shade follows "
       <> "cumulative share. Each box shows flat, then cumulative, with their "
       <> "shares of the total; an edge shows its weight when that is at least "
-      <> "2% of the total. The graph is drawn at full size; scroll the frame "
-      <> "sideways and down to see the rest.",
+      <> "2% of the total. The graph is scaled to fit the frame; choose Full size "
+      <> "to draw it at its natural size and scroll the frame.",
+    ),
+  ])
+}
+
+// A checkbox and the label that toggles it, with no handler: the stylesheet
+// reads the checkbox's state through the sibling selector, so the choice
+// needs no script and no round trip, and a re-render leaves it alone. The
+// frame has to follow them in the tree for that selector to reach it.
+fn size_toggle() -> Element(Msg) {
+  element.fragment([
+    html.input([
+      attribute.class("graph-size"),
+      attribute.type_("checkbox"),
+      attribute.id("graph-size"),
+    ]),
+    html.label(
+      [
+        attribute.class("btn btn-small graph-size-label"),
+        attribute.for("graph-size"),
+      ],
+      [
+        html.span([attribute.class("when-fit")], [element.text("Full size")]),
+        html.span([attribute.class("when-full")], [element.text("Fit to frame")]),
+      ],
     ),
   ])
 }
