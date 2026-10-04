@@ -55,6 +55,7 @@ import pickglass_agent/measure
 import pickglass_agent/owner
 import pickglass_agent/reply.{type Failure, Failure}
 import pickglass_agent/request.{type Envelope, type Token, Envelope}
+import pickglass_agent/sampler
 import pickglass_agent/supervision
 import pickglass_agent/system
 
@@ -64,8 +65,22 @@ const tick_ms = 250
 /// The most processes the agent will pin at once.
 const max_pins = 64
 
-/// The most counters probes counting at once.
+/// The most probes sampling or counting at once, of every kind together.
 const max_running_probes = 2
+
+/// The most stack probes sampling at once.
+const max_running_stack_probes = 1
+
+/// The most finished stack probes kept for reading. Each holds up to five
+/// thousand stacks in its sampler's heap, so the bound is small.
+const max_finished_stack_probes = 2
+
+/// The heap a stack sampler may grow to, in words, before the VM kills it.
+const sampler_heap_words = 4_000_000
+
+/// How long past its deadline a sampler may keep sampling before the agent
+/// kills it, in milliseconds.
+const sampler_grace_ms = 2000
 
 /// The most finished probes kept for reading.
 const max_finished_probes = 8
@@ -121,6 +136,24 @@ pub type Worker {
   )
 }
 
+/// Whether a stack probe is still sampling or has ended and waits to be read.
+pub type StackPhase {
+  StackSampling
+  StackDone
+}
+
+/// A stack sampling probe: the sampler process, its monitor and its
+/// deadline. The aggregate lives in the sampler, not here.
+pub type StackProbe {
+  StackProbe(
+    id: Int,
+    sampler: Pid,
+    monitor: Reference,
+    deadline_at_ms: Int,
+    phase: StackPhase,
+  )
+}
+
 /// Whether the agent holds the `scheduler_wall_time` flag.
 pub type Scheduler {
   Collecting
@@ -138,6 +171,7 @@ pub type State {
     pins: List(Pin),
     next_pin: Int,
     probes: List(Probe),
+    stacks: List(StackProbe),
     next_probe: Int,
     workers: List(Worker),
     scheduler: Scheduler,
@@ -163,6 +197,7 @@ type Event {
   Asked(Envelope)
   Refused(reply_to: Pid, reference: Reference, detail: String)
   Ticked
+  StacksFinished(id: Int)
   Exited(monitor: Reference, reason: Term)
   NodeLost(node: Atom)
   Ignored
@@ -237,6 +272,7 @@ pub fn init(config: Config) -> Result(State, Nil) {
     pins: [],
     next_pin: 1,
     probes: [],
+    stacks: [],
     next_probe: 1,
     workers: [],
     scheduler: NotCollecting,
@@ -259,6 +295,7 @@ pub fn handle_info(message: Term, state: State) -> Next(State) {
       Noreply(state)
     }
     Ticked -> on_tick(state)
+    StacksFinished(id) -> Noreply(mark_stacks_done(state, id))
     Exited(monitor, reason) -> on_down(monitor, reason, state)
     NodeLost(node) ->
       case node == state.viewer_node {
@@ -299,16 +336,27 @@ fn classify_notice(message: Term) -> Event {
   case ffi_term.is_tuple(message) {
     False -> Ignored
     True ->
-      case is_down(message), is_nodedown(message) {
-        True, _ ->
+      case is_down(message), is_nodedown(message), is_stacks_finished(message) {
+        True, _, _ ->
           Exited(
             ffi_term.coerce(ffi_term.element(2, message)),
             ffi_term.element(5, message),
           )
-        False, True -> NodeLost(ffi_term.coerce(ffi_term.element(2, message)))
-        False, False -> Ignored
+        False, True, _ ->
+          NodeLost(ffi_term.coerce(ffi_term.element(2, message)))
+        False, False, True ->
+          StacksFinished(ffi_term.coerce(ffi_term.element(2, message)))
+        False, False, False -> Ignored
       }
   }
+}
+
+// `{pickglass_stacks_finished, ProbeId}`, which a sampler sends when it stops
+// sampling on its own.
+fn is_stacks_finished(message: Term) -> Bool {
+  ffi_term.tuple_size(message) == 2
+  && ffi_term.element(1, message) == ffi_term.coerce(sampler.finished_tag())
+  && ffi_term.is_integer(ffi_term.element(2, message))
 }
 
 // `{'DOWN', Ref, process, Pid, Reason}`.
@@ -344,6 +392,18 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
       targeted_gc(state, reply_to, reference, token, deadline_ms)
     request.SelfMeasure(token, budget_ms) ->
       self_measure(state, reply_to, reference, token, budget_ms)
+    request.StartStacks(tokens, rate_hz, duration_ms, max_samples) ->
+      start_stacks(
+        state,
+        reply_to,
+        reference,
+        tokens,
+        rate_hz,
+        duration_ms,
+        max_samples,
+      )
+    request.ReadStacks(id) -> read_stacks(state, reply_to, reference, id)
+    request.StopStacks(id) -> stop_stacks(state, reply_to, reference, id)
     request.SystemReport ->
       start_worker(state, reply_to, reference, "system", read_deadline_ms, fn() {
         reply.system(system.read())
@@ -394,7 +454,7 @@ fn ping(state: State) -> Term {
     ffi_vm.otp_release(),
     ffi_proc.now_ms() - state.started_ms,
     seq.length(state.pins),
-    running_count(state.probes),
+    running_count(state.probes) + sampling_count(state.stacks),
   )
 }
 
@@ -910,9 +970,11 @@ fn start_probe(
 }
 
 fn check_probe_room(state: State) -> Result(Nil, Failure) {
-  case running_count(state.probes) >= max_running_probes {
-    True ->
-      Error(Failure("probe_limit", "two counters probes are already running"))
+  case
+    running_count(state.probes) + sampling_count(state.stacks)
+    >= max_running_probes
+  {
+    True -> Error(Failure("probe_limit", "two probes are already running"))
     False -> Ok(Nil)
   }
 }
@@ -1075,6 +1137,212 @@ fn is_running(probe: Probe) -> Bool {
   }
 }
 
+// -------------------------------------------------------------------- stacks
+
+fn start_stacks(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  tokens: List(Token),
+  rate_hz: Int,
+  duration_ms: Int,
+  max_samples: Int,
+) -> Next(State) {
+  let started = {
+    use _ <- fallible.then(check_probe_room(state))
+    use _ <- fallible.then(check_stack_room(state))
+    use pids <- fallible.then(pids_of(state, tokens, []))
+    use sampler_pid <- fallible.then(
+      start_sampler(sampler.Config(
+        agent: ffi_proc.self(),
+        id: state.next_probe,
+        targets: pids,
+        rate_hz: rate_hz,
+        duration_ms: duration_ms,
+        max_samples: max_samples,
+      )),
+    )
+
+    Ok(#(sampler_pid, seq.length(pids)))
+  }
+
+  case started {
+    Error(failure) -> answer(state, reply_to, reference, reply.failure(failure))
+    Ok(#(sampler_pid, targets)) -> {
+      let probe =
+        StackProbe(
+          id: state.next_probe,
+          sampler: sampler_pid,
+          monitor: ffi_proc.monitor(ffi_proc.Process, sampler_pid),
+          deadline_at_ms: ffi_proc.now_ms() + duration_ms,
+          phase: StackSampling,
+        )
+
+      answer(
+        State(
+          ..state,
+          stacks: [probe, ..state.stacks],
+          next_probe: state.next_probe + 1,
+        ),
+        reply_to,
+        reference,
+        reply.stacks_started(
+          probe.id,
+          targets,
+          rate_hz,
+          duration_ms,
+          max_samples,
+        ),
+      )
+    }
+  }
+}
+
+fn check_stack_room(state: State) -> Result(Nil, Failure) {
+  case sampling_count(state.stacks) >= max_running_stack_probes {
+    True -> Error(Failure("probe_limit", "a stack probe is already sampling"))
+    False -> Ok(Nil)
+  }
+}
+
+fn start_sampler(config: sampler.Config) -> Result(Pid, Failure) {
+  case sampler.start(config, sampler_heap_words) {
+    Ok(pid) -> Ok(pid)
+    Error(Nil) ->
+      Error(Failure("start_failed", "the agent could not start a sampler"))
+  }
+}
+
+fn find_stack_probe(
+  probes: List(StackProbe),
+  id: Int,
+) -> Result(StackProbe, Nil) {
+  case probes {
+    [] -> Error(Nil)
+    [probe, ..rest] ->
+      case probe.id == id {
+        True -> Ok(probe)
+        False -> find_stack_probe(rest, id)
+      }
+  }
+}
+
+// A read is answered by the sampler, which holds the aggregate. The agent
+// only forwards the request, so it never copies a probe's table.
+fn read_stacks(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  id: Int,
+) -> Next(State) {
+  case find_stack_probe(state.stacks, id) {
+    Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
+    Ok(probe) -> {
+      sampler.read(probe.sampler, reply_to, reference)
+
+      Noreply(state)
+    }
+  }
+}
+
+// A stop is answered by the sampler with its final snapshot, and the sampler
+// then exits. The agent drops the probe at once and removes the monitor, so
+// the sampler's exit is not mistaken for a crash.
+fn stop_stacks(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  id: Int,
+) -> Next(State) {
+  case find_stack_probe(state.stacks, id) {
+    Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
+    Ok(probe) -> {
+      let _ = ffi_proc.demonitor(probe.monitor, [ffi_proc.Flush])
+
+      sampler.stop(probe.sampler, reply_to, reference)
+
+      Noreply(
+        State(
+          ..state,
+          stacks: seq.filter(state.stacks, fn(other) { other.id != id }),
+        ),
+      )
+    }
+  }
+}
+
+fn refuse_no_such_probe(
+  state: State,
+  to: Pid,
+  reference: Reference,
+) -> Next(State) {
+  refuse(state, to, reference, "no_such_probe", "no probe has that id")
+}
+
+fn mark_stacks_done(state: State, id: Int) -> State {
+  State(
+    ..state,
+    stacks: seq.map(state.stacks, fn(probe) {
+      case probe.id == id {
+        True -> StackProbe(..probe, phase: StackDone)
+        False -> probe
+      }
+    }),
+  )
+}
+
+fn sampling_count(probes: List(StackProbe)) -> Int {
+  seq.length(seq.filter(probes, fn(probe) { probe.phase == StackSampling }))
+}
+
+// A sampler that has not stopped well after its deadline is stuck, most
+// likely on a target that does not answer signals, and is killed. The
+// finished probes kept for reading are bounded, and the oldest is killed when
+// there are too many, because its sampler's heap is the memory they cost.
+fn expire_stacks(probes: List(StackProbe), now: Int) -> List(StackProbe) {
+  let live =
+    seq.filter(probes, fn(probe) {
+      case
+        probe.phase == StackSampling
+        && now >= probe.deadline_at_ms + sampler_grace_ms
+      {
+        True -> {
+          kill_stack_probe(probe)
+
+          False
+        }
+        False -> True
+      }
+    })
+
+  case seq.length(live) - sampling_count(live) > max_finished_stack_probes {
+    False -> live
+    True -> seq.reverse(drop_oldest_done(seq.reverse(live)))
+  }
+}
+
+fn drop_oldest_done(oldest_first: List(StackProbe)) -> List(StackProbe) {
+  case oldest_first {
+    [] -> []
+    [probe, ..rest] ->
+      case probe.phase {
+        StackSampling -> [probe, ..drop_oldest_done(rest)]
+        StackDone -> {
+          kill_stack_probe(probe)
+
+          rest
+        }
+      }
+  }
+}
+
+fn kill_stack_probe(probe: StackProbe) -> Nil {
+  let _ = ffi_proc.demonitor(probe.monitor, [ffi_proc.Flush])
+  let _ = ffi_proc.exit_with(probe.sampler, ffi_proc.Kill)
+
+  Nil
+}
+
 // ------------------------------------------------------------ time and exits
 
 // Each tick enforces two deadlines: the viewer's lease, and every running
@@ -1094,6 +1362,7 @@ fn on_tick(state: State) -> Next(State) {
         State(
           ..state,
           probes: expire_probes(state.probes, now),
+          stacks: expire_stacks(state.stacks, now),
           workers: expire_workers(state.workers, now),
         ),
       )
@@ -1169,6 +1438,9 @@ fn on_down(monitor: Reference, reason: Term, state: State) -> Next(State) {
         State(
           ..on_worker_down(monitor, reason, state),
           pins: seq.filter(state.pins, fn(entry) { entry.monitor != monitor }),
+          stacks: seq.filter(state.stacks, fn(probe) {
+            probe.monitor != monitor
+          }),
         ),
       )
   }
@@ -1236,6 +1508,7 @@ fn cause_name(cause: Cause) -> String {
 // is the one that has already returned by the time the viewer is told.
 fn shut_down(state: State) -> State {
   seq.each(state.probes, counters.destroy)
+  seq.each(state.stacks, kill_stack_probe)
   seq.each(state.workers, fn(worker) {
     ffi_proc.exit_with(worker.pid, ffi_proc.Kill)
   })
@@ -1245,5 +1518,12 @@ fn shut_down(state: State) -> State {
     NotCollecting -> Nil
   }
 
-  State(..state, probes: [], workers: [], pins: [], scheduler: NotCollecting)
+  State(
+    ..state,
+    probes: [],
+    stacks: [],
+    workers: [],
+    pins: [],
+    scheduler: NotCollecting,
+  )
 }

@@ -30,6 +30,7 @@ pub type Name {
   Size
   Instrument
   Carriers
+  ListToBinary
 }
 
 @external(erlang, "erlang", "node")

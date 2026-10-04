@@ -14,10 +14,24 @@ temporary process.
 
 `request.Request` is the closed set of things the viewer may ask, and
 `request.decode` the total decoder for it. `server.State` holds the pins, the
-probes (`counters.Probe`, whose `Running` phase holds the only strong trace
-session handle), the census workers and the lease. `census.Report` and
-`counters.Snapshot` are the bounded results. `owner.Owner` is `Unknown` or
-`Owned(path, role)`, decoded from a `{pickglass_owner, 1, Path, Role}` label.
+counters probes (`counters.Probe`, whose `Running` phase holds the only strong
+trace session handle), the stack probes (`server.StackProbe`, a sampler pid and
+its monitor), the workers and the lease. `census.Report`,
+`supervision.Report`, `detail.Detail`, `system.Report`,
+`counters.Snapshot` and `stacks.Built` are the bounded results.
+`owner.Owner` is `Unknown` or `Owned(path, role)`, decoded from a
+`{pickglass_owner, 1, Path, Role}` label with an optional fifth element of
+capability binaries; the agent labels every process it starts as
+`tool=pickglass`, role `agent`.
+
+Three kinds of process do the work. A **worker** (`server.start_worker`)
+computes one read-only reply (census, detail, supervision, system, targeted
+collection) under a heap cap and a deadline the tick enforces. A **helper**
+(`measure`) is a gen_server that waits for one self-measurement reply and
+validates it. A **sampler** (`sampler`) is a gen_server per stack probe that
+polls `current_stacktrace` and aggregates in `stacks`. Each replies to the
+viewer itself, so the agent never copies a result and never blocks on a
+target.
 
 ## Relationships
 
@@ -198,6 +212,14 @@ set), `pattern_too_broad`, `too_many_functions`, `memory_unavailable`,
   compiler's entry module, is never pushed, and is skipped.
 - The strong trace session handle is held only in `server.State`. It is never
   sent, returned or logged.
+- The agent process never sends a signal that waits on a target
+  (`process_info`, `garbage_collect`): those run in workers, helpers or
+  samplers that have deadlines. A target that does not answer therefore
+  cannot stall the lease or teardown.
+- Every worker, helper and sampler is monitored by the agent, killed by
+  `shut_down`. A sampler monitors the agent and ends with it, and a helper
+  ends at its own budget (five seconds at most), so a viewer killed
+  mid-probe leaves no process.
 - Every exit path calls `shut_down`: detach, viewer link DOWN, `nodedown`,
   lease expiry, and `terminate` after a crash. A kill signal skips it and the
   VM destroys the sessions because the agent was their sole holder.

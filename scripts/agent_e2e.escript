@@ -100,6 +100,7 @@ scenario_link_killed(Target, Work) ->
           lists:any(fun({<<"pg_e2e_work">>, <<"work">>, 1, Calls, _, {<<"none">>}}) -> Calls > 0;
                        (_) -> false end, CRows)),
     scenario_counter_set(Target, PinId),
+    scenario_stacks(Target, PinId),
     {<<"error">>, <<"unknown_module">>, _} =
         ask(Target, {<<"start_counters">>, <<"zz_no_such_module_ever">>, <<"_">>,
                      {<<"all">>}, 1000}),
@@ -143,6 +144,55 @@ scenario_counter_set(Target, PinId) ->
                      Pins, 1000, <<"time">>}),
     check("a wildcard on a hot module inside a set is refused", true),
     check("a refused set leaves no session behind", length(sessions(Target)) =< 2),
+    ok.
+
+%% The stack sampling probe: it samples a pinned process, ends itself at its
+%% deadline, aggregates identical stacks in the agent, and counts toward the
+%% two-probe limit while it runs.
+scenario_stacks(Target, PinId) ->
+    Pin = {<<"boot-1">>, PinId},
+    {<<"stacks_started">>, Id, 1, 200, 1000, 100000} =
+        ask(Target, {<<"start_stacks">>, [Pin], 200, 1000, 100000}),
+    check("a stack probe starts and echoes its clamped parameters", true),
+    {<<"error">>, <<"probe_limit">>, _} =
+        ask(Target, {<<"start_stacks">>, [Pin], 100, 1000, 1000}),
+    check("a second stack probe is refused while one is sampling", true),
+    {<<"error">>, <<"probe_limit">>, _} =
+        ask(Target, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>, {<<"all">>}, 1000}),
+    check("the two-probe limit counts a stack probe", true),
+    {<<"pong">>, _, _, _, _, _, Running} = ask(Target, {<<"ping">>}),
+    check("ping counts the running stack probe", Running >= 2),
+    timer:sleep(400),
+    {<<"stacks">>, Id, <<"running">>, <<"running">>, {_, _, _, _, Mid, _, _, _, _, _, _, _}, _, _} =
+        ask(Target, {<<"read_stacks">>, Id}),
+    check("a running probe can be read and has samples", Mid > 0),
+    timer:sleep(1200),
+    {<<"stacks">>, Id, <<"finished">>, <<"deadline">>,
+     {<<"polled_current_stacktrace">>, 200, Milli, Rounds, Samples, Elapsed, Depth,
+      _AtDepth, 0, 0, Distinct, 0}, Frames, Stacks} =
+        ask(Target, {<<"read_stacks">>, Id}),
+    io:format("       stack probe: ~b samples in ~b ms, ~b mHz achieved, depth limit ~b, ~b stacks~n",
+              [Samples, Elapsed, Milli, Depth, Distinct]),
+    check("the probe stopped at its deadline", Elapsed >= 950 andalso Elapsed =< 1600),
+    check("the probe sampled about as often as asked",
+          Rounds >= 100 andalso Samples =:= Rounds),
+    check("the probe measured the node's backtrace depth", Depth >= 1 andalso Depth =< 256),
+    check("identical stacks are aggregated in the agent",
+          Distinct =:= length(Stacks) andalso Distinct >= 1 andalso Distinct < Samples),
+    check("the counts account for every sample",
+          lists:sum([C || {C, _, _} <- Stacks]) =:= Samples),
+    check("the stacks name the workload's function",
+          lists:any(fun({<<"pg_e2e_work">>, _, _, _}) -> true;
+                       ({<<"lists">>, _, _, _}) -> true;
+                       (_) -> false end, Frames)),
+    check("every frame index is in the table",
+          lists:all(fun({_, _, Is}) -> lists:all(fun(I) -> I >= 0 andalso I < length(Frames) end, Is) end,
+                    Stacks)),
+    {<<"stacks">>, Id, <<"finished">>, <<"deadline">>, _, _, _} =
+        ask(Target, {<<"stop_stacks">>, Id}),
+    check("stopping a finished probe returns its result", true),
+    {<<"error">>, <<"no_such_probe">>, _} = ask(Target, {<<"read_stacks">>, Id}),
+    check("a stopped probe is gone", true),
     ok.
 
 %% Self-measure: a process that advertises the capability answers, and every
@@ -201,6 +251,11 @@ scenario_viewer_killed(Target, Work) ->
                      {<<"all">>}, 60000}),
     check("the viewer's probe is running", length(sessions(Target)) >= 2),
     check("scheduler wall time is on", is_list(statistics_on(Target))),
+    {<<"pinned">>, <<"boot-2">>, SPin, _} = ask(Target, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"stacks_started">>, _, _, _, _, _} =
+        ask(Target, {<<"start_stacks">>, [{<<"boot-2">>, SPin}], 100, 60000, 1000000}),
+    timer:sleep(200),
+    check("a sampler process is running mid sample", length(agent_processes(Target)) >= 2),
     Before = erpc:call(Target, erlang, system_info, [process_count]),
     OsPid = erpc:call(V, os, getpid, []),
     _ = os:cmd("kill -9 " ++ OsPid),
@@ -233,6 +288,8 @@ torn_down(Target, Agent, Work, When) ->
           wait_until(fun() -> statistics_on(Target) =:= undefined end, 5000)),
     check("every pickglass_agent@ module is unloaded " ++ When,
           wait_until(fun() -> not agent_modules_loaded(Target) end, 5000)),
+    check("no process carries the agent's label " ++ When,
+          wait_until(fun() -> agent_processes(Target) =:= [] end, 5000)),
     check("the registered name is free " ++ When,
           erpc:call(Target, erlang, whereis, [pickglass_agent]) =:= undefined),
     check("the target's own process survived " ++ When,
@@ -244,6 +301,13 @@ sessions(Target) ->
 
 statistics_on(Target) ->
     erpc:call(Target, erlang, statistics, [scheduler_wall_time]).
+
+%% Processes on the target that carry the agent's ownership label: the agent,
+%% its workers, its helpers and its samplers.
+agent_processes(Target) ->
+    Label = {pickglass_owner, 1, [{<<"tool">>, <<"pickglass">>}], <<"agent">>},
+    [P || P <- erpc:call(Target, erlang, processes, []),
+          erpc:call(Target, erlang, process_info, [P, label]) =:= {label, Label}].
 
 agent_modules_loaded(Target) ->
     [M || {M, _} <- erpc:call(Target, code, all_loaded, []),

@@ -27,6 +27,8 @@
 //// | node facts and allocator carriers | `{<<"system">>}` |
 //// | collect one process's garbage | `{<<"gc">>, Token, DeadlineMs}` |
 //// | ask a process to measure itself | `{<<"measure">>, Token, BudgetMs}` |
+//// | start a stack sampling probe | `{<<"start_stacks">>, [Token], RateHz, DurationMs, MaxSamples}` |
+//// | read or stop a stack probe | `{<<"read_stacks">>, Id}`, `{<<"stop_stacks">>, Id}` |
 //// | detach | `{<<"detach">>}` |
 ////
 //// `Targets` is `{<<"all">>}` or `{<<"pins">>, [{BootId, PinId}]}`. Numeric
@@ -62,6 +64,18 @@ pub const min_measure_wait_ms = 50
 
 /// The longest wait for a self-measurement, in milliseconds.
 pub const max_measure_wait_ms = 5000
+
+/// The most samples per second a stack probe takes across all its targets.
+pub const max_total_hz = 1000
+
+/// The shortest stack sampling probe, in milliseconds.
+pub const min_stack_ms = 100
+
+/// The longest stack sampling probe, in milliseconds.
+pub const max_stack_ms = 60_000
+
+/// The most samples one stack probe may take.
+pub const max_stack_samples = 200_000
 
 /// The most rows one census returns.
 pub const max_top_k = 200
@@ -132,6 +146,14 @@ pub type Request {
   SystemReport
   TargetedGc(token: Token, deadline_ms: Int)
   SelfMeasure(token: Token, budget_ms: Int)
+  StartStacks(
+    tokens: List(Token),
+    rate_hz: Int,
+    duration_ms: Int,
+    max_samples: Int,
+  )
+  ReadStacks(probe_id: Int)
+  StopStacks(probe_id: Int)
   Detach
 }
 
@@ -223,6 +245,9 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "process_detail", 2 -> decode_token_request(term, ProcessDetail)
     "supervision", 3 -> decode_supervision(term)
     "system", 1 -> Ok(SystemReport)
+    "start_stacks", 5 -> decode_start_stacks(term)
+    "read_stacks", 2 -> decode_probe(term, ReadStacks)
+    "stop_stacks", 2 -> decode_probe(term, StopStacks)
     "gc", 3 -> decode_wait(term, TargetedGc, min_gc_wait_ms, max_gc_wait_ms)
     "measure", 3 ->
       decode_wait(term, SelfMeasure, min_measure_wait_ms, max_measure_wait_ms)
@@ -363,6 +388,33 @@ fn decode_wait(
   use wait <- fallible.then(integer(ffi_term.element(3, term), "wait"))
 
   Ok(build(token, clamp(wait, low, high)))
+}
+
+// The rate ceiling is a total across targets, so it is divided by how many
+// there are: sixteen pins sample at most 62 times a second each.
+fn decode_start_stacks(term: Term) -> Result(Request, String) {
+  use tokens <- fallible.then(decode_token_list(ffi_term.element(2, term)))
+  use rate <- fallible.then(integer(ffi_term.element(3, term), "rate"))
+  use duration <- fallible.then(integer(ffi_term.element(4, term), "duration"))
+  use samples <- fallible.then(integer(ffi_term.element(5, term), "samples"))
+
+  Ok(StartStacks(
+    tokens,
+    clamp(rate, 1, max_total_hz / seq.length(tokens)),
+    clamp(duration, min_stack_ms, max_stack_ms),
+    clamp(samples, 1, max_stack_samples),
+  ))
+}
+
+fn decode_token_list(term: Term) -> Result(List(Token), String) {
+  case ffi_safe.proper_length(term) {
+    Error(Nil) -> Error("tokens is not a list")
+    Ok(count) ->
+      case count < 1 || count > max_targets {
+        True -> Error("a probe takes between one and sixteen pins")
+        False -> decode_tokens(ffi_term.coerce(term), [])
+      }
+  }
 }
 
 fn decode_probe(

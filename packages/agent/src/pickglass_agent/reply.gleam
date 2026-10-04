@@ -20,6 +20,7 @@ import pickglass_agent/internal/ffi_term.{type Pid, type Reference, type Term}
 import pickglass_agent/internal/seq
 import pickglass_agent/owner.{type Owner, Owned, Unknown}
 import pickglass_agent/request
+import pickglass_agent/stacks
 import pickglass_agent/supervision
 import pickglass_agent/system
 
@@ -387,4 +388,84 @@ fn heap_reading(reading: Result(detail.Heap, Nil)) -> Term {
         heap.bin_vheap_bytes,
       ))
   }
+}
+
+/// The answer to `start_stacks`, with the rate, duration and budget the
+/// agent settled on after clamping.
+pub fn stacks_started(
+  probe_id: Int,
+  targets: Int,
+  rate_hz: Int,
+  duration_ms: Int,
+  max_samples: Int,
+) -> Term {
+  ffi_term.coerce(#(
+    "stacks_started",
+    probe_id,
+    targets,
+    rate_hz,
+    duration_ms,
+    max_samples,
+  ))
+}
+
+/// How a stack probe sampled, as the sampler measured it.
+pub type Meter {
+  Meter(
+    requested_hz: Int,
+    achieved_millihz: Int,
+    rounds: Int,
+    samples: Int,
+    elapsed_ms: Int,
+    depth_limit: Int,
+    at_depth_limit: Int,
+    targets_gone: Int,
+    dropped_samples: Int,
+    distinct_stacks: Int,
+  )
+}
+
+/// The answer to `read_stacks` and `stop_stacks`. `phase` is `running`,
+/// `finished` or `stopped`, and `why` the reason sampling ended.
+pub fn stacks(
+  probe_id: Int,
+  phase: String,
+  why: stacks.Stop,
+  meter: Meter,
+  built: stacks.Built,
+) -> Term {
+  ffi_term.coerce(#(
+    "stacks",
+    probe_id,
+    phase,
+    stacks.stop_name(why),
+    #(
+      "polled_current_stacktrace",
+      meter.requested_hz,
+      meter.achieved_millihz,
+      meter.rounds,
+      meter.samples,
+      meter.elapsed_ms,
+      meter.depth_limit,
+      meter.at_depth_limit,
+      meter.targets_gone,
+      meter.dropped_samples,
+      meter.distinct_stacks,
+      built.truncated_samples,
+    ),
+    seq.map(built.frames, frame),
+    seq.map(built.stacks, fn(entry) {
+      ffi_term.coerce(#(entry.count, entry.status, entry.frames))
+    }),
+  ))
+}
+
+fn frame(frame: stacks.Frame) -> Term {
+  ffi_term.coerce(
+    #(frame.module, frame.function, frame.arity, case frame.location {
+      stacks.NoLocation -> ffi_term.coerce(#("none"))
+      stacks.FileOnly(file) -> ffi_term.coerce(#("file", file))
+      stacks.At(file, line) -> ffi_term.coerce(#("at", file, line))
+    }),
+  )
 }

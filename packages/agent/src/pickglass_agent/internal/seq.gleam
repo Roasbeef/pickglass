@@ -156,3 +156,15 @@ pub fn any(items: List(a), satisfying predicate: fn(a) -> Bool) -> Bool {
       }
   }
 }
+
+/// The elements of `front` followed by those of `back`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// seq.append([1, 2], [3])
+/// // -> [1, 2, 3]
+/// ```
+pub fn append(front: List(a), back: List(a)) -> List(a) {
+  reverse_onto(reverse(front), back)
+}

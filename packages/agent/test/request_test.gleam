@@ -1,3 +1,4 @@
+import gleam/list
 import pickglass_agent/internal/ffi_term.{type Term, coerce}
 import pickglass_agent/internal/ffi_trace.{TimeAndMemory, TimeOnly}
 import pickglass_agent/request.{
@@ -134,6 +135,59 @@ pub fn gc_and_measure_clamp_their_waits_test() {
   assert decoded_request(envelope(#("gc", "<0.1.0>", 100))) |> is_error
 }
 
+// The rate ceiling is a total across targets, so a probe over more pins gets
+// a lower per-pin ceiling; the duration and the sample budget clamp to their
+// own bounds.
+pub fn stack_probes_clamp_their_budgets_test() {
+  let one = [#("boot-1", 1)]
+  let sixteen = pins(16)
+
+  assert decoded_request(envelope(#("start_stacks", one, 999_999, 1, 0)))
+    == Ok(request.StartStacks(
+      [request.Token("boot-1", 1)],
+      request.max_total_hz,
+      request.min_stack_ms,
+      1,
+    ))
+  assert decoded_request(
+      envelope(#("start_stacks", one, 0, 999_999_999, 999_999_999)),
+    )
+    == Ok(request.StartStacks(
+      [request.Token("boot-1", 1)],
+      1,
+      request.max_stack_ms,
+      request.max_stack_samples,
+    ))
+  assert case
+    decoded_request(envelope(#("start_stacks", sixteen, 999_999, 1000, 10)))
+  {
+    Ok(request.StartStacks(tokens, rate, _, _)) ->
+      list.length(tokens) == 16 && rate == request.max_total_hz / 16
+    _ -> False
+  }
+}
+
+pub fn malformed_stack_probes_are_refused_test() {
+  let none: List(#(String, Int)) = []
+  let seventeen = pins(17)
+
+  assert decoded_request(envelope(#("start_stacks", none, 10, 1000, 10)))
+    |> is_error
+  assert decoded_request(envelope(#("start_stacks", seventeen, 10, 1000, 10)))
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_stacks", [#("boot-1", 1)], "fast", 1000, 10)),
+    )
+    |> is_error
+  assert decoded_request(envelope(#("start_stacks", "all", 10, 1000, 10)))
+    |> is_error
+  assert decoded_request(envelope(#("read_stacks", 3)))
+    == Ok(request.ReadStacks(3))
+  assert decoded_request(envelope(#("stop_stacks", 3)))
+    == Ok(request.StopStacks(3))
+  assert decoded_request(envelope(#("read_stacks", "x"))) |> is_error
+}
+
 pub fn process_detail_takes_a_token_test() {
   assert decoded_request(envelope(#("process_detail", #("boot-1", 4))))
     == Ok(request.ProcessDetail(request.Token("boot-1", 4)))
@@ -168,4 +222,9 @@ pub fn clamp_test() {
   assert request.clamp(5, 1, 3) == 3
   assert request.clamp(-5, 1, 3) == 1
   assert request.clamp(2, 1, 3) == 2
+}
+
+fn pins(count: Int) -> List(#(String, Int)) {
+  list.repeat(Nil, count)
+  |> list.index_map(fn(_, index) { #("boot-1", index + 1) })
 }
