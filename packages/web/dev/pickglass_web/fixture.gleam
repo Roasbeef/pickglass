@@ -1477,7 +1477,7 @@ pub fn compare() -> Result(model.CompareModel, String) {
         candidate: Known(2760),
       ),
     ],
-    diff: Some(model.DiffFlame(profile: merged, layout:)),
+    diff: Some(model.DiffFlame(profile: merged, layout:, sources: model.SameSource)),
   ))
 }
 

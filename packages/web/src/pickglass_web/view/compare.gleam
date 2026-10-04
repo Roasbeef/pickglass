@@ -392,8 +392,14 @@ fn diff_panel(
       let name_of = fn(id) { profile.name_of(merged, id) }
 
       let blocking =
-        provenance.blocking_fields(comparability)
-        |> list.map(provenance.field_name)
+        list.append(
+          provenance.blocking_fields(comparability)
+            |> list.map(provenance.field_name),
+          case diff.sources {
+            model.SameSource -> []
+            model.DifferentSources(..) -> ["sampling"]
+          },
+        )
 
       let verdict = case blocking {
         [] -> flame_chart.Directed

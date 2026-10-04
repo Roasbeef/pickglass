@@ -3,16 +3,20 @@
 
 import fixture
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import gleam/string
 import pickglass/capture_build
 import pickglass/capture_file
 import pickglass/compare_build
 import pickglass/compare_report
 import pickglass/observation.{Observation}
+import pickglass/probe_book
 import pickglass_core/identity
 import pickglass_core/measure.{Known, Missing}
+import pickglass_core/policy
 import pickglass_core/provenance
+import pickglass_core/wire
+import pickglass_web/model
 
 fn facts(workload: String) -> capture_build.Facts {
   capture_build.Facts(
@@ -33,6 +37,14 @@ fn capture(
   workload: String,
   observations: List(observation.Observation),
 ) -> capture_file.Loaded {
+  capture_with(workload, observations, [])
+}
+
+fn capture_with(
+  workload: String,
+  observations: List(observation.Observation),
+  probes: List(probe_book.ProbeRecord),
+) -> capture_file.Loaded {
   let assert Ok(#(header, records)) =
     capture_build.assemble(
       facts(workload),
@@ -41,7 +53,7 @@ fn capture(
       measure.EveryMs(2000),
       [],
       [],
-      [],
+      probes,
     )
   let assert Ok(text) = capture_file.render(header, records)
   let assert Ok(loaded) = capture_file.parse(text)
@@ -175,4 +187,74 @@ pub fn matching_captures_state_a_direction_in_the_text_test() {
 
   assert string.contains(text, "verdict: comparable")
   assert string.contains(text, "increased")
+}
+
+// A sampled-stacks probe that ran at `hz`, with the same two stacks and
+// `samples` samples spread over them.
+fn sampled(hz: Int, samples: Int) -> probe_book.ProbeRecord {
+  let snapshot =
+    wire.StacksSnapshot(
+      probe_id: 11,
+      state: wire.ProbeFinished,
+      stop: wire.SamplingDeadline,
+      meter: wire.SamplerMeter(
+        requested_hz: hz,
+        achieved_millihz: hz * 1000,
+        rounds: samples,
+        samples:,
+        elapsed_ms: 1000,
+        depth_limit: 8,
+        at_depth_limit: 0,
+        targets_gone: 0,
+        dropped_samples: 0,
+        distinct_stacks: 2,
+        truncated_samples: 0,
+      ),
+      frames: [
+        wire.StackFrame("m", "leaf", 1, wire.NoLocation),
+        wire.StackFrame("m", "root", 1, wire.NoLocation),
+      ],
+      stacks: [
+        wire.SampledStack(samples * 7 / 10, "running", [0, 1]),
+        wire.SampledStack(samples * 3 / 10, "waiting", [1]),
+      ],
+    )
+
+  probe_book.started(11, policy.Sampling, [], 0, 10_000, 1)
+  |> probe_book.finish_stacks(snapshot, 1000)
+}
+
+pub fn probes_sampled_at_different_rates_get_no_verdict_test() {
+  let assert Ok(page) =
+    compare_build.build(
+      "a.pgcap",
+      capture_with("idle", passes(1_000_000), [sampled(50, 500)]),
+      "b.pgcap",
+      capture_with("idle", passes(1_000_000), [sampled(100, 1000)]),
+    )
+  let assert Some(flame) = page.diff
+
+  assert flame.sources
+    == model.DifferentSources(
+      "process_info current_stacktrace at 50 Hz",
+      "process_info current_stacktrace at 100 Hz",
+    )
+}
+
+pub fn a_longer_probe_at_the_same_rate_is_scaled_not_called_growth_test() {
+  let assert Ok(page) =
+    compare_build.build(
+      "a.pgcap",
+      capture_with("idle", passes(1_000_000), [sampled(50, 500)]),
+      "b.pgcap",
+      capture_with("idle", passes(1_000_000), [sampled(50, 1500)]),
+    )
+  let assert Some(flame) = page.diff
+
+  assert flame.sources == model.SameSource
+
+  // The same shape three times as long: every stack cancels once the
+  // candidate is scaled to the baseline's total, so nothing is drawn as
+  // grown. Unscaled, every box would be red.
+  assert flame.layout.boxes == []
 }

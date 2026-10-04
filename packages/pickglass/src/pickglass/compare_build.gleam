@@ -17,6 +17,7 @@
 //// A reading a capture does not hold is `Missing`, and a figure with no
 //// reading on either side shows the word and takes no verdict.
 
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -184,7 +185,7 @@ fn diff_of(
 ) -> option.Option(model.DiffFlame) {
   case stack_profile(baseline), stack_profile(candidate) {
     Some(base), Some(other) ->
-      case differential(base, other) {
+      case differential(base, other, source_match(base, other)) {
         Ok(drawn) -> Some(drawn)
         Error(_) -> None
       }
@@ -209,12 +210,38 @@ fn stack_profile(loaded: Loaded) -> option.Option(Profile) {
   |> option.from_result
 }
 
+// A longer run has more samples and a faster one has more per second, so the
+// candidate is scaled to the baseline's total, and the flame says whether the
+// two were sampled the same way: only then is a box's width the same
+// quantity on both sides.
+fn source_match(base: Profile, other: Profile) -> model.SourceMatch {
+  case profile.source(base) == profile.source(other) {
+    True -> model.SameSource
+    False ->
+      model.DifferentSources(
+        baseline: source_text(profile.source(base)),
+        candidate: source_text(profile.source(other)),
+      )
+  }
+}
+
+fn source_text(source: profile.Source) -> String {
+  case source {
+    profile.SampledStacks(method:, rate:) ->
+      method <> " at " <> int.to_string(rate) <> " Hz"
+    profile.TracedCalls -> "traced calls"
+    profile.TracedCounters -> "traced counters"
+    profile.AllocationCounts -> "allocation counts"
+  }
+}
+
 fn differential(
   base: Profile,
   other: Profile,
+  sources: model.SourceMatch,
 ) -> Result(model.DiffFlame, String) {
   use merged <- result.try(
-    diff.merge(base, other, diff.Unnormalized)
+    diff.merge(base, other, diff.Normalized)
     |> result.replace_error("the two profiles do not share value types"),
   )
   use column <- result.try(
@@ -230,7 +257,7 @@ fn differential(
     |> result.replace_error("the merged profile has no call stacks"),
   )
 
-  model.DiffFlame(profile: merged, layout:)
+  model.DiffFlame(profile: merged, layout:, sources:)
 }
 
 /// The figures of one capture, for the command line to print beside the

@@ -875,7 +875,20 @@ pub type DiffFlame {
     profile: profile.Profile,
     /// The differential layout.
     layout: flame.Layout,
+    /// Whether the two profiles were sampled the same way.
+    sources: SourceMatch,
   )
+}
+
+/// Whether the two profiles of a differential flame came from the same kind
+/// of collection. A different sampling rate changes what a box's width
+/// means, and the capture header does not record it.
+pub type SourceMatch {
+  /// The same method at the same rate.
+  SameSource
+
+  /// They differ; the texts say how, baseline first.
+  DifferentSources(baseline: String, candidate: String)
 }
 
 // ------------------------------------------------------------ audit
