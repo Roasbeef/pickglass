@@ -13,7 +13,7 @@ here uses them.
 
 `msg.Msg` is closed and has three families. `Fed(Feed)` carries data in and
 is built by no handler. `Ui(UiEvent)` changes page-local view state
-(`state.UiState`: tab, expanded rows, selection, form drafts). `Ask(Request)`
+(`state.UiState`: tab, expanded rows, selection, the choices in a form; never free text a button acts on). `Ask(Request)`
 names a request such as `RequestPin(Key)`, `PlanProbe(ProbeDraft)` or
 `ConfirmPlan(Key)`; it carries no authority.
 
@@ -101,7 +101,10 @@ nothing in the release can show invented numbers.
 
 Browser to page: `click` handlers send fixed messages; `change` and `input`
 handlers decode `target.value` with `wire.key_decoder`, `code_decoder` or
-`text_decoder`, and a failing decoder drops the event. Page to viewer: the
+`text_decoder`, and a failing decoder drops the event. Free text that a button
+acts on is never sent on `input`: its field is in an `html.form` and the
+`submit` event carries it (`wire.submitted`, decoded by `form_decoder`), so
+the server never acts on a stale draft. Only the profile search uses `input`. Page to viewer: the
 `on_request` function given to `app.application`, called only for a request
 that passed `app.update`'s membership check. Viewer to page: `Fed` messages.
 

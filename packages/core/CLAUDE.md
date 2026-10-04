@@ -74,7 +74,9 @@ negates and merges a base into a candidate; `analysis/top` and
 `analysis/peek` are the Top table and Peek.
 
 `layout/dag` is a deterministic layered layout of a `Graph` (cycle
-breaking, longest-path layers, barycentre sweeps, no overlap in a layer).
+breaking, longest-path layers, barycentre sweeps, and a least-squares
+placement of each layer that keeps its order and gaps, so width stays
+bounded; edge-routing nodes take `edge_gap`, not `node_gap`).
 `layout/flame` builds the merged stack tree, folds boxes under a minimum
 width into their parent, caps the box count, and reports omitted boxes
 (drawn plus omitted equals the tree's size); icicle only changes `row`.
