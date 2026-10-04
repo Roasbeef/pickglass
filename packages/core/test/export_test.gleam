@@ -481,8 +481,14 @@ pub fn a_time_column_is_written_as_time_not_samples_test() {
     table,
     "top 2 functions by exclusive time of their own (4.00 ms in all)",
   )
-  assert string.contains(table, " 75.0%  3.00 ms   75.0%  3.00 ms  m:work/0")
-  assert string.contains(table, " 25.0%  1.00 ms  100.0%  4.00 ms  m:main/0")
+  assert string.contains(
+    table,
+    " 75.0%    3.00 ms   75.0%    3.00 ms  m:work/0",
+  )
+  assert string.contains(
+    table,
+    " 25.0%    1.00 ms  100.0%    4.00 ms  m:main/0",
+  )
   assert !string.contains(table, "samples")
 
   let assert Ok(tree) = text.tree(p, time, text.default_config)

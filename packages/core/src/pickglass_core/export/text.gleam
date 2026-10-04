@@ -99,6 +99,12 @@ pub fn functions(profile: Profile, column: Column, limit: Int) -> String {
   let index = profile.column_index(column)
   let words = words_of(profile, column)
 
+  // A time such as `145.46 us` is wider than a count, so its columns are.
+  let width = case words.unit {
+    unit.Count -> 9
+    _ -> 11
+  }
+
   // A table with no base cannot fail; the error arm is the type's, not a
   // reachable case.
   let rows = case top.table(profile, None, top.Sort(column, top.ByFlat)) {
@@ -113,9 +119,9 @@ pub fn functions(profile: Profile, column: Column, limit: Int) -> String {
       let totals = at(row.totals, index)
 
       pad_start(share(totals.flat, total), 7)
-      <> pad_start(value_text(words.unit, totals.flat), 9)
+      <> pad_start(value_text(words.unit, totals.flat), width)
       <> pad_start(share(totals.cum, total), 8)
-      <> pad_start(value_text(words.unit, totals.cum), 9)
+      <> pad_start(value_text(words.unit, totals.cum), width)
       <> "  "
       <> row.name
     })
@@ -133,9 +139,9 @@ pub fn functions(profile: Profile, column: Column, limit: Int) -> String {
         _ -> " in all)"
       },
       pad_start("flat", 7)
-        <> pad_start("", 9)
+        <> pad_start("", width)
         <> pad_start("cum", 8)
-        <> pad_start("", 9)
+        <> pad_start("", width)
         <> "  function",
       ..shown
     ],
