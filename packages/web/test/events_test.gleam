@@ -303,7 +303,7 @@ fn effect_none() {
   lustre_effect.none()
 }
 
-pub fn a_wildcard_module_is_refused_with_the_reason_before_any_request_test() {
+pub fn a_misplaced_wildcard_is_refused_with_the_reason_before_any_request_test() {
   let sim = support.simulation(on: page.Probes)
   let update = fn(model, message) {
     app.update(fn(_) { effect_none() }, model, message).0
@@ -312,9 +312,9 @@ pub fn a_wildcard_module_is_refused_with_the_reason_before_any_request_test() {
   let model =
     simulate.model(sim)
     |> update(msg.Ui(msg.DraftTarget(key.indexed("proc", 1))))
-    |> update(msg.Ui(msg.DraftModules("runtime@*")))
+    |> update(msg.Ui(msg.DraftModules("*")))
     |> update(msg.Ui(msg.SubmitDraft))
 
   model.ui.last_request |> should.equal(None)
-  assert string.contains(option.unwrap(model.ui.notice, ""), "no wildcard")
+  assert string.contains(option.unwrap(model.ui.notice, ""), "end of a module")
 }

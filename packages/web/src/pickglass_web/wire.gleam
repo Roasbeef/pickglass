@@ -132,15 +132,18 @@ pub type PatternRefusal {
   /// sign, or was longer than 255 characters.
   BadPattern(text: String)
 
-  /// A pattern held a `*`. The agent turns each name into a module the node
-  /// already has and has no wildcard, so a pattern with a star can only be
-  /// refused when the probe starts, after the operator confirmed it.
+  /// A pattern held a `*` that is not the last character of a name with
+  /// something before it. The agent reads a trailing `*` as a prefix of the
+  /// loaded module names and has no other wildcard, and a bare `*` would name
+  /// every module, so these can only be refused when the probe starts, after
+  /// the operator confirmed it.
   WildcardPattern(text: String)
 }
 
 /// Read the module field of the plan form. Patterns are separated by commas
-/// or spaces; each is the exact name of a module the node has loaded, which
-/// is the only thing the agent resolves.
+/// or spaces; each is the exact name of a module the node has loaded, or a
+/// prefix that ends in one `*` (`runtime@*`) for every loaded module that
+/// starts with it.
 ///
 /// ## Examples
 ///
@@ -149,7 +152,10 @@ pub type PatternRefusal {
 /// // -> Ok(["loom@runtime@keeper", "lists"])
 ///
 /// wire.module_patterns("loom@*")
-/// // -> Error(WildcardPattern("loom@*"))
+/// // -> Ok(["loom@*"])
+///
+/// wire.module_patterns("*")
+/// // -> Error(WildcardPattern("*"))
 ///
 /// wire.module_patterns("../etc")
 /// // -> Error(BadPattern("../etc"))
@@ -175,12 +181,35 @@ fn check_patterns(
   tokens: List(String),
 ) -> Result(List(String), PatternRefusal) {
   case
-    list.find(tokens, string.contains(_, "*")),
-    list.find(tokens, fn(token) { !pattern_ok(token) })
+    list.find(tokens, misplaced_star),
+    list.find(tokens, fn(token) { !pattern_ok(prefix_stem(token)) })
   {
     Ok(starred), _ -> Error(WildcardPattern(starred))
     Error(Nil), Ok(bad) -> Error(BadPattern(bad))
     Error(Nil), Error(Nil) -> Ok(tokens)
+  }
+}
+
+// A `*` is a wildcard only as the last character of a name that has
+// something before it. Any other star is one the agent would refuse.
+fn misplaced_star(token: String) -> Bool {
+  case string.contains(token, "*") {
+    False -> False
+    True ->
+      !{
+        string.ends_with(token, "*")
+        && string.length(token) > 1
+        && { !string.contains(string.drop_end(token, 1), "*") }
+      }
+  }
+}
+
+// The name without its trailing star, which is the part the alphabet check
+// applies to.
+fn prefix_stem(token: String) -> String {
+  case string.ends_with(token, "*") {
+    True -> string.drop_end(token, 1)
+    False -> token
   }
 }
 

@@ -22,6 +22,7 @@
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
@@ -468,6 +469,7 @@ fn scope_rows(card: PlanCard, scope: policy.PlanScope) -> List(Element(Msg)) {
       <> list.fold(scope.modules, "", join_words)
       <> " · "
       <> matched_text(card.matched)
+      <> prefix_text(scope.modules)
   }
 
   list.append(chosen, [
@@ -718,6 +720,19 @@ fn matched_text(matched: measure.Measurement) -> String {
       fmt.count(count) <> " functions matched by the agent"
     measure.Missing(_) | measure.NotApplicable ->
       "functions are matched when the probe starts"
+  }
+}
+
+// A module name that ends in `*` is a prefix the agent expands against the
+// modules loaded in the target. The viewer has no list of those modules, so
+// the plan says what the star means and that the count comes at the start.
+fn prefix_text(modules: List(String)) -> String {
+  case list.filter(modules, string.ends_with(_, "*")) {
+    [] -> ""
+    prefixes ->
+      " · "
+      <> list.fold(prefixes, "", join_words)
+      <> " matches every module loaded in the target that starts with the text before the *; how many is known when the probe starts"
   }
 }
 

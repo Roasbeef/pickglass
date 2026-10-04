@@ -92,11 +92,20 @@ pub fn module_patterns_accept_exact_names_test() {
   wire.module_patterns("a, b") |> should.equal(Ok(["a", "b"]))
 }
 
-// The agent resolves each name to a module the node has, so a star can only
-// be refused after the operator confirmed the plan.
-pub fn module_patterns_refuse_a_wildcard_at_plan_time_test() {
-  wire.module_patterns("runtime@*")
-  |> should.equal(Error(wire.WildcardPattern("runtime@*")))
+// A trailing star is a prefix over the loaded modules and is accepted.
+pub fn module_patterns_accept_a_trailing_prefix_test() {
+  wire.module_patterns("runtime@*") |> should.equal(Ok(["runtime@*"]))
+  wire.module_patterns("lists runtime@strand_*")
+  |> should.equal(Ok(["lists", "runtime@strand_*"]))
+}
+
+// Any other star would be refused by the agent after the operator confirmed
+// the plan, so the form refuses it first.
+pub fn module_patterns_refuse_a_misplaced_wildcard_at_plan_time_test() {
+  wire.module_patterns("runtime@**")
+  |> should.equal(Error(wire.WildcardPattern("runtime@**")))
+  wire.module_patterns("*lists")
+  |> should.equal(Error(wire.WildcardPattern("*lists")))
   wire.module_patterns("lists a*b")
   |> should.equal(Error(wire.WildcardPattern("a*b")))
   wire.module_patterns("*") |> should.equal(Error(wire.WildcardPattern("*")))

@@ -691,8 +691,8 @@ fn finish_tracing(
 }
 
 // A `--module` value is one name or several joined by commas or spaces, from
-// the alphabet the page's form accepts. The agent resolves each name to a
-// module the node has and has no wildcard, so a `*` is refused here with the
+// the alphabet the page's form accepts, each optionally ending in one `*` as
+// a prefix of the loaded module names. Any other `*` is refused here with the
 // reason, as the page's form refuses it.
 fn module_arguments(value: String) -> Result(List(String), String) {
   case web_wire.module_patterns(value) {
@@ -705,7 +705,7 @@ fn module_arguments(value: String) -> Result(List(String), String) {
       Error(
         "--module "
         <> text
-        <> " has a wildcard, and the agent traces modules by exact name; name each module",
+        <> " has a misplaced wildcard: only a trailing * after a module name prefix, as in runtime@*, is accepted",
       )
     Ok(names) -> Ok(names)
   }

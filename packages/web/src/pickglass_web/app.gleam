@@ -449,9 +449,8 @@ fn with_modules(
     Error(wire.WildcardPattern(text:)) ->
       refuse(
         model,
-        "The agent traces modules by exact name and has no wildcard, so "
-          <> text
-          <> " would be refused when the probe starts. Name each module.",
+        "A * is accepted only at the end of a module name, as in runtime@*; refused: "
+          <> text,
       )
   }
 }
