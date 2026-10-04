@@ -220,6 +220,12 @@ pub type ProfileNote {
   )
 }
 
+/// The reason the service records when the operator detached the viewer, as
+/// a phrase that follows "not attached to the node:". The strip leaves the
+/// reason out of its own sentence when it is this one, since the operator
+/// already knows what they did.
+pub const detached_by_operator = "you detached it"
+
 /// What the viewer answers.
 pub type Reply {
   /// The request succeeded and has nothing to return.

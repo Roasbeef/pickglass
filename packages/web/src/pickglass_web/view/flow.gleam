@@ -36,7 +36,9 @@ import lustre/element.{type Element}
 import lustre/element/html
 import pickglass_core/measure
 import pickglass_core/policy
+import pickglass_core/unit
 import pickglass_web/fmt
+import pickglass_web/memory_model
 import pickglass_web/model.{type FlowModel}
 import pickglass_web/msg.{type Msg}
 import pickglass_web/page.{type Links, type Page}
@@ -70,6 +72,7 @@ pub fn view(
       refusal(data.refused),
       plan(data.pending, modules),
       running(data),
+      collected(data.collected),
       ready(data.ready, links),
     ]
   }
@@ -138,6 +141,50 @@ fn running_text(kind: policy.ProbeKind) -> String {
     policy.CallTree -> "Tracing calls"
     policy.SchedulingGc -> "Recording scheduling and collections"
     policy.Counters -> "Counting calls"
+  }
+}
+
+// The result of a targeted collection, said once as a sentence. The two heap
+// counters on the process page can be equal when nothing was garbage, and
+// then nothing on that page shows the collection ran.
+fn collected(done: Option(memory_model.Collected)) -> Element(Msg) {
+  case done {
+    None -> element.none()
+    Some(found) ->
+      html.div(
+        [
+          attribute.class("flow-ready"),
+          attribute.role("status"),
+          attribute.data("test-id", "collection-done"),
+        ],
+        [
+          element.text(
+            "Collected "
+            <> found.pid
+            <> " "
+            <> fmt.duration_ms(found.age_ms)
+            <> " ago: "
+            <> fmt.cell(found.before, unit.Bytes)
+            <> " before, "
+            <> fmt.cell(found.after, unit.Bytes)
+            <> " after, "
+            <> freed_text(found.before, found.after)
+            <> ".",
+          ),
+        ],
+      )
+  }
+}
+
+fn freed_text(
+  before: measure.Measurement,
+  after: measure.Measurement,
+) -> String {
+  case before, after {
+    measure.Known(b), measure.Known(a) if b > a ->
+      fmt.known(b - a, unit.Bytes) <> " freed"
+    measure.Known(_), measure.Known(_) -> "nothing freed"
+    _, _ -> "the freed amount is not known"
   }
 }
 

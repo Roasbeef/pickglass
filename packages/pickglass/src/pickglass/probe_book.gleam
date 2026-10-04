@@ -507,11 +507,11 @@ fn stack_notes(meter: wire.SamplerMeter) -> List(String) {
   list.flatten([
     [
       "Sampled "
-      <> int.to_string(meter.samples)
+      <> fmt.count(meter.samples)
       <> " times at "
-      <> int.to_string(achieved)
+      <> fmt.count(achieved)
       <> " Hz achieved of "
-      <> int.to_string(meter.requested_hz)
+      <> fmt.count(meter.requested_hz)
       <> " requested.",
     ],
     case meter.targets_gone {

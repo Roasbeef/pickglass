@@ -1277,6 +1277,7 @@ pub fn flow() -> model.FlowModel {
       summary: "1,840 samples at 100 Hz",
       opens: model.OpensProfile,
     )),
+    collected: None,
     refused: None,
   )
 }

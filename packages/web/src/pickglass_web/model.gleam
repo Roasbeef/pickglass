@@ -747,6 +747,9 @@ pub type FlowModel {
     running: List(ActiveProbe),
     /// The newest finished probe that has a result, while it is recent.
     ready: Option(ReadyProfile),
+    /// The newest targeted collection, while it is recent. Its result is two
+    /// counters on the process page, which do not say that it ran.
+    collected: Option(memory_model.Collected),
     /// Why the last profile button planned nothing, when it did not: an
     /// owner with no live process, a full pin table, a refusal by the gate.
     refused: Option(String),

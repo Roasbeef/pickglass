@@ -362,9 +362,11 @@ fn strip(inputs: Inputs) -> model.StripModel {
       grants: page.grants,
       source_line: case inputs.lost, source {
         Some(reason), model.Live ->
-          "Detached from the target ("
-          <> reason
-          <> "). The readings on the page are the last ones; no command can run."
+          case reason == seam.detached_by_operator {
+            True -> "You detached the viewer from the target."
+            False -> "Detached from the target: " <> reason <> "."
+          }
+          <> " The readings on the page are the last ones; no command can run."
         _, _ -> line
       },
     ),
@@ -570,10 +572,9 @@ fn os_roles(newest: Observation) -> List(model.OsRole) {
           os: identity.OsProcess(pid: reading.pid, start: reading.start),
           rss: reading.rss,
           anon: reading.anon,
-          note: case reading.start {
-            identity.CoarseStart(_) -> "start time is good to a second"
-            identity.PreciseStart(_) | identity.UnreadableStart -> ""
-          },
+          // A coarse start is the same on every row of the platform, so the
+          // Overview says it once under the table and the cell stays empty.
+          note: "",
         )
       })
   }
@@ -1393,7 +1394,11 @@ fn ets_row(table: wire.EtsTable) -> memory_model.EtsRow {
     },
     id: table.id_text,
     owner_pid: table.owner_pid_text,
-    owner_label: label_of(attribution_of(table.owner)),
+    owner_label: case attribution_of(table.owner), table.owner_name {
+      owner.Unattributed, "" -> "no label"
+      owner.Unattributed, name -> name
+      attributed, _ -> label_of(attributed)
+    },
     kind: table.kind,
     objects: Known(table.objects),
     bytes: Known(table.memory_bytes),
@@ -1582,8 +1587,14 @@ fn target_label(
 }
 
 /// How long after it ends a stack profile is still offered as "ready" above
-/// every page, in milliseconds.
-pub const ready_ms = 300_000
+/// every page, in milliseconds. The banner links to a page the operator
+/// usually opens within seconds, so it is a pointer and not a record.
+pub const ready_ms = 60_000
+
+/// How long a call trace that caught no call is offered as "ready". There is
+/// nothing to open that the sentence has not already said, so the banner
+/// leaves quickly.
+pub const empty_ready_ms = 10_000
 
 // The one-click profile in flight, for every page: the plan a profile button
 // made, the stack probes running, and the profile that just finished.
@@ -1601,8 +1612,33 @@ fn flow(inputs: Inputs) -> model.FlowModel {
     pending: list.first(plan_cards(inputs, rows)) |> option.from_result,
     running: active_probes(inputs),
     ready: ready_profile(inputs),
+    collected: newest_collection(inputs),
     refused: inputs.refusal,
   )
+}
+
+// The newest targeted collection, while it is recent. The counters it leaves
+// on the process page do not move when nothing was freed, so the flow says
+// that it ran, when, and what it found.
+fn newest_collection(inputs: Inputs) -> Option(memory_model.Collected) {
+  list.find_map(inputs.results, fn(result) {
+    case result {
+      seam.GcRan(snapshot:, at_ms:) ->
+        case inputs.now_ms - at_ms <= ready_ms {
+          True ->
+            Ok(memory_model.Collected(
+              pid: snapshot.pid_text,
+              age_ms: int.max(0, inputs.now_ms - at_ms),
+              before: heap_of(snapshot.before),
+              after: heap_of(snapshot.after),
+            ))
+          False -> Error(Nil)
+        }
+      seam.SelfMeasured(..) | seam.BinariesRan(..) | seam.BinariesRefused(..) ->
+        Error(Nil)
+    }
+  })
+  |> option.from_result
 }
 
 // The newest finished probe that has a result a page shows, while it is
@@ -1618,7 +1654,10 @@ fn find_ready(inputs: Inputs) -> Result(model.ReadyProfile, Nil) {
       probe_book.Finished(ended_ms:, profile:, ..) -> {
         let age = int.max(0, inputs.now_ms - ended_ms)
 
-        case age <= ready_ms, ready_summary(probe, profile) {
+        case
+          age <= ready_lifetime(probe, profile),
+          ready_summary(probe, profile)
+        {
           True, Ok(#(summary, opens)) ->
             Ok(model.ReadyProfile(
               probe: probe.id,
@@ -1634,6 +1673,18 @@ fn find_ready(inputs: Inputs) -> Result(model.ReadyProfile, Nil) {
   })
 }
 
+// A call trace with no call in it has said everything in its banner line.
+fn ready_lifetime(probe: ProbeRecord, found: Option(profile.Profile)) -> Int {
+  case probe.kind, found {
+    policy.CallTree, Some(traced) ->
+      case call_count(traced) {
+        0 -> empty_ready_ms
+        _ -> ready_ms
+      }
+    _, _ -> ready_ms
+  }
+}
+
 // What a finished probe left that a page can show, and the page. A counters
 // probe's profile is read on the Probes and Profile pages by those who ran
 // it by hand, and is not announced above every page.
@@ -1645,7 +1696,7 @@ fn ready_summary(
     policy.Sampling, Some(sampled), _ ->
       Ok(#(stack_summary(sampled), model.OpensProfile))
     policy.CallTree, Some(traced), _ ->
-      Ok(#(call_summary(traced), model.OpensProfile))
+      Ok(#(call_summary(traced, probe), model.OpensProfile))
     policy.SchedulingGc, _, probe_book.SchedulingDetail(snapshot:) ->
       Ok(#(
         fmt.count(list.length(snapshot.processes))
@@ -1689,16 +1740,29 @@ fn stack_summary(found: profile.Profile) -> String {
   }
 }
 
-fn call_summary(found: profile.Profile) -> String {
-  let calls = case profile.column_named(found, calltrace_profile.calls_column) {
+fn call_count(found: profile.Profile) -> Int {
+  case profile.column_named(found, calltrace_profile.calls_column) {
     Ok(column) -> profile.total(found, column)
     Error(Nil) -> 0
   }
+}
 
-  fmt.count(calls)
-  <> " traced calls over "
-  <> fmt.count(list.length(profile.functions(found)))
-  <> " functions"
+// What a call trace caught. Functions the profile holds are the ones that
+// were called; the ones the probe armed are `probe.matched`, so an empty
+// trace says how many functions heard nothing and for how long.
+fn call_summary(found: profile.Profile, probe: ProbeRecord) -> String {
+  case call_count(found) {
+    0 ->
+      "no call to any of the "
+      <> fmt.count(probe.matched)
+      <> " traced functions in "
+      <> fmt.duration_ms(probe.duration_ms)
+    calls ->
+      fmt.count(calls)
+      <> " traced calls over "
+      <> fmt.count(list.length(profile.functions(found)))
+      <> " functions"
+  }
 }
 
 /// The key of a probe, which names it by the agent's id.
@@ -2337,8 +2401,9 @@ fn gc_counters(detail: Option(wire.ProcessDetail)) -> List(model.Counter) {
   }
 }
 
-// The newest collection of this process: its total heap before and after.
-// A target that exited before it was collected has words, not figures.
+// The newest collection of this process: its total heap before and after,
+// labelled with how long ago it ran so that two equal rows still read as a
+// result. A target that exited before it was collected has words, not figures.
 fn collection_counters(
   inputs: Inputs,
   row: model.ProcRow,
@@ -2346,8 +2411,8 @@ fn collection_counters(
   let found =
     list.find_map(inputs.results, fn(result) {
       case result {
-        seam.GcRan(snapshot:, ..) if snapshot.pid_text == row.pid_text ->
-          Ok(snapshot)
+        seam.GcRan(snapshot:, at_ms:) if snapshot.pid_text == row.pid_text ->
+          Ok(#(snapshot, at_ms))
         seam.GcRan(..)
         | seam.SelfMeasured(..)
         | seam.BinariesRan(..)
@@ -2357,19 +2422,28 @@ fn collection_counters(
 
   case found {
     Error(Nil) -> []
-    Ok(snapshot) -> [
-      counter(
-        "total heap before the last collection",
-        unit.Bytes,
-        heap_of(snapshot.before),
-      ),
-      counter(
-        "total heap after the last collection",
-        unit.Bytes,
-        heap_of(snapshot.after),
-      ),
-    ]
+    Ok(#(snapshot, at_ms)) -> {
+      let when = ago(int.max(0, inputs.now_ms - at_ms))
+
+      [
+        counter(
+          "heap before the requested collection (" <> when <> ")",
+          unit.Bytes,
+          heap_of(snapshot.before),
+        ),
+        counter(
+          "heap after the requested collection (" <> when <> ")",
+          unit.Bytes,
+          heap_of(snapshot.after),
+        ),
+      ]
+    }
   }
+}
+
+// A duration since an event, written for a label.
+fn ago(age_ms: Int) -> String {
+  fmt.duration_ms(age_ms) <> " ago"
 }
 
 fn heap_of(reading: wire.HeapReading) -> measure.Measurement {

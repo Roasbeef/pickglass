@@ -122,3 +122,17 @@ pub type EtsListing {
     age_ms: Int,
   )
 }
+
+/// A targeted collection that finished: what the heap held around it.
+pub type Collected {
+  Collected(
+    /// The collected process, as text.
+    pid: String,
+    /// How long ago the collection ran, in milliseconds.
+    age_ms: Int,
+    /// The process's total heap before the collection.
+    before: Measurement,
+    /// The process's total heap after it.
+    after: Measurement,
+  )
+}

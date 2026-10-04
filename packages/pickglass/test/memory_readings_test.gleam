@@ -110,6 +110,7 @@ fn ets_listing() -> wire.EtsSnapshot {
         name: "registry",
         owner_pid_text: "<0.10.0>",
         owner: session_owner(),
+        owner_name: "",
         kind: "set",
         objects: 40,
         memory_bytes: 9000,
@@ -540,7 +541,36 @@ pub fn a_table_without_a_name_is_labelled_by_its_identifier_test() {
     memory_page([anonymous]).ets.body
 
   assert row.label == "#Ref<0.1.2.3>"
-  assert row.owner_label == "unknown"
+  assert row.owner_label == "no label"
+}
+
+// The agent sends the owner's registered name, which says more than "no
+// label" for a process that is registered and carries no label.
+pub fn an_unlabelled_owner_is_named_by_its_registered_name_test() {
+  let pass = collect(0)
+  let assert Ok(listing) = pass.ets
+  let snapshot = listing.snapshot
+  let assert [table] = snapshot.tables
+  let named =
+    Observation(
+      ..pass,
+      ets: Ok(
+        readings.EtsListing(
+          ..listing,
+          snapshot: wire.EtsSnapshot(..snapshot, tables: [
+            wire.EtsTable(
+              ..table,
+              owner: wire.Unlabelled,
+              owner_name: "code_server",
+            ),
+          ]),
+        ),
+      ),
+    )
+  let assert memory_model.EtsListed(rows: [row], ..) =
+    memory_page([named]).ets.body
+
+  assert row.owner_label == "code_server"
 }
 
 // A pass between listings leaves the page the last listing and its age.
@@ -899,17 +929,34 @@ fn strip_of(with: feeds.Inputs) -> model.StripModel {
 pub fn a_lost_target_is_said_in_the_banner_line_test() {
   let live = strip_of(inputs([collect(0)]))
   let gone =
-    strip_of(feeds.Inputs(..inputs([collect(0)]), lost: Some("detached")))
+    strip_of(
+      feeds.Inputs(
+        ..inputs([collect(0)]),
+        lost: Some(seam.detached_by_operator),
+      ),
+    )
+  let stopped =
+    strip_of(
+      feeds.Inputs(
+        ..inputs([collect(0)]),
+        lost: Some("the agent stopped answering"),
+      ),
+    )
 
   assert live.source == model.Live
   assert string.contains(
     live.banner.source_line,
     "full code-execution authority",
   )
-  assert gone.source == model.Detached("detached")
+  assert gone.source == model.Detached("you detached it")
   assert string.contains(
     gone.banner.source_line,
-    "Detached from the target (detached)",
+    "You detached the viewer from the target.",
+  )
+  assert !string.contains(gone.banner.source_line, "(")
+  assert string.contains(
+    stopped.banner.source_line,
+    "Detached from the target: the agent stopped answering.",
   )
   assert !string.contains(gone.banner.source_line, "full code-execution")
 }

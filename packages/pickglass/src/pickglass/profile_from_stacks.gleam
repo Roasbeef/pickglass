@@ -37,13 +37,13 @@
 //// samples it holds.
 
 import gleam/dict.{type Dict}
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import pickglass_core/profile.{type Profile}
 import pickglass_core/profile/activity
 import pickglass_core/unit
+import pickglass_web/fmt
 
 /// One frame of a sampled stack.
 pub type Frame {
@@ -255,7 +255,7 @@ pub fn caveats(input: Aggregated) -> List(String) {
     "Width is a share of samples, not of time.",
     "A process that is inside a long BIF or NIF is under-sampled.",
     "Stack depth is limited to "
-      <> int.to_string(input.depth_limit)
+      <> fmt.count(input.depth_limit)
       <> "; deeper stacks are cut at the outer end.",
   ]
 
@@ -263,7 +263,7 @@ pub fn caveats(input: Aggregated) -> List(String) {
     AllStacks -> base
     CutShort(dropped_samples:) ->
       list.append(base, [
-        int.to_string(dropped_samples)
+        fmt.count(dropped_samples)
         <> " samples were taken and are not in any stack.",
       ])
   }
@@ -274,7 +274,7 @@ pub fn caveats(input: Aggregated) -> List(String) {
       let samples = list.fold(empty, 0, fn(sum, stack) { sum + stack.count })
 
       list.append(cut, [
-        int.to_string(samples)
+        fmt.count(samples)
         <> " samples found a process with no stack, which is a hibernating or exiting process; they are drawn as "
         <> profile.function_name(function_of(0, no_stack_frame))
         <> ".",

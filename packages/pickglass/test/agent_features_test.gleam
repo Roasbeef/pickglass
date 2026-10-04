@@ -412,9 +412,23 @@ pub fn the_detail_page_adds_the_agents_detail_and_the_last_results_test() {
   // Words are converted to bytes with the node's word size.
   assert value(data.counters, "self: state words") == Known(80)
   assert value(data.gc, "max heap") == measure.NotApplicable
-  assert value(data.gc, "total heap before the last collection") == Known(4096)
-  assert value(data.gc, "total heap after the last collection")
-    == Missing(measure.ProcessExited)
+  // A collection's counters carry how long ago it ran, so that two equal
+  // figures still read as a result.
+  let assert Ok(before) =
+    list.find(data.gc, fn(counter) {
+      string.starts_with(
+        counter.label,
+        "heap before the requested collection (",
+      )
+    })
+  let assert Ok(after) =
+    list.find(data.gc, fn(counter) {
+      string.starts_with(counter.label, "heap after the requested collection (")
+    })
+
+  assert before.value == Known(4096)
+  assert after.value == Missing(measure.ProcessExited)
+  assert string.ends_with(before.label, " ago)")
 }
 
 pub fn a_process_the_census_does_not_list_has_no_detail_page_test() {

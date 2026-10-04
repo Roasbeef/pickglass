@@ -165,10 +165,11 @@ pub fn the_overview_lists_the_target_and_its_children_with_the_os_figures_test()
       #("child inet_gethost", Known(4096)),
     ]
 
-  // The macOS start time is marked coarse in a note, not hidden.
+  // The macOS start time is marked coarse once under the table, from the
+  // row's start identity, so no row repeats it.
   let assert [target, ..] = page.roles.body
 
-  assert target.note == "start time is good to a second"
+  assert target.note == ""
   assert row(page, "OS resident set (target)").value == Known(900_000)
 }
 

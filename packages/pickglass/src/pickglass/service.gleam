@@ -722,7 +722,7 @@ fn apply(
     // it from here. Waiting for the hub to notice would leave three passes
     // in which commands pass the gate and each wait out the agent's deadline.
     exec.DetachRequested -> #(
-      lose_target(state, "detached"),
+      lose_target(state, seam.detached_by_operator),
       seam.Done("detached"),
     )
 

@@ -503,5 +503,5 @@ pub fn detaching_from_the_page_loses_the_target_and_says_so_test() {
   let state = web_mount.ask(state_on(page, "overview"), msg.DetachViewer)
 
   assert web_mount.refusal_of(state) == None
-  assert page.lost() == Some("detached")
+  assert page.lost() == Some("you detached it")
 }

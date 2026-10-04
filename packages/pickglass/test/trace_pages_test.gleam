@@ -501,3 +501,18 @@ pub fn a_timeline_export_without_the_capability_is_refused_test() {
 
   assert string.contains(reason, "missing capability export")
 }
+
+// A call trace that heard nothing says how many functions were armed and for
+// how long, and not "0 traced calls over 0 functions".
+pub fn an_empty_call_trace_says_what_it_was_armed_on_test() {
+  let empty =
+    probe_book.started(21, policy.CallTree, ["lists"], 1000, 5000, 751)
+    |> probe_book.finish_calltrace(
+      wire.CalltraceSnapshot(..calls_snapshot(), paths: [], slices: []),
+      ffi_dist.system_time_ms(),
+    )
+  let #(_, page) = page_with([empty])
+  let assert Some(ready) = flow_of(on(page, "overview")).ready
+
+  assert ready.summary == "no call to any of the 751 traced functions in 5.00 s"
+}
