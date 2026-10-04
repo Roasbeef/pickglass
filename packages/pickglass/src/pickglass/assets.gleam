@@ -60,9 +60,9 @@ pub fn load() -> Result(Assets, String) {
 
     use priv <- result.try(
       ffi_dist.priv_directory(application)
-      |> result.replace_error(
-        "cannot find the priv directory of " <> application,
-      ),
+      |> result.map_error(fn(_) {
+        "cannot find the priv directory of " <> application
+      }),
     )
     use bytes <- result.try(
       simplifile.read_bits(priv <> "/" <> path)

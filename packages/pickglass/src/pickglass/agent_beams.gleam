@@ -62,7 +62,7 @@ pub fn load(directory: Result(String, Nil)) -> Result(List(Beam), String) {
 fn read_all(directory: String) -> Result(List(Beam), String) {
   use entries <- result.try(
     simplifile.read_directory(directory)
-    |> result.replace_error("cannot read " <> directory),
+    |> result.map_error(fn(_) { "cannot read " <> directory }),
   )
 
   let files =
@@ -82,7 +82,8 @@ fn read_beam(directory: String, file: String) -> Result(Beam, String) {
   let path = directory <> "/" <> file
 
   use bytes <- result.try(
-    simplifile.read_bits(path) |> result.replace_error("cannot read " <> path),
+    simplifile.read_bits(path)
+    |> result.map_error(fn(_) { "cannot read " <> path }),
   )
 
   Ok(Beam(module: string.drop_end(file, 5), file_name: path, bytes:))

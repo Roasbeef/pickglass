@@ -835,14 +835,7 @@ fn find_pin(state: State, token: Token) -> Result(Pin, Nil) {
 }
 
 fn find_pin_by_id(pins: List(Pin), id: Int) -> Result(Pin, Nil) {
-  case pins {
-    [] -> Error(Nil)
-    [entry, ..rest] ->
-      case entry.id == id {
-        True -> Ok(entry)
-        False -> find_pin_by_id(rest, id)
-      }
-  }
+  seq.find(pins, fn(entry) { entry.id == id })
 }
 
 fn unpin(
@@ -1061,14 +1054,7 @@ fn pids_of(
 }
 
 fn find_probe(probes: List(Probe), id: Int) -> Result(Probe, Nil) {
-  case probes {
-    [] -> Error(Nil)
-    [probe, ..rest] ->
-      case probe.id == id {
-        True -> Ok(probe)
-        False -> find_probe(rest, id)
-      }
-  }
+  seq.find(probes, fn(probe) { probe.id == id })
 }
 
 fn read_counters(
@@ -1268,14 +1254,7 @@ fn find_stack_probe(
   probes: List(StackProbe),
   id: Int,
 ) -> Result(StackProbe, Nil) {
-  case probes {
-    [] -> Error(Nil)
-    [probe, ..rest] ->
-      case probe.id == id {
-        True -> Ok(probe)
-        False -> find_stack_probe(rest, id)
-      }
-  }
+  seq.find(probes, fn(probe) { probe.id == id })
 }
 
 // A read is answered by the sampler, which holds the aggregate. The agent

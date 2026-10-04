@@ -157,6 +157,28 @@ pub fn any(items: List(a), satisfying predicate: fn(a) -> Bool) -> Bool {
   }
 }
 
+/// The first element satisfying a predicate.
+///
+/// ## Examples
+///
+/// ```gleam
+/// seq.find([1, 2, 3], fn(n) { n > 1 })
+/// // -> Ok(2)
+/// ```
+pub fn find(
+  items: List(a),
+  satisfying predicate: fn(a) -> Bool,
+) -> Result(a, Nil) {
+  case items {
+    [] -> Error(Nil)
+    [item, ..rest] ->
+      case predicate(item) {
+        True -> Ok(item)
+        False -> find(rest, predicate)
+      }
+  }
+}
+
 /// The elements of `front` followed by those of `back`.
 ///
 /// ## Examples
