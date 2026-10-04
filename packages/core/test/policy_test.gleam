@@ -74,6 +74,7 @@ fn all_commands() -> List(Command) {
     policy.TargetedGc(token(1)),
     policy.SelfMeasure(token(1)),
     policy.ExportCapture("c1", policy.Pprof),
+    policy.Checkpoint("before"),
     policy.Detach,
   ]
 }
@@ -129,6 +130,9 @@ pub fn capability_assignments_test() {
     == [Export]
   assert policy.required_capabilities(policy.Detach) == [Administer]
   assert policy.required_capabilities(policy.ReadMemory) == [Observe]
+  assert policy.required_capabilities(policy.Checkpoint("a")) == [Observe]
+  assert policy.perturbation_of(policy.Checkpoint("a")) == policy.Passive
+  assert policy.describe(policy.Checkpoint("a")) == "checkpoint name=a"
   assert policy.required_capabilities(policy.StopProbe("p")) == [Profile]
 }
 

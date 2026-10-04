@@ -184,6 +184,11 @@ pub type Command {
   /// Write a derived export of a stored capture.
   ExportCapture(capture_id: String, format: ExportFormat)
 
+  /// Record a named checkpoint in the viewer's live capture. It reads
+  /// nothing from the target and writes no file: it is a marker in the
+  /// viewer's own data, which later readings are compared against.
+  Checkpoint(name: String)
+
   /// Detach the agent: it destroys its sessions and exits.
   Detach
 }
@@ -205,7 +210,8 @@ pub fn required_capabilities(command: Command) -> List(Capability) {
     | ReadAudit(_)
     | PinProcess(_)
     | UnpinProcess(_)
-    | ReadProcess(_) -> [Observe]
+    | ReadProcess(_)
+    | Checkpoint(_) -> [Observe]
 
     StartProbe(spec:) -> probe_capabilities(spec.kind)
     StopProbe(_) -> [Profile]
@@ -248,6 +254,7 @@ pub fn confirmation_of(command: Command) -> Confirmation {
     | StopProbe(_)
     | SelfMeasure(_)
     | ExportCapture(..)
+    | Checkpoint(_)
     | Detach -> Direct
   }
 }
@@ -302,6 +309,7 @@ pub fn perturbation_of(command: Command) -> Perturbation {
     | ReadProcess(_)
     | StopProbe(_)
     | ExportCapture(..)
+    | Checkpoint(_)
     | Detach -> Passive
   }
 }
@@ -332,6 +340,7 @@ pub fn command_pins(command: Command) -> List(PinToken) {
     | PinProcess(_)
     | StopProbe(_)
     | ExportCapture(..)
+    | Checkpoint(_)
     | Detach -> []
   }
 }
@@ -352,6 +361,7 @@ pub fn command_name(command: Command) -> String {
     TargetedGc(_) -> "targeted_gc"
     SelfMeasure(_) -> "self_measure"
     ExportCapture(..) -> "export_capture"
+    Checkpoint(_) -> "checkpoint"
     Detach -> "detach"
   }
 }
@@ -376,6 +386,7 @@ pub fn describe(command: Command) -> String {
     | SelfMeasure(token:) -> ["pin=" <> identity.pin_to_string(token)]
     StartProbe(spec:) -> describe_spec(spec)
     StopProbe(probe_id:) -> ["probe=" <> probe_id]
+    Checkpoint(name:) -> ["name=" <> name]
     ExportCapture(capture_id:, format:) -> [
       "capture=" <> capture_id,
       "format=" <> export_code(format),
@@ -693,6 +704,7 @@ fn check_spec(command: Command) -> Result(Nil, Denial) {
     | TargetedGc(_)
     | SelfMeasure(_)
     | ExportCapture(..)
+    | Checkpoint(_)
     | Detach -> Ok(Nil)
   }
 }
@@ -794,6 +806,7 @@ fn scope_of(command: Command) -> PlanScope {
     | TargetedGc(_)
     | SelfMeasure(_)
     | ExportCapture(..)
+    | Checkpoint(_)
     | Detach ->
       PlanScope(targets: command_pins(command), modules: [], duration_ms: 0)
   }
