@@ -81,6 +81,13 @@ width into their parent, caps the box count, and reports omitted boxes
 `export` and `export/{collapsed,speedscope,chrome_trace}` return an
 `Export` with text and a loss list.
 
+`wire` holds the agent's reply decoders and the request encoders. It grows
+additively: the original `Request` and the first-release records keep their
+shapes, new replies are new `Reply` variants, and the requests added later
+(`wire.ExtendedRequest`, encoded by `encode_extended_request`) are a type of
+their own, so the viewer's exhaustive matches keep compiling. The agent's
+`CLAUDE.md` lists every request and reply shape.
+
 `policy.Command` is the closed set of viewer-to-agent actions.
 `required_capabilities` is an exhaustive `case`. `Authorized(a)` is opaque
 and only `authorize` and `confirm` build it. Probes and targeted GC go

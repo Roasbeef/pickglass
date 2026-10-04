@@ -22,7 +22,7 @@
 //// `start` spawns the helper with its heap capped. `init` sends the helper
 //// a `Begin` message and returns at once, so that `gen_server:start` never
 //// waits on a slow target. `handle_info` then handles `Begin` (read the
-//// label, refuse if `measure` is not advertised, send the request and arm the
+//// label, refuse if the capability is not advertised, send the request and arm the
 //// deadline), the target's reply, the deadline, and the target's death.
 //// Each ends the helper after answering the viewer.
 
@@ -173,6 +173,7 @@ fn classify_tuple(message: Term, state: State) -> Event {
             True -> Answered(ffi_term.element(3, message))
             False -> Ignored
           }
+
         // `{'DOWN', Ref, process, Pid, Reason}` for the target.
         5 ->
           case

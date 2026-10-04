@@ -239,6 +239,7 @@ fn classify_tuple(message: Term, state: State) -> Event {
       case ffi_term.tuple_size(message) {
         // `{pickglass_sampler_read | pickglass_sampler_stop, ReplyTo, Ref}`.
         3 -> classify_request(message)
+
         // `{'DOWN', Ref, process, Pid, Reason}` for the agent.
         5 ->
           case
@@ -293,8 +294,12 @@ fn sample(state: State) -> Next(State) {
         False -> Noreply(next_round(take_round(state)))
       }
     }
+
     // A stray tick after sampling ended is ignored.
-    _ -> Noreply(state)
+    stacks.DeadlineReached
+    | stacks.SampleBudget
+    | stacks.TargetsGone
+    | stacks.Stopped -> Noreply(state)
   }
 }
 
@@ -443,7 +448,10 @@ fn snapshot(state: State, reply_to: Pid, request: Reference, ask: Ask) -> Nil {
 fn meter(state: State) -> reply.Meter {
   let end = case state.stop {
     stacks.Sampling -> ffi_proc.now_ms()
-    _ -> state.ended_ms
+    stacks.DeadlineReached
+    | stacks.SampleBudget
+    | stacks.TargetsGone
+    | stacks.Stopped -> state.ended_ms
   }
   let elapsed = end - state.started_ms
   let basis = case elapsed < 1 {
