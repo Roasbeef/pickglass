@@ -48,6 +48,24 @@ pub type MonitorKind {
 pub type SpawnOption {
   Monitor
   MaxHeapSize(limit: Term)
+  Priority(level: PriorityLevel)
+  MessageQueueData(location: QueueData)
+}
+
+/// Where a process keeps the messages in its mailbox. `OffHeap` keeps them
+/// outside the heap, so a long mailbox adds nothing to a collection and does
+/// not count toward `max_heap_size`. A tracer under a flood needs that: with
+/// the messages on its heap, each collection copies the backlog, takes longer
+/// as the backlog grows, and lets the backlog grow further while it runs.
+pub type QueueData {
+  OffHeap
+}
+
+/// The scheduling priority of a process. A tracer runs at `High` so that it
+/// is scheduled promptly while a traced process floods it, which keeps the
+/// backlog it must stop at small.
+pub type PriorityLevel {
+  High
 }
 
 /// Keys of the `max_heap_size` option map.
@@ -76,6 +94,7 @@ pub type ExitSignal {
 /// The unit `monotonic_time/1` is asked for.
 pub type TimeUnit {
   Millisecond
+  Nanosecond
   Native
 }
 

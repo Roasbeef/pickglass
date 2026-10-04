@@ -143,7 +143,7 @@ pub fn start(
 
   use _ <- fallible.then(check_patterns(distinct))
 
-  let session = ffi_trace.session_create(agent)
+  let session = ffi_trace.session_create(agent, ffi_trace.PickglassCounters)
 
   case arm(session, distinct, mode, selection, agent) {
     Ok(matched) -> {
@@ -208,7 +208,17 @@ fn covered_by_wildcard(pattern: Pattern, all: List(Pattern)) -> Bool {
   })
 }
 
-fn check_patterns(patterns: List(Pattern)) -> Result(Nil, Refusal) {
+/// Refuse a pattern set that names a wildcard function on a module every
+/// process calls. A probe over pinned processes uses the same list, because
+/// the cost of tracing a hot module is paid in the pinned process too.
+///
+/// ## Examples
+///
+/// ```gleam
+/// check_patterns([Pattern(lists, any)])
+/// // -> Error(Refusal("pattern_too_broad", _))
+/// ```
+pub fn check_patterns(patterns: List(Pattern)) -> Result(Nil, Refusal) {
   case patterns {
     [] -> Ok(Nil)
     [pattern, ..rest] -> {
