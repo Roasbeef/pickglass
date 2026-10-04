@@ -1,20 +1,19 @@
 //// Pickglass: a runtime inspector and performance and trace viewer for the
 //// BEAM, written in Gleam.
 ////
-//// This module is a placeholder. The product design is not settled, so the
-//// package holds only what the build, the release and the smoke test need:
-//// a version, a one-line banner, and a `main` the self-contained release
-//// launcher calls. The launcher boots the bundled runtime, runs
-//// `pickglass@@main:run(pickglass)`, and the banner printed here is what
-//// `make release-smoke` compares against the version in `gleam.toml`. That
-//// comparison is the reason `version` exists at all today: it proves the
-//// artifact that booted is the artifact that was built.
+//// With no arguments the program prints its banner, which is what `make
+//// release-smoke` compares against the version in `gleam.toml`: that
+//// comparison proves the artifact that booted is the artifact that was
+//// built. With `attach` it joins a profiled node, pushes the agent, prints
+//// what the agent reports and detaches; `pickglass/cli` owns that.
 ////
-//// The workspace will grow a pure core, an impure collector host and a
-//// Lustre web package beside this one. Until then there is nothing for them
-//// to depend on, so nothing is exported for them.
+//// The release launcher boots the bundled runtime and runs
+//// `pickglass@@main:run(pickglass)`, which calls `main` below.
 
+import argv
 import gleam/io
+import pickglass/cli
+import pickglass/internal/ffi_os
 
 /// The package version, kept equal to the `version` in `gleam.toml`.
 /// `make release-smoke` fails when the two drift, so a release can never
@@ -41,9 +40,9 @@ pub fn banner() -> String {
   "pickglass " <> version
 }
 
-/// Print the banner and return. The release launcher evaluates this through
-/// the generated `pickglass@@main` entry module, which halts the emulator
-/// once it returns.
+/// Run the command line. With no arguments, print the banner and return;
+/// the release launcher halts the emulator once it does. With arguments, run
+/// the command and end the VM with its exit status.
 ///
 /// ## Examples
 ///
@@ -52,5 +51,14 @@ pub fn banner() -> String {
 /// // prints "pickglass 0.1.0"
 /// ```
 pub fn main() -> Nil {
-  io.println(banner())
+  case cli.parse(argv.load().arguments) {
+    Ok(cli.ShowBanner) -> io.println(banner())
+    Ok(cli.ShowHelp) -> io.println(cli.usage)
+    Ok(cli.Attach(options)) -> ffi_os.halt(cli.run_attach(options))
+    Error(message) -> {
+      io.println_error("pickglass: " <> message)
+      io.println_error(cli.usage)
+      ffi_os.halt(2)
+    }
+  }
 }
