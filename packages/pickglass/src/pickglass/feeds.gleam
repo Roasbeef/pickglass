@@ -1700,7 +1700,10 @@ fn ready_summary(
     policy.SchedulingGc, _, probe_book.SchedulingDetail(snapshot:) ->
       Ok(#(
         fmt.count(list.length(snapshot.processes))
-          <> " processes, "
+          <> case snapshot.processes {
+          [_] -> " process, "
+          _ -> " processes, "
+        }
           <> fmt.count(
           list.fold(snapshot.processes, 0, fn(total, process) {
             total + process.runs

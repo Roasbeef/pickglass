@@ -399,7 +399,7 @@ pub fn a_finished_recording_is_ready_on_the_timeline_page_test() {
 
   assert ready.probe == "31"
   assert ready.opens == model.OpensTimeline
-  assert ready.summary == "1 processes, 10 runs"
+  assert ready.summary == "1 process, 10 runs"
 }
 
 // The stack summary says how the samples split, since the profile's page

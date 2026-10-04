@@ -63,7 +63,9 @@ pub fn view(
   let modules = ui_state.plan.modules
   let parts = case current {
     page.Probes -> [refusal(data.refused)]
-    page.Profile -> [
+
+    // A page that shows the result a banner links to does not link to itself.
+    page.Profile | page.Timeline -> [
       refusal(data.refused),
       plan(data.pending, modules),
       running(data),

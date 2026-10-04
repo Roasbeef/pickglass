@@ -168,3 +168,24 @@ pub fn a_notice_is_drawn_once_not_beside_the_form_too_test() {
 
   assert support.count(html, "Asked the viewer to") == 1
 }
+
+pub fn the_timeline_page_does_not_offer_itself_test() {
+  let ready =
+    model.FlowModel(
+      ..fixture.flow(),
+      pending: None,
+      running: [],
+      ready: Some(model.ReadyProfile(
+        probe: "p-9",
+        age_ms: 1000,
+        summary: "1 process, 40 runs",
+        opens: model.OpensTimeline,
+      )),
+    )
+
+  let on_timeline = html_after(page.Timeline, [msg.Fed(msg.FedFlow(ready))])
+  let on_overview = html_after(page.Overview, [msg.Fed(msg.FedFlow(ready))])
+
+  assert !string.contains(on_timeline, "Recording ready")
+  assert string.contains(on_overview, "Recording ready")
+}
