@@ -79,6 +79,15 @@ pub type Request {
   /// Ask for a plan for a garbage collection of one pinned process.
   PlanTargetedGc(token: String)
 
+  /// Ask for a plan for asking one pinned process to measure itself.
+  PlanSelfMeasure(token: String)
+
+  /// Read one pinned process in detail.
+  ReadProcess(token: String)
+
+  /// Walk the spawn edges of the node.
+  ReadSupervision
+
   /// Confirm a plan this page's principal made, by the id its card showed.
   ConfirmPlan(plan_id: String)
 
@@ -128,6 +137,21 @@ pub type Reply {
   /// A counters probe stopped, with its last reading.
   ProbeStopped(snapshot: wire.CountersSnapshot)
 
+  /// A stack probe stopped, with what it sampled.
+  StacksStopped(snapshot: wire.StacksSnapshot)
+
+  /// A targeted collection ran, with the heap before and after.
+  Collected(snapshot: wire.CollectionSnapshot)
+
+  /// A process measured itself.
+  Measured(snapshot: wire.MeasureSnapshot)
+
+  /// One process in detail.
+  ProcessRead(detail: wire.ProcessDetail)
+
+  /// The spawn edges of the node.
+  SupervisionRead(snapshot: wire.SupervisionSnapshot)
+
   /// The newest audit entries, newest first.
   AuditTail(entries: List(audit.Entry))
 
@@ -140,6 +164,16 @@ pub type Reply {
   /// The request was refused. The text is the gate's reason, a validation
   /// message, or what the agent said.
   Rejected(reason: String)
+}
+
+/// What a targeted collection or a self-measure left behind, kept so the
+/// process's page can show it after the request returned.
+pub type ProcessResult {
+  /// A garbage collection ran and read the heap before and after.
+  GcRan(snapshot: wire.CollectionSnapshot, at_ms: Int)
+
+  /// A process measured itself.
+  SelfMeasured(snapshot: wire.MeasureSnapshot, at_ms: Int)
 }
 
 /// Whether a pin can still be used.
@@ -194,6 +228,8 @@ pub type Page {
     checkpoints: fn() -> List(Mark),
     /// The probes, newest first.
     probes: fn() -> List(ProbeRecord),
+    /// What targeted collections and self-measures returned, newest first.
+    results: fn() -> List(ProcessResult),
     /// The names of the capture files that can be compared, newest first.
     /// Empty when the principal may not observe.
     captures: fn() -> List(String),
@@ -271,6 +307,13 @@ pub fn intent(request: Request) -> Result(Intent, String) {
     PlanTargetedGc(token) ->
       token_of(token)
       |> result.map(fn(token) { Plan(policy.TargetedGc(token)) })
+    PlanSelfMeasure(token) ->
+      token_of(token)
+      |> result.map(fn(token) { Plan(policy.SelfMeasure(token)) })
+    ReadProcess(token) ->
+      token_of(token)
+      |> result.map(fn(token) { Run(policy.ReadProcess(token), NoFollow) })
+    ReadSupervision -> Ok(Run(policy.ReadSupervision, NoFollow))
     ConfirmPlan(id) -> Ok(Confirm(id))
     CancelPlan(id) -> Ok(Cancel(id))
     StopProbe(id) -> Ok(Run(policy.StopProbe(id), NoFollow))

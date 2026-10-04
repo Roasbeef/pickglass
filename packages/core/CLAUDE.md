@@ -131,3 +131,5 @@ None. This package defines wire and capture vocabulary but sends nothing.
 - `docs/design/plan.md` is the plan of record.
 - `docs/design/concept-opus.md` sections 4 and 5 describe the data model
   and the analyses in detail.
+
+`wire.Request` has an `Extended(ExtendedRequest)` variant so the viewer's single `ask` carries the requests added after the first wire release. `policy.Checkpoint` records a viewer-side checkpoint (Observe) and `SelfMeasure` is plan-first.

@@ -1079,7 +1079,7 @@ fn plan_card() -> Option(model.PlanCard) {
       Some(
         model.PlanCard(
           key: key.make("plan.1"),
-          kind: policy.Counters,
+          what: model.ProbePlan(policy.Counters),
           plan:,
           matched: Known(23),
           target_labels: ["<0.4411.0> session s-12 / restart_keeper (pin p-17)"],

@@ -602,13 +602,26 @@ pub type SupervisionModel {
 
 // ------------------------------------------------------------ probes
 
+/// What a plan waiting for confirmation will do.
+pub type PlanWhat {
+  /// Start a probe of this kind.
+  ProbePlan(kind: policy.ProbeKind)
+
+  /// Collect the garbage of one pinned process, which stops it while it
+  /// runs.
+  GcPlan
+
+  /// Ask one pinned process to measure a term it holds.
+  MeasurePlan
+}
+
 /// A plan waiting for confirmation.
 pub type PlanCard {
   PlanCard(
     /// The key to confirm or cancel this plan.
     key: Key,
-    /// The probe kind.
-    kind: policy.ProbeKind,
+    /// What the plan is for.
+    what: PlanWhat,
     /// The core plan, with its scope, estimate and perturbation.
     plan: policy.Plan,
     /// How many functions the agent's own validation matched.

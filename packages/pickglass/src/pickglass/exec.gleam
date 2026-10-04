@@ -12,9 +12,12 @@
 //// triggers a collection. An export is a write of the viewer's own data and
 //// belongs to the service. Both come back as `NotAnAgentCommand`.
 ////
-//// Two commands the policy models have no wire request yet: targeted GC and
-//// self-measure, and every probe kind but counters. They come back as
-//// `Unsupported` with the reason, never as a silent success.
+//// Probes come in two kinds the agent can run: counters (one module with
+//// the first wire release's request, several with the counter-set request)
+//// and stack sampling. The call-tree and scheduling probes have no agent
+//// request and come back as `Unsupported` with the reason, never as a
+//// silent success. A stop or a poll must go to the right kind of probe, so
+//// the caller says which kind a probe id belongs to.
 ////
 //// A probe's targets are always the pins its plan named. `wire.AllProcesses`
 //// is never constructed here: the agent supports a probe over every
@@ -22,6 +25,7 @@
 
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import pickglass/remote.{type Failure, type Remote}
 import pickglass_core/identity.{type PinToken}
@@ -45,6 +49,21 @@ pub type Outcome {
 
   /// A counters probe stopped, with its last reading.
   ProbeStopped(snapshot: wire.CountersSnapshot)
+
+  /// A stack probe stopped, with what it sampled.
+  StacksStopped(snapshot: wire.StacksSnapshot)
+
+  /// A targeted collection ran.
+  Collected(snapshot: wire.CollectionSnapshot)
+
+  /// A process measured itself.
+  Measured(snapshot: wire.MeasureSnapshot)
+
+  /// One pinned process in detail.
+  ProcessRead(detail: wire.ProcessDetail)
+
+  /// The spawn edges of the node.
+  SupervisionRead(snapshot: wire.SupervisionSnapshot)
 
   /// The agent was told to detach.
   DetachRequested
@@ -70,22 +89,22 @@ pub type Outcome {
 /// exec.run(remote, authorized)
 /// // -> PinIssued(token, "<0.123.0>")
 /// ```
-pub fn run(remote: Remote, authorized: Authorized(Command)) -> Outcome {
+pub fn run(
+  remote: Remote,
+  authorized: Authorized(Command),
+  kind_of: fn(String) -> Option(policy.ProbeKind),
+) -> Outcome {
   case policy.authorized_command(authorized) {
     policy.PinProcess(pid_text:) -> pin(remote, pid_text)
     policy.UnpinProcess(token:) -> unpin(remote, token)
     policy.StartProbe(spec:) -> start_probe(remote, spec)
-    policy.StopProbe(probe_id:) -> stop_probe(remote, probe_id)
+    policy.StopProbe(probe_id:) -> stop_probe(remote, probe_id, kind_of)
     policy.Detach -> detach(remote)
 
-    policy.TargetedGc(_) ->
-      Unsupported("the agent has no targeted garbage collection yet")
-    policy.SelfMeasure(_) ->
-      Unsupported("the agent has no self-measure request yet")
-    policy.ReadProcess(_) ->
-      Unsupported("the agent has no process detail request yet")
-    policy.ReadSupervision ->
-      Unsupported("the agent has no supervision walk yet")
+    policy.TargetedGc(token:) -> collect(remote, token)
+    policy.SelfMeasure(token:) -> measure(remote, token)
+    policy.ReadProcess(token:) -> read_process(remote, token)
+    policy.ReadSupervision -> read_supervision(remote)
 
     policy.ReadCensus(_)
     | policy.ReadOwners
@@ -112,46 +131,96 @@ fn unpin(remote: Remote, token: PinToken) -> Outcome {
   }
 }
 
-// The agent traces one module per request, and a probe names its processes
-// by pin. Any other shape is refused here, with the reason, rather than
-// narrowed silently.
+// A counters probe over one module is the first release's request; several
+// modules are one counter set. A stack probe samples the pinned processes at
+// a fixed rate, bounded by the samples the duration allows. A probe always
+// names the pins its plan named; `wire.AllProcesses` is never constructed.
 fn start_probe(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
   case spec.kind, spec.modules {
     policy.Counters, [module] ->
-      case
-        remote.ask(
-          wire.AskStartCounters(
-            module,
-            "_",
-            wire.PinnedProcesses(spec.targets),
-            spec.duration_ms,
-          ),
-          ask_deadline_ms,
-        )
-      {
-        Ok(wire.CountersStarted(probe_id, matched, deadline)) ->
-          ProbeStarted(probe_id, matched, deadline)
-        Ok(other) -> Unexpected(string.inspect(other))
-        Error(failure) -> Failed(failure)
-      }
-    policy.Counters, modules ->
-      Unsupported(
-        "the agent traces one module per probe; the plan named "
-        <> int.to_string(list.length(modules)),
+      counters_started(
+        remote,
+        wire.AskStartCounters(
+          module,
+          "_",
+          wire.PinnedProcesses(spec.targets),
+          spec.duration_ms,
+        ),
       )
-    policy.Sampling, _ | policy.CallTree, _ | policy.SchedulingGc, _ ->
+    policy.Counters, modules ->
+      counters_started(
+        remote,
+        wire.Extended(wire.AskStartCounterSet(
+          list.map(modules, fn(module) { wire.CounterPattern(module, "_") }),
+          wire.PinnedProcesses(spec.targets),
+          spec.duration_ms,
+          wire.CountTime,
+        )),
+      )
+    policy.Sampling, _ -> stacks_started(remote, spec)
+    policy.CallTree, _ | policy.SchedulingGc, _ ->
       Unsupported(
-        "the agent has only counters probes yet; "
+        "the agent has no "
         <> policy.probe_code(spec.kind)
-        <> " is not available",
+        <> " probe; counters and sampling are available",
       )
   }
 }
 
-fn stop_probe(remote: Remote, probe_id: String) -> Outcome {
-  case int.parse(probe_id) {
-    Error(Nil) -> Unsupported("a probe id is the integer the agent issued")
-    Ok(id) ->
+fn counters_started(remote: Remote, request: wire.Request) -> Outcome {
+  case remote.ask(request, ask_deadline_ms) {
+    Ok(wire.CountersStarted(probe_id, matched, deadline)) ->
+      ProbeStarted(probe_id, matched, deadline)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+/// The rate a stack probe asks for, in samples per second. The agent cuts it
+/// to what the number of targets allows.
+pub const sampling_hz = 50
+
+fn stacks_started(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
+  let seconds = int.max(1, spec.duration_ms / 1000)
+  let samples =
+    int.min(
+      200_000,
+      sampling_hz * seconds * int.max(1, list.length(spec.targets)),
+    )
+
+  case
+    remote.ask(
+      wire.Extended(wire.AskStartStacks(
+        spec.targets,
+        sampling_hz,
+        spec.duration_ms,
+        samples,
+      )),
+      ask_deadline_ms,
+    )
+  {
+    Ok(wire.StacksStarted(probe_id, targets, _, duration, _)) ->
+      ProbeStarted(probe_id, targets, duration)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+fn stop_probe(
+  remote: Remote,
+  probe_id: String,
+  kind_of: fn(String) -> Option(policy.ProbeKind),
+) -> Outcome {
+  case int.parse(probe_id), kind_of(probe_id) {
+    Error(Nil), _ -> Unsupported("a probe id is the integer the agent issued")
+    Ok(_), None -> Unsupported("the viewer has no probe " <> probe_id)
+    Ok(id), Some(policy.Sampling) ->
+      case remote.ask(wire.Extended(wire.AskStopStacks(id)), ask_deadline_ms) {
+        Ok(wire.StacksReport(snapshot)) -> StacksStopped(snapshot)
+        Ok(other) -> Unexpected(string.inspect(other))
+        Error(failure) -> Failed(failure)
+      }
+    Ok(id), Some(_) ->
       case remote.ask(wire.AskStopCounters(id), ask_deadline_ms) {
         Ok(wire.CountersReport(snapshot)) -> ProbeStopped(snapshot)
         Ok(other) -> Unexpected(string.inspect(other))
@@ -160,10 +229,69 @@ fn stop_probe(remote: Remote, probe_id: String) -> Outcome {
   }
 }
 
-/// What asking a running counters probe how it is doing gave.
+// An intrusive collection stops the target while it runs, so its deadline is
+// the longest the agent allows a worker to take.
+const gc_deadline_ms = 5000
+
+fn collect(remote: Remote, token: PinToken) -> Outcome {
+  case
+    remote.ask(
+      wire.Extended(wire.AskGc(token, gc_deadline_ms)),
+      gc_deadline_ms + 2000,
+    )
+  {
+    Ok(wire.CollectionReport(snapshot)) -> Collected(snapshot)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+const measure_budget_ms = 2000
+
+fn measure(remote: Remote, token: PinToken) -> Outcome {
+  case
+    remote.ask(
+      wire.Extended(wire.AskMeasure(token, measure_budget_ms)),
+      measure_budget_ms + 2000,
+    )
+  {
+    Ok(wire.MeasureReport(snapshot)) -> Measured(snapshot)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+fn read_process(remote: Remote, token: PinToken) -> Outcome {
+  case
+    remote.ask(wire.Extended(wire.AskProcessDetail(token)), ask_deadline_ms)
+  {
+    Ok(wire.ProcessDetailReport(detail)) -> ProcessRead(detail)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+fn read_supervision(remote: Remote) -> Outcome {
+  case
+    remote.ask(
+      wire.Extended(wire.AskSupervision(200_000, 10_000)),
+      ask_deadline_ms,
+    )
+  {
+    Ok(wire.SupervisionReport(snapshot)) -> SupervisionRead(snapshot)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+/// What asking a running probe how it is doing gave.
 pub type Poll {
-  /// The agent's snapshot, whose state says whether the probe has ended.
+  /// The agent's counters snapshot, whose state says whether the probe has
+  /// ended.
   Polled(snapshot: wire.CountersSnapshot)
+
+  /// The agent's stack snapshot.
+  PolledStacks(snapshot: wire.StacksSnapshot)
 
   /// The agent no longer has the probe, or refused; the text says why.
   PollRefused(reason: String)
@@ -179,18 +307,53 @@ pub type Poll {
 /// ## Examples
 ///
 /// ```gleam
-/// exec.poll_counters(remote, "7")
+/// exec.poll_probe(remote, "7", policy.Counters)
 /// ```
-pub fn poll_counters(remote: Remote, probe_id: String) -> Poll {
+pub fn poll_probe(
+  remote: Remote,
+  probe_id: String,
+  kind: policy.ProbeKind,
+) -> Poll {
   case int.parse(probe_id) {
     Error(Nil) -> PollRefused("a probe id is the integer the agent issued")
     Ok(id) ->
-      case remote.ask(wire.AskReadCounters(id), ask_deadline_ms) {
-        Ok(wire.CountersReport(snapshot)) -> Polled(snapshot)
-        Ok(other) -> PollRefused(string.inspect(other))
-        Error(remote.TimedOut) -> PollPending
-        Error(failure) -> PollRefused(remote.describe(failure))
+      case kind {
+        policy.Sampling ->
+          polled(
+            remote.ask(wire.Extended(wire.AskReadStacks(id)), ask_deadline_ms),
+            fn(reply) {
+              case reply {
+                wire.StacksReport(snapshot) -> Ok(PolledStacks(snapshot))
+                _ -> Error(Nil)
+              }
+            },
+          )
+        policy.Counters | policy.CallTree | policy.SchedulingGc ->
+          polled(
+            remote.ask(wire.AskReadCounters(id), ask_deadline_ms),
+            fn(reply) {
+              case reply {
+                wire.CountersReport(snapshot) -> Ok(Polled(snapshot))
+                _ -> Error(Nil)
+              }
+            },
+          )
       }
+  }
+}
+
+fn polled(
+  answer: Result(wire.Reply, Failure),
+  expected: fn(wire.Reply) -> Result(Poll, Nil),
+) -> Poll {
+  case answer {
+    Ok(reply) ->
+      case expected(reply) {
+        Ok(found) -> found
+        Error(Nil) -> PollRefused(string.inspect(reply))
+      }
+    Error(remote.TimedOut) -> PollPending
+    Error(failure) -> PollRefused(remote.describe(failure))
   }
 }
 
@@ -201,13 +364,22 @@ pub fn poll_counters(remote: Remote, probe_id: String) -> Poll {
 /// ## Examples
 ///
 /// ```gleam
-/// exec.release_counters(remote, "7")
+/// exec.release_probe(remote, "7", policy.Counters)
 /// ```
-pub fn release_counters(remote: Remote, probe_id: String) -> Nil {
+pub fn release_probe(
+  remote: Remote,
+  probe_id: String,
+  kind: policy.ProbeKind,
+) -> Nil {
   case int.parse(probe_id) {
     Error(Nil) -> Nil
     Ok(id) -> {
-      let _ = remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
+      let _ = case kind {
+        policy.Sampling ->
+          remote.ask(wire.Extended(wire.AskStopStacks(id)), ask_deadline_ms)
+        policy.Counters | policy.CallTree | policy.SchedulingGc ->
+          remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
+      }
 
       Nil
     }

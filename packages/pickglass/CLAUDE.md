@@ -49,6 +49,18 @@ checks (loopback `Host`, `Sec-Fetch-Site`, `Origin`, cookies, CSP). `frame`
 checks the browser's WebSocket frames. `host` is the mist server.
 `assets` is the closed list of static files.
 
+Agent features: `exec` runs counters (one module, or a counter set for
+several) and stack-sampling probes, targeted collections, self-measures,
+process detail and the supervision walk; a stop or poll names the probe's
+kind. A finished stack probe goes through `profile_from_stacks`.
+`supervision_build` turns the spawn edges into the page's tree, bounded at
+400 nodes. `feeds` also builds the process detail page (address
+`/process/<key>`, carried to the feeder as the slug `process-detail:<key>`),
+node facts (uptime, creation, scheduler counts, allocator carriers, read by
+the hub every 15th pass) and the owners remainder from the agent's totals.
+A collection and a self-measure are planned and confirmed like a probe, and
+the service keeps their results for the process's page.
+
 Pages: `seam` is the contract with the web package: `seam.Request` (what a
 page may ask), `seam.intent` (request to policy command), `seam.Page` (the
 closures a page's application gets, bound to the principal fixed at socket

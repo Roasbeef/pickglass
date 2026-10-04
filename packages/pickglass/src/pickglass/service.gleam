@@ -109,6 +109,7 @@ pub opaque type Message {
   Pins(reply: Subject(List(seam.PinCard)))
   Checkpoints(reply: Subject(List(Mark)))
   Probes(reply: Subject(List(ProbeRecord)))
+  Results(reply: Subject(List(seam.ProcessResult)))
   Captures(principal: Principal, reply: Subject(List(String)))
   ReadCapture(
     principal: Principal,
@@ -132,6 +133,8 @@ type State {
     marks: List(Mark),
     /// Probes, newest first.
     probes: List(ProbeRecord),
+    /// Collections and self-measures, newest first, at most `max_results`.
+    results: List(seam.ProcessResult),
     downloads: downloads.Registry,
   )
 }
@@ -168,6 +171,7 @@ pub fn start(config: Config) -> Result(Service, String) {
         gate: gate.new(boot, target),
         marks: list.reverse(config.marks),
         probes: config.probes,
+        results: [],
         downloads: downloads.new(),
       ))
       |> actor.selecting(
@@ -238,6 +242,12 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
 
     Checkpoints(reply) -> {
       process.send(reply, list.reverse(state.marks))
+
+      actor.continue(state)
+    }
+
+    Results(reply) -> {
+      process.send(reply, state.results)
 
       actor.continue(state)
     }
@@ -398,7 +408,11 @@ fn execute(
   let command = policy.authorized_command(authorized)
   let now = state.config.clock()
 
-  case exec.run(state.remote, authorized) {
+  case
+    exec.run(state.remote, authorized, fn(id) {
+      kind_of_probe(state.probes, id)
+    })
+  {
     exec.PinIssued(token, pid_text) -> #(
       State(..state, gate: gate.record_pin(state.gate, token, pid_text, now)),
       seam.PinIssued(identity.pin_to_string(token), pid_text),
@@ -420,6 +434,22 @@ fn execute(
     exec.ProbeStopped(snapshot) -> #(
       State(..state, probes: close_probe(state.probes, snapshot, now)),
       seam.ProbeStopped(snapshot),
+    )
+
+    exec.Collected(snapshot) -> #(
+      remember(state, seam.GcRan(snapshot, now)),
+      seam.Collected(snapshot),
+    )
+    exec.Measured(snapshot) -> #(
+      remember(state, seam.SelfMeasured(snapshot, now)),
+      seam.Measured(snapshot),
+    )
+    exec.ProcessRead(detail) -> #(state, seam.ProcessRead(detail))
+    exec.SupervisionRead(snapshot) -> #(state, seam.SupervisionRead(snapshot))
+
+    exec.StacksStopped(snapshot) -> #(
+      State(..state, probes: close_stacks(state.probes, snapshot, now)),
+      seam.StacksStopped(snapshot),
     )
 
     exec.DetachRequested -> #(state, seam.Done("detached"))
@@ -587,6 +617,29 @@ fn record_started(
 
 // The operator's stop returns the probe's last snapshot; the record that
 // named it is closed with it.
+/// How many collection and self-measure results the service keeps.
+pub const max_results = 20
+
+fn remember(state: State, result: seam.ProcessResult) -> State {
+  State(..state, results: list.take([result, ..state.results], max_results))
+}
+
+fn close_stacks(
+  probes: List(ProbeRecord),
+  snapshot: wire.StacksSnapshot,
+  now: Int,
+) -> List(ProbeRecord) {
+  list.map(probes, fn(probe) {
+    case
+      probe.id == int.to_string(snapshot.probe_id),
+      probe_book.is_running(probe)
+    {
+      True, True -> probe_book.finish_stacks(probe, snapshot, now)
+      _, _ -> probe
+    }
+  })
+}
+
 fn close_probe(
   probes: List(ProbeRecord),
   snapshot: wire.CountersSnapshot,
@@ -629,18 +682,37 @@ fn poll_probes(state: State) -> State {
 fn poll_one(state: State, probe: ProbeRecord) -> ProbeRecord {
   let now = state.config.clock()
 
-  case exec.poll_counters(state.remote, probe.id) {
+  case exec.poll_probe(state.remote, probe.id, probe.kind) {
     exec.Polled(snapshot) ->
       case snapshot.state {
         wire.ProbeRunning -> probe
         wire.ProbeFinished | wire.ProbeStopped -> {
-          exec.release_counters(state.remote, probe.id)
+          exec.release_probe(state.remote, probe.id, probe.kind)
 
           probe_book.finish_counters(probe, snapshot, now)
         }
       }
+    exec.PolledStacks(snapshot) ->
+      case snapshot.state {
+        wire.ProbeRunning -> probe
+        wire.ProbeFinished | wire.ProbeStopped -> {
+          exec.release_probe(state.remote, probe.id, probe.kind)
+
+          probe_book.finish_stacks(probe, snapshot, now)
+        }
+      }
     exec.PollRefused(reason) -> probe_book.finish_lost(probe, reason, now)
     exec.PollPending -> probe
+  }
+}
+
+fn kind_of_probe(
+  probes: List(ProbeRecord),
+  id: String,
+) -> Option(policy.ProbeKind) {
+  case list.find(probes, fn(probe) { probe.id == id }) {
+    Ok(probe) -> Some(probe.kind)
+    Error(Nil) -> None
   }
 }
 
@@ -741,6 +813,9 @@ pub fn page_for(service: Service, principal: Principal) -> seam.Page {
     },
     probes: fn() {
       process.call(service.subject, 5000, fn(reply) { Probes(reply) })
+    },
+    results: fn() {
+      process.call(service.subject, 5000, fn(reply) { Results(reply) })
     },
     captures: fn() {
       process.call(service.subject, 5000, fn(reply) {

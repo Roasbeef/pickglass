@@ -13,6 +13,7 @@
 //// starts under a deadline, so a slow agent costs a skipped tick and never
 //// blocks the hub.
 
+import gleam/list
 import gleam/result
 import pickglass/os_reader
 import pickglass/remote.{type Remote}
@@ -36,8 +37,26 @@ pub type Observation {
     /// The OS's account of the target's process and the processes it
     /// started. Not part of `answered`: the agent has nothing to do with it.
     os: Result(List(os_reader.Reading), String),
+    /// Totals over every process the census scanned, listed or not. Not
+    /// part of a capture.
+    totals: Result(wire.CensusTotals, String),
+    /// Node facts and allocator carriers. Read on the first pass and every
+    /// `system_every` passes after, since the carrier walk is the most
+    /// expensive thing the agent does for the viewer; `Error` on the others.
+    /// Not part of a capture: its facts go into the capture's header.
+    system: Result(wire.SystemSnapshot, String),
   )
 }
+
+/// How many passes apart the node facts are read.
+pub const system_every = 15
+
+/// The reason a pass that did not read the node facts gives.
+pub const system_skipped = "not read in this pass"
+
+/// The reason an observation read back from a capture gives for its census
+/// totals.
+pub const totals_not_recorded = "a capture does not record the census totals"
 
 /// Whether the pass asks the agent to turn scheduler wall time on first.
 /// The agent holds the flag until it detaches, so the first pass turns it on
@@ -88,14 +107,24 @@ pub fn collect(
     Ok(wire.MemoryReport(snapshot)) -> Ok(snapshot)
     other -> Error(reason_of(other, "memory"))
   }
-  let census = case
+  let owners = case
     remote.ask(
-      wire.AskCensus(budget.max_scanned, budget.top_k),
+      wire.Extended(wire.AskOwners(budget.max_scanned, budget.top_k)),
       ask_deadline_ms,
     )
   {
-    Ok(wire.CensusReport(snapshot)) -> Ok(snapshot)
+    Ok(wire.OwnersReport(snapshot)) -> Ok(snapshot)
     other -> Error(reason_of(other, "census"))
+  }
+  let census = result.map(owners, census_of)
+  let totals = result.map(owners, fn(snapshot) { snapshot.totals })
+  let system = case seq % system_every {
+    0 ->
+      case remote.ask(wire.Extended(wire.AskSystem), ask_deadline_ms) {
+        Ok(wire.SystemReport(snapshot)) -> Ok(snapshot)
+        other -> Error(reason_of(other, "system"))
+      }
+    _ -> Error(system_skipped)
   }
   let scheduler = read_scheduler(remote, step)
   let os = os()
@@ -108,6 +137,19 @@ pub fn collect(
     census:,
     scheduler:,
     os:,
+    totals:,
+    system:,
+  )
+}
+
+// The owners reply carries the census's own shape and, beside it, the heap
+// of each owner and the totals; the census view drops the heap, which
+// nothing downstream of the rows uses.
+fn census_of(snapshot: wire.OwnersSnapshot) -> wire.CensusSnapshot {
+  wire.CensusSnapshot(
+    coverage: snapshot.coverage,
+    rows: snapshot.rows,
+    owners: list.map(snapshot.owners, fn(owner) { owner.total }),
   )
 }
 

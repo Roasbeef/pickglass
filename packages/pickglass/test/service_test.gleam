@@ -168,16 +168,18 @@ pub fn malformed_requests_are_refused_before_the_gate_test() {
   assert mentions(harness.trail(rig), "request from alice refused")
 }
 
-pub fn only_counters_probes_run_yet_test() {
+pub fn a_probe_kind_the_agent_cannot_run_is_refused_in_words_test() {
   let rig = harness.live(fixture.healthy, None)
   let page = harness.page(rig, "alice", harness.all)
   let token = pinned_token(page)
   let id =
-    plan_id(page.submit(seam.PlanProbe(policy.Sampling, [token], [], 10_000)))
+    plan_id(
+      page.submit(seam.PlanProbe(policy.CallTree, [token], ["lists"], 10_000)),
+    )
 
   assert string.contains(
     rejected(page.submit(seam.ConfirmPlan(id))),
-    "only counters probes",
+    "the agent has no call_tree probe",
   )
 }
 

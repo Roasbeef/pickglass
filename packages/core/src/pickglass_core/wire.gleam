@@ -1425,6 +1425,9 @@ pub type Request {
   AskReadCounters(probe_id: Int)
   AskStopCounters(probe_id: Int)
   AskDetach
+
+  /// A request added after the first release; see `ExtendedRequest`.
+  Extended(request: ExtendedRequest)
 }
 
 /// Write a request as the envelope the agent reads. `reply_to` is the pid
@@ -1470,6 +1473,7 @@ fn request_body(request: Request) -> Dynamic {
     AskReadCounters(id) -> tagged("read_counters", [dynamic.int(id)])
     AskStopCounters(id) -> tagged("stop_counters", [dynamic.int(id)])
     AskDetach -> tagged("detach", [])
+    Extended(inner) -> extended_body(inner)
   }
 }
 

@@ -139,6 +139,8 @@ pub fn observation(seq: Int, at_ms: Int) -> Observation {
     ),
     scheduler: Ok(scheduler(seq * 100, seq * 200 + 1000)),
     os: Error(observation_codec.no_os_readings),
+    totals: Error(observation.totals_not_recorded),
+    system: Error(observation.system_skipped),
   )
 }
 
@@ -164,6 +166,17 @@ pub fn fake_remote(
 pub fn healthy(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
   case request {
     wire.AskMemory -> Ok(wire.MemoryReport(memory(2_000_000)))
+    wire.Extended(wire.AskOwners(..)) ->
+      Ok(
+        wire.OwnersReport(wire.OwnersSnapshot(
+          coverage: census_coverage(1),
+          rows: [row("<0.10.0>", 5000, wire.Unlabelled)],
+          owners: [],
+          totals: wire.CensusTotals(1, 5000, 0, 0, 100, 1, 1),
+        )),
+      )
+    wire.Extended(_) ->
+      Error(remote.Refusal("unexpected", "the fake agent has no such request"))
     wire.AskCensus(..) ->
       Ok(wire.CensusReport(census([row("<0.10.0>", 5000, wire.Unlabelled)])))
     wire.AskScheduler(wire.SchedulerRead) ->
@@ -223,4 +236,13 @@ pub fn drain(subject: Subject(a), wait_ms: Int) -> List(a) {
 /// The integers from one to `n`.
 pub fn numbers(n: Int) -> List(Int) {
   list.repeat(Nil, n) |> list.index_map(fn(_, index) { index + 1 })
+}
+
+fn census_coverage(count: Int) -> wire.CensusCoverage {
+  wire.CensusCoverage(
+    scanned: count,
+    total: count,
+    stop: wire.WalkFinished,
+    elapsed_ms: 3,
+  )
 }

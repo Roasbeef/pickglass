@@ -100,6 +100,39 @@ fn kind_action(kind: policy.ProbeKind) -> String {
   }
 }
 
+fn what_title(what: model.PlanWhat) -> String {
+  case what {
+    model.ProbePlan(kind:) -> kind_title(kind)
+    model.GcPlan -> "Collect garbage in one process"
+    model.MeasurePlan -> "Ask one process to measure itself"
+  }
+}
+
+fn what_action(what: model.PlanWhat) -> String {
+  case what {
+    model.ProbePlan(kind:) -> kind_action(kind)
+    model.GcPlan ->
+      "Runs a full garbage collection of the pinned process. The process "
+      <> "stops while it collects; its heap is read before and after."
+    model.MeasurePlan ->
+      "Sends the pinned process a request to measure a term it holds and "
+      <> "waits for its answer. Only a process that advertises the "
+      <> "capability is asked."
+  }
+}
+
+fn what_does_not_prove(what: model.PlanWhat) -> String {
+  case what {
+    model.ProbePlan(kind:) -> does_not_prove(kind)
+    model.GcPlan ->
+      "That the memory was needed: a collection frees what is garbage now, "
+      <> "and the process may fill its heap again at once."
+    model.MeasurePlan ->
+      "That the reading is complete: the process reports what it chooses to "
+      <> "and the viewer does not check it against its heap."
+  }
+}
+
 fn does_not_prove(kind: policy.ProbeKind) -> String {
   case kind {
     policy.Counters ->
@@ -297,7 +330,7 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
     ],
     [
       html.header([attribute.class("panel-bar")], [
-        html.h2([], [element.text("Plan: " <> kind_title(card.kind))]),
+        html.h2([], [element.text("Plan: " <> what_title(card.what))]),
         html.span([attribute.class("chip")], [
           element.text("needs " <> list.fold(needs, "", join_words)),
         ]),
@@ -317,7 +350,7 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
           ),
         ]),
         html.dt([], [element.text("Action")]),
-        html.dd([], [element.text(kind_action(card.kind))]),
+        html.dd([], [element.text(what_action(card.what))]),
         html.dt([], [element.text("Cost")]),
         html.dd([attribute.class("num")], [
           element.text(cost_text(
@@ -332,7 +365,7 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
         ]),
         html.dt([], [element.text("Does not prove")]),
         html.dd([attribute.class("does-not-prove")], [
-          element.text(does_not_prove(card.kind)),
+          element.text(what_does_not_prove(card.what)),
         ]),
       ]),
       html.div([attribute.class("dialog-actions")], [

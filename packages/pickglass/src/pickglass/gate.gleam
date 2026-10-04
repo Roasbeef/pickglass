@@ -150,6 +150,13 @@ pub fn estimate_for(command: Command) -> Estimate {
     }
     policy.TargetedGc(_) ->
       policy.Estimate(events_low: 1, events_high: 1, bytes_high: 0, wall_ms: 50)
+    policy.SelfMeasure(_) ->
+      policy.Estimate(
+        events_low: 1,
+        events_high: 1,
+        bytes_high: 0,
+        wall_ms: 2000,
+      )
 
     policy.ReadCensus(_)
     | policy.ReadOwners
@@ -160,7 +167,6 @@ pub fn estimate_for(command: Command) -> Estimate {
     | policy.UnpinProcess(_)
     | policy.ReadProcess(_)
     | policy.StopProbe(_)
-    | policy.SelfMeasure(_)
     | policy.ExportCapture(..)
     | policy.Checkpoint(_)
     | policy.Detach ->

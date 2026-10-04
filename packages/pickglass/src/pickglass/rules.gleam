@@ -88,7 +88,14 @@ pub fn route(request: Request(body)) -> Route {
       }
     http.Get, ["assets", name] -> Asset(name)
     http.Get, ["download", ticket] -> Download(ticket)
-    http.Get, ["process", _] -> Page("process-detail")
+    http.Get, ["process", subject] ->
+      case
+        string.length(subject) <= 64
+        && list.all(string.to_graphemes(subject), subject_char)
+      {
+        True -> Page("process-detail:" <> subject)
+        False -> Unknown
+      }
     http.Get, [slug] ->
       case list.contains(page_slugs, slug) {
         True -> Page(slug)
@@ -96,6 +103,16 @@ pub fn route(request: Request(body)) -> Route {
       }
     _, _ -> Unknown
   }
+}
+
+// A process key is letters, digits, underscore, dot, colon and hyphen: the
+// alphabet the web package's keys are drawn from, so the address cannot carry
+// anything else into the page's route.
+fn subject_char(grapheme: String) -> Bool {
+  string.contains(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-",
+    grapheme,
+  )
 }
 
 fn query(request: Request(body), name: String) -> Option(String) {

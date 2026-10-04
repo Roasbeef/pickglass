@@ -20,7 +20,7 @@ fn config() -> hub.Config {
 fn censuses(requests: List(wire.Request)) -> Int {
   list.count(requests, fn(request) {
     case request {
-      wire.AskCensus(..) -> True
+      wire.Extended(wire.AskOwners(..)) -> True
       _ -> False
     }
   })
@@ -30,7 +30,7 @@ fn censuses(requests: List(wire.Request)) -> Int {
 // while the first pass is still running.
 fn slow(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
   case request {
-    wire.AskCensus(..) -> {
+    wire.Extended(wire.AskOwners(..)) -> {
       process.sleep(150)
 
       fixture.healthy(request)

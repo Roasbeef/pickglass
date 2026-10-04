@@ -241,7 +241,7 @@ pub type Confirmation {
 /// Which commands need a plan.
 pub fn confirmation_of(command: Command) -> Confirmation {
   case command {
-    StartProbe(_) | TargetedGc(_) -> PlanFirst
+    StartProbe(_) | TargetedGc(_) | SelfMeasure(_) -> PlanFirst
 
     ReadCensus(_)
     | ReadOwners
@@ -252,7 +252,6 @@ pub fn confirmation_of(command: Command) -> Confirmation {
     | UnpinProcess(_)
     | ReadProcess(_)
     | StopProbe(_)
-    | SelfMeasure(_)
     | ExportCapture(..)
     | Checkpoint(_)
     | Detach -> Direct

@@ -1011,6 +1011,8 @@ fn observation_at(
           scheduler_at(index, at_ms, position)
         }),
         os: os_at(index, position),
+        totals: Error(observation.totals_not_recorded),
+        system: Error(observation.system_skipped),
       ))
     _ -> Error("a pass needs three coverage records")
   }

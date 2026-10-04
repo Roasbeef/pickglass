@@ -103,7 +103,15 @@ pub fn assemble(
   let header =
     capture.Header(
       capture_id:,
-      provenance: provenance_of(facts, memory, cadence),
+      provenance: provenance_of(
+        facts,
+        memory,
+        cadence,
+        list.find_map(observations, fn(observation) {
+          observation.system |> result.map(fn(snapshot) { snapshot.facts })
+        })
+          |> option.from_result,
+      ),
       redaction:,
     )
 
@@ -154,6 +162,7 @@ fn provenance_of(
   facts: Facts,
   memory: wire.MemorySnapshot,
   cadence: Cadence,
+  node: Option(wire.NodeFacts),
 ) -> provenance.Provenance {
   provenance.Provenance(
     producer: provenance.Producer(
@@ -164,7 +173,10 @@ fn provenance_of(
     target: provenance.Target(
       incarnation: identity.NodeIncarnation(
         node_digest: sha256_hex(facts.node),
-        creation: 0,
+        creation: case node {
+          Some(known) -> known.creation
+          None -> 0
+        },
         boot: facts.boot,
       ),
       os: identity.OsProcess(pid: facts.os_pid, start: facts.os_start),
@@ -173,10 +185,16 @@ fn provenance_of(
     runtime: provenance.Runtime(
       otp_release: memory.otp_release,
       erts_version: memory.erts_version,
-      emulator_flavor: "unknown",
+      emulator_flavor: case node {
+        Some(known) -> known.emulator_flavor
+        None -> "unknown"
+      },
       wordsize: memory.word_size,
       schedulers: memory.schedulers_online,
-      dirty_cpu_schedulers: 0,
+      dirty_cpu_schedulers: case node {
+        Some(known) -> known.dirty_cpu
+        None -> 0
+      },
       flags: [],
     ),
     build: provenance.Build(

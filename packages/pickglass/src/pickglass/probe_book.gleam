@@ -32,6 +32,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import pickglass/counters_profile
+import pickglass/profile_from_stacks
 import pickglass_core/capture.{type Record}
 import pickglass_core/measure.{Known, NotApplicable}
 import pickglass_core/policy
@@ -171,6 +172,160 @@ pub fn finish_counters(
         notes: [],
       )
   })
+}
+
+/// Close a stack-sampling probe with the agent's aggregated stacks. The
+/// stacks go through `profile_from_stacks`; a reply core refuses (a stack
+/// naming a frame the table does not hold, an empty stack) closes the probe
+/// as `Errored` with the reason and no profile. A probe that reached its
+/// sample budget is `Partial`, and the notes say how many samples were not
+/// kept and how many targets exited.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probe_book.finish_stacks(probe, snapshot, 41_000)
+/// ```
+pub fn finish_stacks(
+  probe: ProbeRecord,
+  snapshot: wire.StacksSnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
+  let meter = snapshot.meter
+  let cost =
+    capture.ProbeCost(
+      probe: probe.id,
+      enabled: ["current_stacktrace"],
+      events: Known(meter.samples),
+      collector_reductions: NotApplicable,
+      bytes: NotApplicable,
+      wall_ms: Known(meter.elapsed_ms),
+    )
+
+  case aggregated_of(snapshot) {
+    Error(reason) ->
+      ProbeRecord(
+        ..probe,
+        state: Finished(
+          ended_ms: now_ms,
+          outcome: measure.Errored(reason),
+          cost:,
+          profile: None,
+          notes: [],
+        ),
+      )
+    Ok(input) ->
+      case profile_from_stacks.build(input) {
+        Error(_) ->
+          ProbeRecord(
+            ..probe,
+            state: Finished(
+              ended_ms: now_ms,
+              outcome: measure.Errored(
+                "the sampled stacks could not be read as a profile",
+              ),
+              cost:,
+              profile: None,
+              notes: [],
+            ),
+          )
+        Ok(built) ->
+          ProbeRecord(
+            ..probe,
+            state: Finished(
+              ended_ms: now_ms,
+              outcome: case snapshot.stop {
+                wire.SamplingBudget ->
+                  measure.Partial(measure.Truncated(measure.BudgetReached))
+                wire.SamplingRunning
+                | wire.SamplingDeadline
+                | wire.SamplingTargetsGone
+                | wire.SamplingStopped -> measure.Complete
+              },
+              cost:,
+              profile: Some(built),
+              notes: list.append(
+                profile_from_stacks.caveats(input),
+                stack_notes(meter),
+              ),
+            ),
+          )
+      }
+  }
+}
+
+fn stack_notes(meter: wire.SamplerMeter) -> List(String) {
+  let achieved = meter.achieved_millihz / 1000
+
+  list.flatten([
+    [
+      "Sampled "
+      <> int.to_string(meter.samples)
+      <> " times at "
+      <> int.to_string(achieved)
+      <> " Hz achieved of "
+      <> int.to_string(meter.requested_hz)
+      <> " requested.",
+    ],
+    case meter.targets_gone {
+      0 -> []
+      count -> [
+        int.to_string(count) <> " targets exited while the probe ran.",
+      ]
+    },
+  ])
+}
+
+// The agent's frame table and index lists as the adapter's input. A stack
+// naming a frame outside the table is a defect of the reply and refuses the
+// whole result rather than guessing the frame.
+fn aggregated_of(
+  snapshot: wire.StacksSnapshot,
+) -> Result(profile_from_stacks.Aggregated, String) {
+  let frames =
+    list.map(snapshot.frames, fn(frame) {
+      let #(file, line) = case frame.location {
+        wire.NoLocation -> #(None, None)
+        wire.FileOnly(file:) -> #(Some(file), None)
+        wire.AtLine(file:, line:) -> #(Some(file), Some(line))
+      }
+
+      profile_from_stacks.Frame(
+        module: frame.module,
+        function: frame.function,
+        arity: frame.arity,
+        file:,
+        line:,
+      )
+    })
+
+  use stacks <- result.map(
+    list.try_map(snapshot.stacks, fn(stack) {
+      list.try_map(stack.frames, fn(index) {
+        list.drop(frames, index) |> list.first
+      })
+      |> result.map(fn(resolved) {
+        profile_from_stacks.Stack(frames: resolved, count: stack.count)
+      })
+    })
+    |> result.replace_error(
+      "a sampled stack names a frame the agent did not list",
+    ),
+  )
+
+  let dropped =
+    snapshot.meter.dropped_samples + snapshot.meter.truncated_samples
+
+  profile_from_stacks.Aggregated(
+    method: "process_info current_stacktrace",
+    rate_hz: snapshot.meter.requested_hz,
+    depth_limit: snapshot.meter.depth_limit,
+    completeness: case dropped {
+      0 -> profile_from_stacks.AllStacks
+      _ -> profile_from_stacks.CutShort(dropped_samples: dropped)
+    },
+    stacks:,
+  )
 }
 
 fn counter_notes(snapshot: wire.CountersSnapshot) -> List(String) {

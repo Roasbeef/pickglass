@@ -13,7 +13,8 @@ pub fn routes_test() {
   assert rules.route(get("/")) == rules.Root
   assert rules.route(get("/t/abc")) == rules.Exchange("abc")
   assert rules.route(get("/owners")) == rules.Page("owners")
-  assert rules.route(get("/process/row.1")) == rules.Page("process-detail")
+  assert rules.route(get("/process/row.1"))
+    == rules.Page("process-detail:row.1")
   assert rules.route(get("/assets/pickglass.css"))
     == rules.Asset("pickglass.css")
   assert rules.route(get("/nope")) == rules.Unknown
@@ -110,4 +111,9 @@ import gleam/string
 
 fn contains(text: String, part: String) -> Bool {
   string.contains(text, part)
+}
+
+pub fn a_process_key_outside_the_alphabet_is_no_route_test() {
+  assert rules.route(get("/process/a%20b")) == rules.Unknown
+  assert rules.route(get("/process/a%3Cb")) == rules.Unknown
 }

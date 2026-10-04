@@ -42,6 +42,7 @@ import pickglass/observation.{type Observation}
 import pickglass/panel
 import pickglass/probe_book.{type ProbeRecord}
 import pickglass/seam
+import pickglass/supervision_build
 import pickglass/timeline_build
 import pickglass_core/analysis/transform
 import pickglass_core/capture
@@ -71,6 +72,8 @@ pub type Slug {
   Processes
   Memory
   Probes
+  ProcessDetail
+  Supervision
   Profile
   Timeline
   Compare
@@ -102,6 +105,15 @@ pub type Inputs {
     comparison: Comparison,
     /// Wall-clock milliseconds now.
     now_ms: Int,
+    /// The process the detail page was opened on, by the key in its address.
+    subject: Option(Key),
+    /// The agent's detail of that process, read by the feeder when it is
+    /// pinned.
+    detail: Option(Result(wire.ProcessDetail, String)),
+    /// What collections and self-measures returned, newest first.
+    results: List(seam.ProcessResult),
+    /// The spawn edges, read by the feeder on the supervision page.
+    supervision: Option(Result(wire.SupervisionSnapshot, String)),
     /// The newest audit entries, newest first.
     entries: List(audit.Entry),
     cadence_ms: Int,
@@ -146,7 +158,8 @@ pub fn slug_of(slug: String) -> Result(Slug, Nil) {
     "timeline" -> Ok(Timeline)
     "compare" -> Ok(Compare)
     "audit" -> Ok(Audit)
-    "supervision" | "process-detail" -> Ok(Waiting)
+    "supervision" -> Ok(Supervision)
+    "process-detail" | "process-detail:" <> _ -> Ok(ProcessDetail)
     _ -> Error(Nil)
   }
 }
@@ -167,6 +180,7 @@ pub fn feeds_for(slug: Slug, inputs: Inputs) -> List(msg.Feed) {
     Audit, _ -> [strip, msg.FedAudit(audit_model(inputs))]
     Waiting, _ -> [strip]
     Profile, _ -> [strip, ..profile_feed(inputs)]
+    Supervision, _ -> [strip, ..supervision_feed(inputs)]
     Timeline, observations -> [strip, ..timeline_feed(inputs, observations)]
     Compare, _ -> [strip, ..compare_feed(inputs)]
     _, [] -> [strip]
@@ -178,6 +192,7 @@ pub fn feeds_for(slug: Slug, inputs: Inputs) -> List(msg.Feed) {
     Owners, [newest, ..] -> [strip, ..owners_feed(inputs, newest)]
     Processes, [newest, ..] -> [strip, ..processes_feed(inputs, newest)]
     Memory, [newest, ..] -> [strip, msg.FedMemory(memory(inputs, newest))]
+    ProcessDetail, [newest, ..] -> [strip, ..detail_feed(inputs, newest)]
     Probes, [newest, ..] -> [
       strip,
       msg.FedProbes(probes(inputs, newest)),
@@ -297,9 +312,13 @@ fn strip(inputs: Inputs) -> model.StripModel {
 
   model.StripModel(
     node:,
-    incarnation:,
+    incarnation: case newest_system(inputs) {
+      Some(#(_, facts)) ->
+        identity.NodeIncarnation(..incarnation, creation: facts.creation)
+      None -> incarnation
+    },
     os:,
-    uptime_ms: Missing(measure.UnsupportedOnRuntime),
+    uptime_ms: uptime_of(inputs),
     source:,
     banner: model.CapabilityBanner(
       role:,
@@ -309,6 +328,30 @@ fn strip(inputs: Inputs) -> model.StripModel {
     observer: observer(inputs),
     probes: active_probes(inputs),
   )
+}
+
+// The newest node facts the ring holds, with the time of the pass that read
+// them. Facts are read on some passes only, so most observations have none.
+fn newest_system(inputs: Inputs) -> Option(#(Int, wire.NodeFacts)) {
+  inputs.observations
+  |> list.find_map(fn(observation) {
+    case observation.system {
+      Ok(snapshot) -> Ok(#(observation.at_ms, snapshot.facts))
+      Error(_) -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+// The node's uptime: what the agent read, plus the time since it read it.
+// The agent's ping reports its own age and not the node's, so it is never
+// used; until the facts are read the uptime is a word.
+fn uptime_of(inputs: Inputs) -> measure.Measurement {
+  case newest_system(inputs) {
+    Some(#(read_at, facts)) ->
+      Known(facts.uptime_ms + int.max(0, inputs.now_ms - read_at))
+    None -> Missing(measure.UnsupportedOnRuntime)
+  }
 }
 
 // The duty cycle of the collector: how long the newest pass took against the
@@ -382,9 +425,34 @@ fn overview(inputs: Inputs, newest: Observation) -> model.OverviewModel {
         },
         limit: NotApplicable,
       ),
+      ..scheduler_tiles(inputs)
     ],
     roles: model.Panel(info: os_info(inputs, newest), body: os_roles(newest)),
   )
+}
+
+// The scheduler counts of the node, from its facts: online of configured.
+fn scheduler_tiles(inputs: Inputs) -> List(model.CountTile) {
+  case newest_system(inputs) {
+    None -> []
+    Some(#(_, facts)) -> [
+      model.CountTile(
+        label: "schedulers online",
+        value: Known(facts.schedulers_online),
+        limit: Known(facts.schedulers),
+      ),
+      model.CountTile(
+        label: "dirty CPU schedulers online",
+        value: Known(facts.dirty_cpu_online),
+        limit: Known(facts.dirty_cpu),
+      ),
+      model.CountTile(
+        label: "dirty IO schedulers",
+        value: Known(facts.dirty_io),
+        limit: NotApplicable,
+      ),
+    ]
+  }
 }
 
 // The owners that moved most since the checkpoint, in the figures the owners
@@ -706,11 +774,32 @@ fn owners_page(inputs: Inputs, newest: Observation) -> model.OwnersModel {
     Error(_) -> 0
   }
 
-  owners_builder.with_remainder(
-    page,
-    procs: int.max(0, left_out),
-    heap_cap: Missing(measure.UnsupportedOnRuntime),
-  )
+  case newest.totals {
+    Ok(totals) -> {
+      // Totals cover every process scanned; the listed rows are the part
+      // the page can name, so the rest is the difference.
+      let listed = list.length(rows)
+      let listed_heap =
+        list.fold(rows, 0, fn(sum, row) {
+          sum + option.unwrap(measure.to_option(row.heap_cap), 0)
+        })
+
+      owners_builder.with_remainder(
+        page,
+        procs: int.max(0, totals.processes - listed),
+        heap_cap: Known(int.max(
+          0,
+          totals.total_heap_words * word_size - listed_heap,
+        )),
+      )
+    }
+    Error(_) ->
+      owners_builder.with_remainder(
+        page,
+        procs: int.max(0, left_out),
+        heap_cap: Missing(measure.UnsupportedOnRuntime),
+      )
+  }
 }
 
 fn with_changes(
@@ -825,8 +914,79 @@ fn memory(inputs: Inputs, newest: Observation) -> model.MemoryModel {
       info: memory_info(inputs, newest),
       body: list.append(categories, [os_row]),
     ),
-    allocators: unread("allocators"),
+    allocators: allocators_panel(inputs, unread("allocators")),
     tables: unread("ets tables"),
+  )
+}
+
+// The allocator carriers from the node's facts: one row per allocator and
+// pool, in bytes, with the used part and what the walk could not scan in the
+// note. Where the VM cannot report them the panel says why and has no rows.
+fn allocators_panel(
+  inputs: Inputs,
+  unread: model.Panel(List(model.CategoryRow)),
+) -> model.Panel(List(model.CategoryRow)) {
+  let read =
+    list.find_map(inputs.observations, fn(observation) {
+      case observation.system {
+        Ok(snapshot) -> Ok(#(observation, snapshot.carriers))
+        Error(_) -> Error(Nil)
+      }
+    })
+
+  case read {
+    Error(Nil) -> unread
+    Ok(#(observation, wire.CarriersUnavailable(reason:))) ->
+      model.Panel(
+        info: info(
+          inputs,
+          "allocators",
+          "instrument:carriers",
+          "rows",
+          1,
+          0,
+          measure.Refused(reason),
+          observation.elapsed_ms,
+        ),
+        body: [],
+      )
+    Ok(#(observation, wire.CarriersRead(rows:))) ->
+      model.Panel(
+        info: info(
+          inputs,
+          "allocators",
+          "instrument:carriers",
+          "rows",
+          list.length(rows),
+          list.length(rows),
+          measure.Complete,
+          observation.elapsed_ms,
+        ),
+        body: list.map(rows, carrier_row),
+      )
+  }
+}
+
+fn carrier_row(row: wire.CarrierRow) -> model.CategoryRow {
+  model.CategoryRow(
+    label: row.allocator
+      <> case row.pool {
+      wire.InCarrierPool -> " (pool)"
+      wire.NotInCarrierPool -> ""
+    },
+    unit: unit.Bytes,
+    value: Known(row.total_bytes),
+    additivity: measure.Overlapping(
+      "the used part is inside the total, and allocators share the VM's memory",
+    ),
+    note: int.to_string(row.carriers)
+      <> " carriers, "
+      <> int.to_string(row.used_bytes)
+      <> " bytes used"
+      <> case row.unscanned_bytes {
+      0 -> ""
+      bytes -> ", " <> int.to_string(bytes) <> " bytes not scanned"
+    },
   )
 }
 
@@ -838,18 +998,35 @@ fn probes(inputs: Inputs, newest: Observation) -> model.ProbesModel {
     list.filter(inputs.pins, fn(pin) { pin.status == seam.PinLive })
   let pending =
     list.find_map(inputs.plans, fn(entry) {
+      let card = fn(what, tokens) {
+        Ok(model.PlanCard(
+          key: plan_key(entry.0),
+          what:,
+          plan: entry.1,
+          matched: NotApplicable,
+          target_labels: list.map(tokens, fn(token) {
+            identity.pin_to_string(token)
+          }),
+        ))
+      }
+
       case policy.plan_command(entry.1) {
         policy.StartProbe(spec:) ->
-          Ok(model.PlanCard(
-            key: plan_key(entry.0),
-            kind: spec.kind,
-            plan: entry.1,
-            matched: NotApplicable,
-            target_labels: list.map(spec.targets, fn(token) {
-              identity.pin_to_string(token)
-            }),
-          ))
-        _ -> Error(Nil)
+          card(model.ProbePlan(spec.kind), spec.targets)
+        policy.TargetedGc(token:) -> card(model.GcPlan, [token])
+        policy.SelfMeasure(token:) -> card(model.MeasurePlan, [token])
+        policy.ReadCensus(_)
+        | policy.ReadOwners
+        | policy.ReadMemory
+        | policy.ReadSupervision
+        | policy.ReadAudit(_)
+        | policy.PinProcess(_)
+        | policy.UnpinProcess(_)
+        | policy.ReadProcess(_)
+        | policy.StopProbe(_)
+        | policy.ExportCapture(..)
+        | policy.Checkpoint(_)
+        | policy.Detach -> Error(Nil)
       }
     })
 
@@ -1169,5 +1346,317 @@ fn compare_feed(inputs: Inputs) -> List(msg.Feed) {
   case state.outcome {
     Some(Ok(page)) -> [offers, msg.FedCompare(page)]
     Some(Error(_)) | None -> [offers]
+  }
+}
+
+// ------------------------------------------------------------ supervision
+
+fn supervision_feed(inputs: Inputs) -> List(msg.Feed) {
+  case inputs.supervision {
+    Some(Ok(snapshot)) -> [
+      msg.FedSupervision(supervision_build.build(
+        info(
+          inputs,
+          "spawn edges",
+          "process_info parent over every scanned process",
+          "processes",
+          snapshot.coverage.total,
+          snapshot.coverage.scanned,
+          supervision_build.outcome(snapshot.coverage),
+          snapshot.coverage.elapsed_ms,
+        ),
+        snapshot,
+      )),
+    ]
+    Some(Error(_)) | None -> []
+  }
+}
+
+// ----------------------------------------------------------- process detail
+
+// The detail page for one process: what the census holds about it, and the
+// agent's detail when the process is pinned. A process the newest census does
+// not list is not drawn, because the viewer would be inventing its figures.
+fn detail_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
+  let word_size = word_size_of(newest, inputs)
+
+  case inputs.subject {
+    None -> []
+    Some(subject) ->
+      case
+        list.find(rows_of(newest, word_size), fn(row) { row.key == subject })
+      {
+        Error(Nil) -> []
+        Ok(row) -> [
+          msg.FedProcessDetail(process_detail(inputs, newest, row, word_size)),
+        ]
+      }
+  }
+}
+
+fn process_detail(
+  inputs: Inputs,
+  newest: Observation,
+  row: model.ProcRow,
+  word_size: Int,
+) -> model.ProcessDetailModel {
+  let pin =
+    list.find(inputs.pins, fn(card) {
+      card.pid_text == row.pid_text && card.status == seam.PinLive
+    })
+  let detail = case inputs.detail {
+    Some(Ok(found)) -> Some(found)
+    Some(Error(_)) | None -> None
+  }
+
+  model.ProcessDetailModel(
+    info: info(
+      inputs,
+      "process",
+      case detail {
+        Some(_) -> "census row and process_info detail of a pinned process"
+        None -> "census row; pin the process to read its detail"
+      },
+      "readings",
+      1,
+      1,
+      measure.Complete,
+      newest.elapsed_ms,
+    ),
+    key: row.key,
+    pid_text: row.pid_text,
+    birth: birth_text(detail),
+    liveness: model.Alive,
+    pin: case pin {
+      Ok(card) -> model.Pinned(pin_key(card.token))
+      Error(Nil) -> model.NotPinned
+    },
+    attribution: row.attribution,
+    successor: None,
+    counters: list.append(
+      census_counters(row),
+      list.append(
+        detail_counters(detail),
+        measured_counters(inputs, row, word_size),
+      ),
+    ),
+    gc: list.append(gc_counters(detail), collection_counters(inputs, row)),
+    history: process_history(inputs, row),
+    evidence: evidence_of(row),
+    self_measure: case detail {
+      Some(found) ->
+        case list.contains(found.capabilities, "measure") {
+          True -> model.Available
+          False -> model.Unavailable
+        }
+      None -> model.Unavailable
+    },
+  )
+}
+
+fn birth_text(detail: Option(wire.ProcessDetail)) -> String {
+  case detail {
+    None -> "not read: pin the process to read its initial call and parent"
+    Some(found) -> {
+      let parent = case found.relations.parent_pid_text {
+        "" -> "no known spawner"
+        text -> "spawned by " <> text
+      }
+
+      case found.activity.initial_call {
+        "" -> parent
+        call -> "initial call " <> call <> ", " <> parent
+      }
+    }
+  }
+}
+
+fn counter(
+  label: String,
+  u: unit.Unit,
+  value: measure.Measurement,
+) -> model.Counter {
+  model.Counter(label:, unit: u, value:)
+}
+
+fn census_counters(row: model.ProcRow) -> List(model.Counter) {
+  [
+    counter("memory", unit.Bytes, row.memory),
+    counter("total heap", unit.Bytes, row.heap_cap),
+    counter("mailbox", unit.Count, row.mailbox),
+    counter("reductions", unit.Reductions, row.reductions),
+  ]
+}
+
+fn detail_counters(detail: Option(wire.ProcessDetail)) -> List(model.Counter) {
+  case detail {
+    None -> []
+    Some(found) -> [
+      counter("heap", unit.Bytes, Known(found.sizes.heap_bytes)),
+      counter("stack", unit.Bytes, Known(found.sizes.stack_bytes)),
+      counter("links", unit.Count, Known(found.relations.links)),
+      counter("monitors", unit.Count, Known(found.relations.monitors)),
+      counter("monitored by", unit.Count, Known(found.relations.monitored_by)),
+    ]
+  }
+}
+
+fn gc_counters(detail: Option(wire.ProcessDetail)) -> List(model.Counter) {
+  case detail {
+    None -> []
+    Some(found) -> {
+      let gc = found.gc
+
+      [
+        counter("minor collections", unit.Count, Known(gc.minor_gcs)),
+        counter("fullsweep after", unit.Count, Known(gc.fullsweep_after)),
+        counter("min heap", unit.Bytes, Known(gc.min_heap_bytes)),
+        counter("max heap", unit.Bytes, case gc.max_heap_bytes {
+          0 -> NotApplicable
+          bytes -> Known(bytes)
+        }),
+        counter("heap block", unit.Bytes, Known(gc.heap_block_bytes)),
+        counter("old heap", unit.Bytes, Known(gc.old_heap_bytes)),
+        counter("old heap block", unit.Bytes, Known(gc.old_heap_block_bytes)),
+        counter("message buffers", unit.Bytes, Known(gc.mbuf_bytes)),
+        counter("binary vheap", unit.Bytes, Known(gc.bin_vheap_bytes)),
+      ]
+    }
+  }
+}
+
+// The newest collection of this process: its total heap before and after.
+// A target that exited before it was collected has words, not figures.
+fn collection_counters(
+  inputs: Inputs,
+  row: model.ProcRow,
+) -> List(model.Counter) {
+  let found =
+    list.find_map(inputs.results, fn(result) {
+      case result {
+        seam.GcRan(snapshot:, ..) if snapshot.pid_text == row.pid_text ->
+          Ok(snapshot)
+        seam.GcRan(..) | seam.SelfMeasured(..) -> Error(Nil)
+      }
+    })
+
+  case found {
+    Error(Nil) -> []
+    Ok(snapshot) -> [
+      counter(
+        "total heap before the last collection",
+        unit.Bytes,
+        heap_of(snapshot.before),
+      ),
+      counter(
+        "total heap after the last collection",
+        unit.Bytes,
+        heap_of(snapshot.after),
+      ),
+    ]
+  }
+}
+
+fn heap_of(reading: wire.HeapReading) -> measure.Measurement {
+  case reading {
+    wire.HeapRead(sizes) -> Known(sizes.total_heap_bytes)
+    wire.HeapGone -> Missing(measure.ProcessExited)
+  }
+}
+
+// What the process reported when it was last asked to measure itself, in the
+// units it named; words become bytes with the node's word size.
+fn measured_counters(
+  inputs: Inputs,
+  row: model.ProcRow,
+  word_size: Int,
+) -> List(model.Counter) {
+  let found =
+    list.find_map(inputs.results, fn(result) {
+      case result {
+        seam.SelfMeasured(snapshot:, ..) if snapshot.pid_text == row.pid_text ->
+          Ok(snapshot)
+        seam.SelfMeasured(..) | seam.GcRan(..) -> Error(Nil)
+      }
+    })
+
+  case found {
+    Error(Nil) -> []
+    Ok(snapshot) ->
+      list.map(snapshot.readings, fn(reading) {
+        case reading.unit {
+          wire.ReadingWords ->
+            counter(
+              "self: " <> reading.name,
+              unit.Bytes,
+              Known(reading.value * word_size),
+            )
+          wire.ReadingBytes ->
+            counter("self: " <> reading.name, unit.Bytes, Known(reading.value))
+          wire.ReadingCount ->
+            counter("self: " <> reading.name, unit.Count, Known(reading.value))
+        }
+      })
+  }
+}
+
+// The process's memory and mailbox over the passes that listed it; a pass
+// that did not list it has a word, because a process outside the top rows
+// is not a process with no memory.
+fn process_history(
+  inputs: Inputs,
+  row: model.ProcRow,
+) -> List(model.Sparkline) {
+  let ordered = list.reverse(list.take(inputs.observations, spark_points))
+  let series = fn(label, u, pick) {
+    let points =
+      list.map(ordered, fn(observation) {
+        case observation.census {
+          Ok(census) ->
+            case
+              list.find(census.rows, fn(found) {
+                found.pid_text == row.pid_text
+              })
+            {
+              Ok(found) -> Known(pick(found))
+              Error(Nil) -> Missing(measure.BudgetExhausted)
+            }
+          Error(_) -> Missing(measure.DecodeFailed)
+        }
+      })
+    let known =
+      list.filter_map(points, fn(point) {
+        option.to_result(measure.to_option(point), Nil)
+      })
+
+    model.Sparkline(
+      label:,
+      unit: u,
+      points:,
+      summary: case list.last(known) {
+        Ok(latest) -> Known(latest)
+        Error(Nil) -> Missing(measure.BudgetExhausted)
+      },
+      note: "latest reading",
+    )
+  }
+
+  [
+    series("memory", unit.Bytes, fn(found) { found.memory }),
+    series("mailbox", unit.Count, fn(found) { found.queue_length }),
+  ]
+}
+
+fn evidence_of(row: model.ProcRow) -> List(model.Evidence) {
+  case row.attribution {
+    owner.Unattributed -> []
+    owner.Attributed(winner:, dissent:) ->
+      list.map([winner, ..dissent], fn(claim) {
+        model.Evidence(
+          kind: claim.role,
+          target: owner.path_to_string(claim.path),
+          source: claim.source,
+        )
+      })
   }
 }

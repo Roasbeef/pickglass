@@ -21,9 +21,8 @@
 ////   the checkpoint it compares against, and the two capture files chosen on
 ////   the compare page. Two tabs therefore filter and compare independently
 ////   over the same probes.
-//// - A request the viewer cannot act on yet (a self-measure, whose agent
-////   request does not exist) is dropped, and the Audit page is where a
-////   refusal from the gate shows.
+//// - A refusal from the gate is not shown by the page that asked; the Audit
+////   page is where it shows.
 ////
 //// The application and the feeder are linked to the socket process that
 //// started them. `shutdown` stops both when the browser goes away.
@@ -55,6 +54,7 @@ import pickglass/seam
 import pickglass_core/analysis/transform
 import pickglass_core/measure
 import pickglass_core/policy
+import pickglass_core/wire
 import pickglass_web/app
 import pickglass_web/key.{type Key}
 import pickglass_web/model
@@ -91,8 +91,16 @@ pub opaque type State {
     baseline_file: Option(String),
     candidate_file: Option(String),
     compared: Option(Result(model.CompareModel, String)),
+    /// The process the detail page was opened on.
+    subject: Option(Key),
+    /// The newest spawn edges and when they were read. A walk visits every
+    /// process, so the page rereads it at most every `supervision_ms`.
+    supervision: Option(#(Int, Result(wire.SupervisionSnapshot, String))),
   )
 }
+
+/// How old the spawn edges may be before the supervision page rereads them.
+const supervision_ms = 10_000
 
 /// How many export notes a page keeps.
 const max_exports = 6
@@ -118,10 +126,12 @@ fn start(
   use feed_slug <- result.try(
     feeds.slug_of(slug) |> result.replace_error("no such page"),
   )
+  let #(base, subject) = split_subject(slug)
+
   use web <- result.try(
-    web_page_of(slug) |> result.replace_error("no such page"),
+    web_page_of(base) |> result.replace_error("no such page"),
   )
-  use feeder <- result.try(start_feeder(page, feed_slug, cadence_ms))
+  use feeder <- result.try(start_feeder(page, feed_slug, subject, cadence_ms))
 
   let application =
     app.application(fn(request) {
@@ -166,6 +176,19 @@ fn start(
   }
 }
 
+// The page's route slug, and the key of the process a detail page was opened
+// on when the slug carries one (`process-detail:<key>`). A key that is not
+// in the key alphabet is no subject, so the page opens on nothing.
+fn split_subject(slug: String) -> #(String, Option(Key)) {
+  case slug {
+    "process-detail:" <> text -> #(
+      "process-detail",
+      option.from_result(key.parse(text)),
+    )
+    other -> #(other, None)
+  }
+}
+
 fn web_page_of(slug: String) -> Result(web_page.Page, Nil) {
   case slug {
     "overview" -> Ok(web_page.Overview)
@@ -188,6 +211,7 @@ fn web_page_of(slug: String) -> Result(web_page.Page, Nil) {
 fn start_feeder(
   page: seam.Page,
   slug: feeds.Slug,
+  opened: Option(Key),
   cadence_ms: Int,
 ) -> Result(Subject(Message), String) {
   let builder =
@@ -209,6 +233,8 @@ fn start_feeder(
         baseline_file: None,
         candidate_file: None,
         compared: None,
+        subject: opened,
+        supervision: None,
       ))
       |> actor.selecting(
         process.new_selector()
@@ -233,23 +259,13 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
 
     // The application is up: draw what the hub already holds.
     Attach(runtime) -> {
-      let state = State(..state, runtime: Some(runtime))
-
-      feed(state)
-      actor.continue(state)
+      actor.continue(feed(State(..state, runtime: Some(runtime))))
     }
 
-    Updated(hub.Observed(_)) | Updated(hub.TargetLost(_)) -> {
-      feed(state)
-      actor.continue(state)
-    }
+    Updated(hub.Observed(_)) | Updated(hub.TargetLost(_)) ->
+      actor.continue(feed(state))
 
-    Asked(request) -> {
-      let state = ask(state, request)
-
-      feed(state)
-      actor.continue(state)
-    }
+    Asked(request) -> actor.continue(feed(ask(state, request)))
   }
 }
 
@@ -269,6 +285,7 @@ pub fn new_state(
   use feed_slug <- result.map(
     feeds.slug_of(slug) |> result.replace_error("no such page"),
   )
+  let #(_, subject) = split_subject(slug)
 
   State(
     page:,
@@ -283,6 +300,8 @@ pub fn new_state(
     baseline_file: None,
     candidate_file: None,
     compared: None,
+    subject:,
+    supervision: None,
   )
 }
 
@@ -337,6 +356,10 @@ fn inputs(state: State) -> feeds.Inputs {
       _ -> feeds.no_comparison
     },
     now_ms: ffi_dist.system_time_ms(),
+    subject: state.subject,
+    detail: read_detail(state),
+    results: page.results(),
+    supervision: option.map(state.supervision, fn(read) { read.1 }),
     entries: case state.slug {
       feeds.Audit -> page.audit(100)
       _ -> []
@@ -347,13 +370,76 @@ fn inputs(state: State) -> feeds.Inputs {
   )
 }
 
-fn feed(state: State) -> Nil {
+// Rebuild and send the page's models. The feeder first refreshes what it
+// reads from the agent for this page alone: the spawn edges, which are old
+// enough to reread only every few seconds.
+fn feed(state: State) -> State {
+  let state = refresh(state)
+
   case state.runtime {
-    None -> Nil
-    Some(runtime) ->
+    None -> state
+    Some(runtime) -> {
       feeds.feeds_for(state.slug, inputs(state))
       |> list.each(fn(feed) {
         lustre.send(runtime, lustre.dispatch(msg.Fed(feed)))
+      })
+
+      state
+    }
+  }
+}
+
+fn refresh(state: State) -> State {
+  case state.slug, state.supervision {
+    feeds.Supervision, None -> read_supervision(state)
+    feeds.Supervision, Some(#(read_at, _)) ->
+      case ffi_dist.system_time_ms() - read_at >= supervision_ms {
+        True -> read_supervision(state)
+        False -> state
+      }
+    _, _ -> state
+  }
+}
+
+fn read_supervision(state: State) -> State {
+  let outcome = case state.page.submit(seam.ReadSupervision) {
+    seam.SupervisionRead(snapshot) -> Ok(snapshot)
+    seam.Rejected(reason) -> Error(reason)
+    _ -> Error("the viewer did not read the supervision tree")
+  }
+
+  State(..state, supervision: Some(#(ffi_dist.system_time_ms(), outcome)))
+}
+
+// The agent's detail of the page's process, read when the process is pinned.
+// A process that is not pinned has only the census row, and says so.
+fn read_detail(state: State) -> Option(Result(wire.ProcessDetail, String)) {
+  case state.slug, state.subject, state.page.latest() {
+    feeds.ProcessDetail, Some(subject), [newest, ..] ->
+      case list.find(feeds.rows_of(newest, 8), fn(row) { row.key == subject }) {
+        Ok(row) -> read_pinned(state, row.pid_text)
+        Error(Nil) -> None
+      }
+    _, _, _ -> None
+  }
+}
+
+fn read_pinned(
+  state: State,
+  pid_text: String,
+) -> Option(Result(wire.ProcessDetail, String)) {
+  let pin =
+    list.find(state.page.pins(), fn(card) {
+      card.pid_text == pid_text && card.status == seam.PinLive
+    })
+
+  case pin {
+    Error(Nil) -> None
+    Ok(card) ->
+      Some(case state.page.submit(seam.ReadProcess(card.token)) {
+        seam.ProcessRead(detail) -> Ok(detail)
+        seam.Rejected(reason) -> Error(reason)
+        _ -> Error("the viewer did not read the process")
       })
   }
 }
@@ -434,8 +520,8 @@ pub fn ask(state: State, request: msg.Request) -> State {
       State(..state, chain: list.take(state.chain, int.max(0, from)))
     msg.ExportProfile(choice) -> export_profile(state, current, choice)
 
-    // The agent has no self-measure request yet.
-    msg.RequestSelfMeasure(_) -> state
+    msg.RequestSelfMeasure(pin) ->
+      submit_with(state, resolve_pin(current, pin), seam.PlanSelfMeasure)
   }
 }
 
