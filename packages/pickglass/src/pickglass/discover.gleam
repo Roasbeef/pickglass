@@ -16,12 +16,20 @@
 //// cookie is read from a file and never from an argument or the environment,
 //// and this module never returns it in an error message.
 ////
+//// A state directory may be spelled differently from the `-home` argument
+//// the daemon was started with: through a symlink, with a relative path, or
+//// with `/tmp` against `/private/tmp`. Strings cannot decide that, so `find`
+//// compares file identity, the device and inode `stat` reports, and only
+//// then hands `choose` a command line that spells the home the way the
+//// listed cookie directory does.
+////
 //// ## Flow
 ////
 //// - `candidates` reads a process table into profiled-node candidates.
 //// - `choose` matches candidates with cookie directories and picks one.
-//// - `find` reads the process table, lists the cookie directories and
-////   calls `choose`.
+//// - `find` reads the process table, lists the cookie directories, aligns
+////   each candidate's `-home` spelling with them by file identity and calls
+////   `choose`.
 //// - `read_cookie_file` checks a cookie file's permissions and reads it.
 
 import gleam/int
@@ -205,7 +213,23 @@ pub fn find(
   state_dir: String,
   wanted_pid: Option(Int),
 ) -> Result(Target, DiscoverError) {
-  let table = ffi_os.run(process_table_command(wanted_pid))
+  find_in(ffi_os.run(process_table_command(wanted_pid)), state_dir, wanted_pid)
+}
+
+/// `find` over a process table already read, so the matching can be tested
+/// against real directories without a daemon.
+///
+/// ## Examples
+///
+/// ```gleam
+/// discover.find_in(table, "/home/me/.loom", None)
+/// // -> Ok(Target(...))
+/// ```
+pub fn find_in(
+  table: String,
+  state_dir: String,
+  wanted_pid: Option(Int),
+) -> Result(Target, DiscoverError) {
   let tokens = state_dir <> "/tokens"
 
   use entries <- result.try(
@@ -218,10 +242,86 @@ pub fn find(
     |> list.filter(fn(entry) { is_cookie_directory(entry) })
     |> list.map(fn(entry) { tokens <> "/" <> entry })
     |> list.filter(fn(directory) {
-      simplifile.is_file(directory <> "/.erlang.cookie") == Ok(True)
+      is_real_directory(directory)
+      && simplifile.is_file(directory <> "/.erlang.cookie") == Ok(True)
     })
 
-  choose(candidates(table), directories, wanted_pid)
+  table
+  |> candidates
+  |> list.map(fn(candidate) { align_home(candidate, directories) })
+  |> choose(directories, wanted_pid)
+}
+
+// A cookie directory must itself live in `tokens/`. An entry that is a
+// symlink could point anywhere, and its cookie would be read from there, so
+// it is not a cookie directory at all. `link_info` does not follow the link.
+fn is_real_directory(path: String) -> Bool {
+  case simplifile.link_info(path) {
+    Ok(info) -> simplifile.file_info_type(info) == simplifile.Directory
+    Error(_) -> False
+  }
+}
+
+/// Rewrite a candidate's `-home` argument to the spelling of the listed
+/// cookie directory that is the same directory on disk, so `choose` can
+/// match by string. A home that is not one of the directories, or that does
+/// not exist, is left as it was and so matches nothing.
+///
+/// ## Examples
+///
+/// ```gleam
+/// discover.align_home(candidate, ["/tmp/x/tokens/loom-daemon-profile.A"])
+/// // -> candidate with `-home /tmp/x/tokens/loom-daemon-profile.A` even if
+/// // the daemon was given `/private/tmp/x/tokens/loom-daemon-profile.A`.
+/// ```
+pub fn align_home(
+  candidate: Candidate,
+  directories: List(String),
+) -> Candidate {
+  let aligned = {
+    use home <- result.try(home_argument(candidate.command))
+    use wanted <- result.try(identity(home))
+    use directory <- result.try(
+      list.find(directories, fn(directory) { identity(directory) == Ok(wanted) }),
+    )
+
+    Ok(
+      Candidate(
+        ..candidate,
+        command: string.replace(
+          candidate.command,
+          " -home " <> home <> " ",
+          " -home " <> directory <> " ",
+        ),
+      ),
+    )
+  }
+
+  result.unwrap(aligned, candidate)
+}
+
+// The token after `-home`.
+fn home_argument(command: String) -> Result(String, Nil) {
+  command
+  |> string.split(" ")
+  |> home_after
+}
+
+fn home_after(tokens: List(String)) -> Result(String, Nil) {
+  case tokens {
+    ["-home", home, ..] -> Ok(home)
+    [_, ..rest] -> home_after(rest)
+    [] -> Error(Nil)
+  }
+}
+
+// A directory's device and inode, following symlinks and resolving relative
+// paths against the working directory. Two spellings of one directory have
+// the same identity; two directories never do.
+fn identity(path: String) -> Result(#(Int, Int), Nil) {
+  simplifile.file_info(path)
+  |> result.map(fn(info) { #(info.dev, info.inode) })
+  |> result.replace_error(Nil)
 }
 
 fn process_table_command(wanted_pid: Option(Int)) -> String {

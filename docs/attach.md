@@ -416,6 +416,9 @@ and a cookie mismatch is not misreported.
 
 `pickglass attach` and `pickglass open` with no `--node` find a profiled Loom
 daemon (`loomd --profile`) from the process table and a Loom state directory
-(`--state-dir`, default `~/.loom`, and `--pid`). That is unchanged, and it is
+(`--state-dir`, default `~/.loom`, and `--pid`). `--state-dir` may be spelled
+any way that reaches the directory the daemon was started with: a relative
+path, a symlink, or `/tmp` for `/private/tmp`. Discovery compares the
+directories themselves, not their names. That is unchanged, and it is
 the other way to find a target: `--node` and `--state-dir`/`--pid` cannot be
 combined.

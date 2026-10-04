@@ -145,3 +145,113 @@ pub fn cookie_permissions_are_enforced_test() {
   assert discover.read_cookie_file("build/no_such_directory/.erlang.cookie")
     == Error(discover.CookieRefused("the cookie file cannot be read"))
 }
+
+// Builds `<root>/real/tokens/loom-daemon-profile.A/.erlang.cookie` and a
+// sibling `<root>/link` that is a symlink to `<root>/real`.
+fn state_fixture(name: String) -> #(String, String) {
+  let assert Ok(cwd) = simplifile.current_directory() as "working directory"
+  let root = cwd <> "/build/discover_" <> name
+  let _ = simplifile.delete(root)
+  let assert Ok(Nil) =
+    simplifile.create_directory_all(
+      root <> "/real/tokens/loom-daemon-profile.A",
+    )
+    as "state directory"
+  let assert Ok(Nil) =
+    simplifile.write(
+      root <> "/real/tokens/loom-daemon-profile.A/.erlang.cookie",
+      "c",
+    )
+    as "cookie"
+  let assert Ok(Nil) =
+    simplifile.create_symlink(root <> "/real", root <> "/link")
+    as "symlink"
+  #(root, cwd)
+}
+
+fn daemon_table(home: String) -> String {
+  line("100", "daemon", home)
+}
+
+// The daemon was given the real spelling; the user passes a symlink to it.
+pub fn find_matches_a_symlinked_state_dir_test() {
+  let #(root, _) = state_fixture("symlink")
+  let table = daemon_table(root <> "/real/tokens/loom-daemon-profile.A")
+
+  assert discover.find_in(table, root <> "/link", None)
+    == Ok(Target(
+      100,
+      node("daemon", "100"),
+      root <> "/link/tokens/loom-daemon-profile.A/.erlang.cookie",
+    ))
+}
+
+// The converse: the daemon's `-home` goes through the symlink.
+pub fn find_matches_a_symlinked_home_test() {
+  let #(root, _) = state_fixture("symlink_home")
+  let table = daemon_table(root <> "/link/tokens/loom-daemon-profile.A")
+
+  assert discover.find_in(table, root <> "/real", None)
+    == Ok(Target(
+      100,
+      node("daemon", "100"),
+      root <> "/real/tokens/loom-daemon-profile.A/.erlang.cookie",
+    ))
+}
+
+// A relative `--state-dir` names the same directory as an absolute `-home`.
+pub fn find_matches_a_relative_state_dir_test() {
+  let #(root, _) = state_fixture("relative")
+  let table = daemon_table(root <> "/real/tokens/loom-daemon-profile.A")
+
+  assert discover.find_in(table, "build/discover_relative/real", None)
+    == Ok(Target(
+      100,
+      node("daemon", "100"),
+      "build/discover_relative/real/tokens/loom-daemon-profile.A/.erlang.cookie",
+    ))
+}
+
+// Another directory with the same basename is a different directory.
+pub fn find_rejects_a_same_named_directory_elsewhere_test() {
+  let #(root, _) = state_fixture("sibling")
+  let other = root <> "/other/tokens/loom-daemon-profile.A"
+  let assert Ok(Nil) = simplifile.create_directory_all(other) as "other"
+  let assert Ok(Nil) = simplifile.write(other <> "/.erlang.cookie", "c")
+    as "other cookie"
+
+  assert discover.find_in(daemon_table(other), root <> "/link", None)
+    == Error(NoTarget)
+}
+
+// A `-home` outside `tokens/` is not a cookie directory, even when it holds
+// a cookie file.
+pub fn find_rejects_a_home_outside_tokens_test() {
+  let #(root, _) = state_fixture("outside")
+  let outside = root <> "/real/elsewhere"
+  let assert Ok(Nil) = simplifile.create_directory_all(outside) as "outside"
+  let assert Ok(Nil) = simplifile.write(outside <> "/.erlang.cookie", "c")
+    as "outside cookie"
+
+  assert discover.find_in(daemon_table(outside), root <> "/real", None)
+    == Error(NoTarget)
+}
+
+// A symlink inside `tokens/` is not a cookie directory: its cookie would be
+// read from wherever it points.
+pub fn find_rejects_a_symlinked_cookie_directory_test() {
+  let #(root, _) = state_fixture("entry_link")
+  let elsewhere = root <> "/real/elsewhere"
+  let assert Ok(Nil) = simplifile.create_directory_all(elsewhere) as "elsewhere"
+  let assert Ok(Nil) = simplifile.write(elsewhere <> "/.erlang.cookie", "c")
+    as "cookie"
+  let assert Ok(Nil) =
+    simplifile.create_symlink(
+      elsewhere,
+      root <> "/real/tokens/loom-daemon-profile.B",
+    )
+    as "entry link"
+
+  assert discover.find_in(daemon_table(elsewhere), root <> "/real", None)
+    == Error(NoTarget)
+}
