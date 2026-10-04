@@ -94,56 +94,58 @@ pub fn build_labelled(
         Error(Nil) -> 0
       }
 
-      Ok(timeline_model.TimelineModel(
-        info: panel.info(panel.Facts(
-          source: "the viewer's ring of observations",
-          method: "one reading per collection pass",
-          cadence_ms:,
-          scope: "passes",
-          requested: list.length(oldest),
-          achieved: list.length(list.filter(oldest, observation.answered)),
-          outcome: measure.Complete,
-          gap_ms: None,
-          took_ms: None,
-        )),
-        window_ms: last_at + width,
-        clock_note: "the viewer's wall clock at the start of each pass",
-        tracks: list.flatten([
-          [utilisation_track(oldest, times, width)],
-          [run_queue_track(times, width)],
-          [
-            counter_track(
-              "process count",
-              unit.Count,
-              oldest,
-              times,
-              width,
-              fn(observation) {
-                case observation.memory {
-                  Ok(memory) -> Known(memory.process_count)
-                  Error(_) -> Missing(measure.DecodeFailed)
-                }
-              },
-            ),
-          ],
-          list.map(category_tracks, fn(category) {
-            counter_track(
-              "memory: " <> category,
-              unit.Bytes,
-              oldest,
-              times,
-              width,
-              fn(observation) { category_of(observation, category) },
-            )
-          }),
-          [probe_track(probes, origin, now_ms)],
-          [mark_track(marks, origin, width)],
-        ]),
-        gaps: gaps_of(oldest, times, width),
-        events: newest_events(probes, label_of),
-        calls: newest_calls(probes, label_of),
-        exports: [],
-      ))
+      Ok(
+        timeline_model.TimelineModel(
+          info: panel.info(panel.Facts(
+            source: "the viewer's ring of observations",
+            method: "one reading per collection pass",
+            cadence_ms:,
+            scope: "passes",
+            requested: list.length(oldest),
+            achieved: list.length(list.filter(oldest, observation.answered)),
+            outcome: measure.Complete,
+            gap_ms: None,
+            took_ms: None,
+          )),
+          window_ms: last_at + width,
+          clock_note: "the viewer's wall clock at the start of each pass",
+          tracks: list.flatten([
+            [utilisation_track(oldest, times, width)],
+            [run_queue_track(times, width)],
+            [
+              counter_track(
+                "process count",
+                unit.Count,
+                oldest,
+                times,
+                width,
+                fn(observation) {
+                  case observation.memory {
+                    Ok(memory) -> Known(memory.process_count)
+                    Error(_) -> Missing(measure.DecodeFailed)
+                  }
+                },
+              ),
+            ],
+            list.map(category_tracks, fn(category) {
+              counter_track(
+                "memory: " <> category,
+                unit.Bytes,
+                oldest,
+                times,
+                width,
+                fn(observation) { category_of(observation, category) },
+              )
+            }),
+            [probe_track(probes, origin, now_ms)],
+            [mark_track(marks, origin, width)],
+          ]),
+          gaps: gaps_of(oldest, times, width),
+          events: newest_events(probes, label_of),
+          calls: newest_calls(probes, label_of),
+          exports: [],
+        ),
+      )
     }
   }
 }

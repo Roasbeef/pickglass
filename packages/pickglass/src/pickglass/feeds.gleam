@@ -1780,7 +1780,11 @@ fn timeline_feed(
       fn(pid) { pid <> label_for(rows, pid) },
     )
   {
-    Ok(page) -> [msg.FedTimeline(timeline_model.TimelineModel(..page, exports: inputs.exports))]
+    Ok(page) -> [
+      msg.FedTimeline(
+        timeline_model.TimelineModel(..page, exports: inputs.exports),
+      ),
+    ]
     Error(_) -> []
   }
 }
