@@ -191,10 +191,7 @@ fn provenance_of(
       },
       wordsize: memory.word_size,
       schedulers: memory.schedulers_online,
-      dirty_cpu_schedulers: case node {
-        Some(known) -> known.dirty_cpu
-        None -> 0
-      },
+      dirty_cpu_schedulers: option.map(node, fn(known) { known.dirty_cpu }),
       flags: [],
     ),
     build: provenance.Build(
@@ -206,7 +203,7 @@ fn provenance_of(
     workload: provenance.Workload(
       label: facts.workload,
       sessions: [],
-      warmup_ms: 0,
+      warmup_ms: None,
       notes: "",
     ),
     collection: provenance.Collection(
@@ -214,7 +211,7 @@ fn provenance_of(
       cadence:,
       budgets: provenance.Budgets(
         top_k: facts.top_k,
-        max_events: 0,
+        max_events: None,
         deadline_ms: facts.deadline_ms,
       ),
     ),

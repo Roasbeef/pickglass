@@ -1,4 +1,5 @@
 import gleam/list
+import gleam/option.{None, Some}
 import pg_data_gen as gen
 import pickglass_core/identity
 import pickglass_core/measure.{
@@ -151,7 +152,7 @@ pub fn a_different_warmup_blocks_test() {
   blocked_by(
     provenance.Provenance(
       ..b,
-      workload: provenance.Workload(..b.workload, warmup_ms: 1),
+      workload: provenance.Workload(..b.workload, warmup_ms: Some(1)),
     ),
     Warmup,
   )
@@ -241,4 +242,63 @@ pub fn property_a_provenance_is_comparable_with_itself_test() {
   use p <- gen.check(gen.provenance())
 
   assert provenance.blocking_fields(provenance.comparability(p, p)) == []
+}
+
+// A value a side never recorded is not a zero and not a match: the field
+// reads `NotRecorded`, and since no recorded figure differs, it does not
+// withhold a direction.
+pub fn an_unrecorded_warmup_is_neither_same_nor_different_test() {
+  let b = base()
+  let unrecorded =
+    provenance.Provenance(
+      ..b,
+      workload: provenance.Workload(..b.workload, warmup_ms: None),
+    )
+  let result = provenance.comparability(b, unrecorded)
+
+  assert list.key_find(result.fields, Warmup) == Ok(provenance.NotRecorded)
+  assert list.key_find(
+      provenance.comparability(unrecorded, unrecorded).fields,
+      Warmup,
+    )
+    == Ok(provenance.NotRecorded)
+  assert provenance.blocking_fields(result) == []
+}
+
+pub fn an_unrecorded_dirty_count_does_not_make_the_runtime_differ_test() {
+  let b = base()
+  let unrecorded =
+    provenance.Provenance(
+      ..b,
+      runtime: provenance.Runtime(..b.runtime, dirty_cpu_schedulers: None),
+    )
+  let result = provenance.comparability(b, unrecorded)
+
+  assert list.key_find(result.fields, RuntimeField)
+    == Ok(provenance.NotRecorded)
+
+  // A recorded difference still blocks, whatever else is missing.
+  let other =
+    provenance.Provenance(
+      ..unrecorded,
+      runtime: provenance.Runtime(..unrecorded.runtime, otp_release: "28"),
+    )
+
+  assert provenance.blocking_fields(provenance.comparability(b, other))
+    == [RuntimeField]
+}
+
+pub fn an_unrecorded_event_limit_leaves_the_budget_not_recorded_test() {
+  let b = base()
+  let unrecorded =
+    provenance.Provenance(
+      ..b,
+      collection: provenance.Collection(
+        ..b.collection,
+        budgets: provenance.Budgets(..b.collection.budgets, max_events: None),
+      ),
+    )
+
+  assert list.key_find(provenance.comparability(b, unrecorded).fields, Budget)
+    == Ok(provenance.NotRecorded)
 }

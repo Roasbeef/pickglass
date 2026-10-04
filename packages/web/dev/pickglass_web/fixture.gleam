@@ -1189,40 +1189,42 @@ pub fn profile() -> Result(model.ProfileModel, String) {
   let peeks =
     list.filter_map(call_graph.nodes, fn(n) { peek.at(call_graph, n.function) })
 
-  Ok(model.ProfileModel(
-    header: model.ProfileHeader(
-      title: "probe p-41",
-      source: profile.source(applied.profile),
-      info: model.PanelInfo(
-        source: "polled current_stacktrace",
-        method: "sampled at reduction safe points, 50 Hz requested",
-        cadence: measure.EveryMs(interval_ms: 20),
-        achieved_ms: Some(20),
-        coverage: measure.Coverage(
-          scope: "samples over 2 targets",
-          requested: 12_000,
-          achieved: profile.total(base, column),
-          outcome: measure.Partial(reason: measure.Truncated(
-            reason: measure.BudgetReached,
-          )),
-          dropped_events: Known(12_000 - profile.total(base, column)),
-          in_flight_events: NotApplicable,
-          unscanned_bytes: NotApplicable,
+  Ok(
+    model.ProfileModel(
+      header: model.ProfileHeader(
+        title: "probe p-41",
+        source: profile.source(applied.profile),
+        info: model.PanelInfo(
+          source: "polled current_stacktrace",
+          method: "sampled at reduction safe points, 50 Hz requested",
+          cadence: measure.EveryMs(interval_ms: 20),
+          achieved_ms: Some(20),
+          coverage: measure.Coverage(
+            scope: "samples over 2 targets",
+            requested: 12_000,
+            achieved: profile.total(base, column),
+            outcome: measure.Partial(reason: measure.Truncated(
+              reason: measure.BudgetReached,
+            )),
+            dropped_events: Known(12_000 - profile.total(base, column)),
+            in_flight_events: NotApplicable,
+            unscanned_bytes: NotApplicable,
+          ),
         ),
+        caveats: [
+          "Width is a share of samples, not of time.",
+          "Long BIFs and NIFs are under-sampled.",
+          "Stack depth is limited to 8; truncated roots are drawn at the base.",
+        ],
       ),
-      caveats: [
-        "Width is a share of samples, not of time.",
-        "Long BIFs and NIFs are under-sampled.",
-        "Stack depth is limited to 8; truncated roots are drawn at the base.",
-      ],
+      profile: applied.profile,
+      column:,
+      chain: applied.reports,
+      stacks: model.HasStacks(layout:, graph: call_graph, dag: placed, peeks:),
+      top: table,
+      exports: [],
     ),
-    profile: applied.profile,
-    column:,
-    chain: applied.reports,
-    stacks: model.HasStacks(layout:, graph: call_graph, dag: placed, peeks:),
-    top: table,
-    exports: [],
-  ))
+  )
 }
 
 // ------------------------------------------------------------ timeline
@@ -1388,7 +1390,7 @@ fn provenance_for(
       emulator_flavor: "jit",
       wordsize: 8,
       schedulers: 16,
-      dirty_cpu_schedulers: 16,
+      dirty_cpu_schedulers: Some(16),
       flags: ["+Muatags true"],
     ),
     build: provenance.Build(
@@ -1400,7 +1402,7 @@ fn provenance_for(
     workload: provenance.Workload(
       label: workload,
       sessions: [#("idle", sessions)],
-      warmup_ms: 300_000,
+      warmup_ms: Some(300_000),
       notes: "",
     ),
     collection: provenance.Collection(
@@ -1408,7 +1410,7 @@ fn provenance_for(
       cadence: measure.EveryMs(interval_ms: cadence_ms),
       budgets: provenance.Budgets(
         top_k: 200,
-        max_events: 100_000,
+        max_events: Some(100_000),
         deadline_ms: 5000,
       ),
     ),

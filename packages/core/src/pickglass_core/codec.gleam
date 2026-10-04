@@ -549,6 +549,16 @@ fn target_decoder() -> Decoder(Target) {
   decode.success(Target(incarnation:, os:, role:))
 }
 
+// A value the collector may not have recorded: written as null, and read
+// from null or from a header that lacks the key. A zero in an older capture
+// is read as the zero it claims.
+fn optional_int(
+  name: String,
+  next: fn(Option(Int)) -> Decoder(a),
+) -> Decoder(a) {
+  decode.optional_field(name, None, decode.optional(decode.int), next)
+}
+
 fn runtime_json(runtime: Runtime) -> Json {
   json.object([
     #("otp_release", json.string(runtime.otp_release)),
@@ -556,7 +566,10 @@ fn runtime_json(runtime: Runtime) -> Json {
     #("emulator_flavor", json.string(runtime.emulator_flavor)),
     #("wordsize", json.int(runtime.wordsize)),
     #("schedulers", json.int(runtime.schedulers)),
-    #("dirty_cpu_schedulers", json.int(runtime.dirty_cpu_schedulers)),
+    #(
+      "dirty_cpu_schedulers",
+      json.nullable(runtime.dirty_cpu_schedulers, json.int),
+    ),
     #("flags", json.array(runtime.flags, json.string)),
   ])
 }
@@ -567,7 +580,7 @@ fn runtime_decoder() -> Decoder(Runtime) {
   use emulator_flavor <- decode.field("emulator_flavor", decode.string)
   use wordsize <- decode.field("wordsize", decode.int)
   use schedulers <- decode.field("schedulers", decode.int)
-  use dirty_cpu_schedulers <- decode.field("dirty_cpu_schedulers", decode.int)
+  use dirty_cpu_schedulers <- optional_int("dirty_cpu_schedulers")
   use flags <- decode.field("flags", decode.list(decode.string))
 
   decode.success(Runtime(
@@ -611,7 +624,7 @@ fn workload_json(workload: Workload) -> Json {
         ])
       }),
     ),
-    #("warmup_ms", json.int(workload.warmup_ms)),
+    #("warmup_ms", json.nullable(workload.warmup_ms, json.int)),
     #("notes", json.string(workload.notes)),
   ])
 }
@@ -619,7 +632,7 @@ fn workload_json(workload: Workload) -> Json {
 fn workload_decoder() -> Decoder(Workload) {
   use label <- decode.field("label", decode.string)
   use sessions <- decode.field("sessions", decode.list(count_decoder()))
-  use warmup_ms <- decode.field("warmup_ms", decode.int)
+  use warmup_ms <- optional_int("warmup_ms")
   use notes <- decode.field("notes", decode.string)
 
   decode.success(Workload(label:, sessions:, warmup_ms:, notes:))
@@ -635,14 +648,14 @@ fn count_decoder() -> Decoder(#(String, Int)) {
 fn budgets_json(budgets: Budgets) -> Json {
   json.object([
     #("top_k", json.int(budgets.top_k)),
-    #("max_events", json.int(budgets.max_events)),
+    #("max_events", json.nullable(budgets.max_events, json.int)),
     #("deadline_ms", json.int(budgets.deadline_ms)),
   ])
 }
 
 fn budgets_decoder() -> Decoder(Budgets) {
   use top_k <- decode.field("top_k", decode.int)
-  use max_events <- decode.field("max_events", decode.int)
+  use max_events <- optional_int("max_events")
   use deadline_ms <- decode.field("deadline_ms", decode.int)
 
   decode.success(Budgets(top_k:, max_events:, deadline_ms:))

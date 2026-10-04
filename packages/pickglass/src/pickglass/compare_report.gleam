@@ -131,6 +131,7 @@ fn field_line(entry: #(provenance.Field, provenance.FieldResult)) -> String {
     provenance.DiffersExpected -> "  " <> name <> "differs (expected)"
     provenance.DiffersBlocking(detail:) ->
       "  " <> name <> "differs, blocks: " <> detail
+    provenance.NotRecorded -> "  " <> name <> "not recorded"
   }
 }
 

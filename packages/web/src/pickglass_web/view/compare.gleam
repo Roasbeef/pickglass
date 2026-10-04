@@ -188,6 +188,7 @@ fn field_row(
       "differs, blocks",
       detail,
     )
+    provenance.NotRecorded -> #("field-unrecorded", "not recorded", "")
   }
 
   html.tr([attribute.class(class)], [
@@ -214,7 +215,11 @@ fn field_value(field: Field, p: Provenance) -> String {
       <> " · "
       <> fmt.duration_ms(p.collection.budgets.deadline_ms)
     provenance.WorkloadField -> p.workload.label
-    provenance.Warmup -> fmt.duration_ms(p.workload.warmup_ms)
+    provenance.Warmup ->
+      case p.workload.warmup_ms {
+        Some(ms) -> fmt.duration_ms(ms)
+        None -> "not recorded"
+      }
     provenance.CadenceField ->
       case p.collection.cadence {
         measure.OneShot -> "one shot"

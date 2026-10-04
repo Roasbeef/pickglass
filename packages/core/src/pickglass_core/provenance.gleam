@@ -24,6 +24,7 @@
 
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/string
 import pickglass_core/identity.{type NodeIncarnation, type OsProcess}
@@ -63,7 +64,8 @@ pub type Runtime {
     emulator_flavor: String,
     wordsize: Int,
     schedulers: Int,
-    dirty_cpu_schedulers: Int,
+    /// `None` when the collector did not read it.
+    dirty_cpu_schedulers: Option(Int),
     /// Emulator flags that change measurement, such as `+Muatags` and
     /// `+JPperf`, as the target reported them.
     flags: List(String),
@@ -88,8 +90,9 @@ pub type Workload {
     label: String,
     /// Counts the host's provider reported, such as `("sessions", 12)`.
     sessions: List(#(String, Int)),
-    /// Milliseconds the target ran before collection started.
-    warmup_ms: Int,
+    /// Milliseconds the target ran before collection started. `None` when
+    /// the collector had no way to know, which is not the same as zero.
+    warmup_ms: Option(Int),
     /// Free-form notes. Never compared.
     notes: String,
   )
@@ -100,8 +103,9 @@ pub type Budgets {
   Budgets(
     /// Rows kept by a census.
     top_k: Int,
-    /// Events a probe may collect before it stops.
-    max_events: Int,
+    /// Events a probe may collect before it stops. `None` when the collector
+    /// has no such limit to record.
+    max_events: Option(Int),
     /// Milliseconds a collection may run.
     deadline_ms: Int,
   )
@@ -169,6 +173,12 @@ pub type FieldResult {
   /// The fields differ in a way that invalidates the comparison. The
   /// string says how.
   DiffersBlocking(detail: String)
+
+  /// A value one side never recorded, and the rest of the field agrees. It
+  /// is neither the same nor different, so no figure leans on it, and it
+  /// does not withhold a direction: a viewer's own captures never record a
+  /// warmup, and would otherwise never be comparable.
+  NotRecorded
 }
 
 /// The per-field comparison of two captures.
@@ -208,19 +218,10 @@ pub fn comparability(
 ) -> Comparability {
   Comparability(fields: [
     #(Method, blocking(baseline.collection.method, candidate.collection.method)),
-    #(
-      RuntimeField,
-      blocking(
-        normalize_runtime(baseline.runtime),
-        normalize_runtime(candidate.runtime),
-      ),
-    ),
+    #(RuntimeField, runtime_result(baseline.runtime, candidate.runtime)),
     #(
       Budget,
-      blocking(
-        budgets_text(baseline.collection.budgets),
-        budgets_text(candidate.collection.budgets),
-      ),
+      budget_result(baseline.collection.budgets, candidate.collection.budgets),
     ),
     #(
       WorkloadField,
@@ -231,10 +232,7 @@ pub fn comparability(
     ),
     #(
       Warmup,
-      blocking(
-        int.to_string(baseline.workload.warmup_ms),
-        int.to_string(candidate.workload.warmup_ms),
-      ),
+      recorded_values(baseline.workload.warmup_ms, candidate.workload.warmup_ms),
     ),
     #(
       CadenceField,
@@ -269,15 +267,56 @@ fn expected(baseline: a, candidate: a) -> FieldResult {
 }
 
 // Flags are a set: the order the target listed them in carries no meaning.
-fn normalize_runtime(runtime: Runtime) -> Runtime {
-  Runtime(..runtime, flags: list.sort(runtime.flags, string.compare))
+// The dirty scheduler count is compared on its own, since a side that did
+// not record it must not make the rest of the runtime differ.
+fn runtime_result(baseline: Runtime, candidate: Runtime) -> FieldResult {
+  let without_count = fn(runtime: Runtime) {
+    Runtime(
+      ..runtime,
+      flags: list.sort(runtime.flags, string.compare),
+      dirty_cpu_schedulers: None,
+    )
+  }
+
+  then_recorded(
+    blocking(without_count(baseline), without_count(candidate)),
+    recorded_values(
+      baseline.dirty_cpu_schedulers,
+      candidate.dirty_cpu_schedulers,
+    ),
+  )
+}
+
+fn budget_result(baseline: Budgets, candidate: Budgets) -> FieldResult {
+  then_recorded(
+    blocking(budgets_text(baseline), budgets_text(candidate)),
+    recorded_values(baseline.max_events, candidate.max_events),
+  )
+}
+
+// Two optional values compare only when both sides recorded one.
+fn recorded_values(
+  baseline: Option(Int),
+  candidate: Option(Int),
+) -> FieldResult {
+  case baseline, candidate {
+    Some(before), Some(after) -> blocking(before, after)
+    None, _ | _, None -> NotRecorded
+  }
+}
+
+// A difference in the parts both sides recorded decides the field; when they
+// agree, the optional part decides it.
+fn then_recorded(recorded: FieldResult, optional: FieldResult) -> FieldResult {
+  case recorded {
+    Same -> optional
+    DiffersExpected | DiffersBlocking(_) | NotRecorded -> recorded
+  }
 }
 
 fn budgets_text(budgets: Budgets) -> String {
   "top_k="
   <> int.to_string(budgets.top_k)
-  <> " max_events="
-  <> int.to_string(budgets.max_events)
   <> " deadline_ms="
   <> int.to_string(budgets.deadline_ms)
 }
@@ -311,7 +350,7 @@ pub fn blocking_fields(comparability: Comparability) -> List(Field) {
   list.filter_map(comparability.fields, fn(entry) {
     case entry.1 {
       DiffersBlocking(_) -> Ok(entry.0)
-      Same | DiffersExpected -> Error(Nil)
+      Same | DiffersExpected | NotRecorded -> Error(Nil)
     }
   })
 }

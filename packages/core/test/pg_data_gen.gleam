@@ -6,7 +6,7 @@
 //// rejected are written out by hand in the tests that need them.
 
 import gleam/list
-import gleam/option
+import gleam/option.{Some}
 import pickglass_core/capture.{type Record}
 import pickglass_core/identity
 import pickglass_core/measure
@@ -273,7 +273,7 @@ pub fn runtime() -> Generator(provenance.Runtime) {
   use emulator_flavor <- qcheck.bind(text())
   use wordsize <- qcheck.bind(positive())
   use schedulers <- qcheck.bind(positive())
-  use dirty_cpu_schedulers <- qcheck.bind(non_negative())
+  use dirty_cpu_schedulers <- qcheck.bind(maybe(non_negative()))
   use flags <- qcheck.map(small_list(text()))
 
   provenance.Runtime(
@@ -290,7 +290,7 @@ pub fn runtime() -> Generator(provenance.Runtime) {
 pub fn workload() -> Generator(provenance.Workload) {
   use label <- qcheck.bind(text())
   use sessions <- qcheck.bind(small_list(qcheck.tuple2(text(), non_negative())))
-  use warmup_ms <- qcheck.bind(non_negative())
+  use warmup_ms <- qcheck.bind(maybe(non_negative()))
   use notes <- qcheck.map(text())
 
   provenance.Workload(label:, sessions:, warmup_ms:, notes:)
@@ -300,7 +300,7 @@ pub fn collection() -> Generator(provenance.Collection) {
   use method <- qcheck.bind(text())
   use cadence <- qcheck.bind(cadence())
   use top_k <- qcheck.bind(non_negative())
-  use max_events <- qcheck.bind(non_negative())
+  use max_events <- qcheck.bind(maybe(non_negative()))
   use deadline_ms <- qcheck.map(non_negative())
 
   provenance.Collection(
@@ -540,17 +540,22 @@ pub fn sample_provenance() -> provenance.Provenance {
       emulator_flavor: "jit",
       wordsize: 8,
       schedulers: 8,
-      dirty_cpu_schedulers: 8,
+      dirty_cpu_schedulers: Some(8),
       flags: ["+Muatags true", "+JPperf true"],
     ),
     build: provenance.Build("loom", "1.0", "abc123", "1.18"),
-    workload: provenance.Workload("idle-12", [#("sessions", 12)], 300_000, ""),
+    workload: provenance.Workload(
+      "idle-12",
+      [#("sessions", 12)],
+      Some(300_000),
+      "",
+    ),
     collection: provenance.Collection(
       method: "census/processes_iterator",
       cadence: measure.EveryMs(10_000),
       budgets: provenance.Budgets(
         top_k: 100,
-        max_events: 1000,
+        max_events: Some(1000),
         deadline_ms: 5000,
       ),
     ),
