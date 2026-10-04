@@ -908,7 +908,8 @@ fn graph_tab(
       <> "between its ends. Text size follows flat value; shade follows "
       <> "cumulative share. Each box shows flat, then cumulative, with their "
       <> "shares of the total; an edge shows its weight when that is at least "
-      <> "2% of the total.",
+      <> "2% of the total. The graph is drawn at full size; scroll the frame "
+      <> "sideways and down to see the rest.",
     ),
   ])
 }

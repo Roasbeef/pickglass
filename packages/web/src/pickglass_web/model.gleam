@@ -43,6 +43,7 @@ import pickglass_core/profile/activity
 import pickglass_core/provenance
 import pickglass_core/unit.{type Unit}
 import pickglass_web/key.{type Key}
+import pickglass_web/memory_model
 
 // ------------------------------------------------------------ shared
 
@@ -409,6 +410,12 @@ pub type OwnerRow {
     /// Binary references. Overlaps between processes, so a group has no
     /// total for it.
     binary_refs: Measurement,
+    /// The bytes of the ETS tables the group's processes own, from the
+    /// agent's per-owner aggregate. A row the aggregate does not cover says
+    /// why instead of showing zero.
+    ets_bytes: Measurement,
+    /// How many ETS tables those are.
+    ets_tables: Measurement,
     /// The processes of the group, shown when it is expanded.
     members: List(ProcRow),
   )
@@ -429,6 +436,10 @@ pub type Remainder {
     procs: Measurement,
     /// Their heap capacity, or the word for why it was not read.
     heap_cap: Measurement,
+    /// The bytes of ETS tables owned by processes outside the listed owner
+    /// aggregates, the pass's total minus the listed owners', or the word for
+    /// why it is not known.
+    ets_bytes: Measurement,
   )
 }
 
@@ -449,6 +460,8 @@ pub type OwnersModel {
     labelled: #(Int, Int),
     /// What lies outside the rows, from the agent's per-owner aggregate.
     remainder: Remainder,
+    /// What the ETS column covers.
+    ets: memory_model.OwnersEts,
     /// The milliseconds between the two passes the reduction rates are the
     /// change over, when there are two. A group's rate sums the processes
     /// that were in both.
@@ -542,6 +555,9 @@ pub type ProcessDetailModel {
     evidence: List(Evidence),
     /// Whether the host answers a self-measure request.
     self_measure: SelfMeasure,
+    /// The process's reference-counted binaries, once the operator has
+    /// planned and confirmed the read.
+    binaries: memory_model.Binaries,
   )
 }
 
@@ -585,6 +601,8 @@ pub type MemoryModel {
     allocators: Panel(List(CategoryRow)),
     /// ETS, binaries and similar.
     tables: Panel(List(CategoryRow)),
+    /// The largest ETS tables, from the agent's table walk.
+    ets: Panel(memory_model.EtsListing),
   )
 }
 
@@ -602,6 +620,11 @@ pub type SupKind {
 
   /// A process whose parent could be read but not its kind.
   UnknownKind
+
+  /// A process whose `proc_lib` initial call is known and is not a
+  /// supervisor's, so it is a worker even when something it spawned shows as
+  /// its child.
+  Worker
 }
 
 /// One node of the supervision tree.
@@ -647,6 +670,9 @@ pub type PlanWhat {
 
   /// Ask one pinned process to measure a term it holds.
   MeasurePlan
+
+  /// List the reference-counted binaries of one pinned process.
+  BinariesPlan
 }
 
 /// Whether a plan can be made again by another method. Only the plans a

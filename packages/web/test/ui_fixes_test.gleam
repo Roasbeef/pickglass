@@ -317,17 +317,24 @@ pub fn the_owners_page_has_a_remainder_row_for_what_the_rows_leave_out_test() {
 pub fn a_remainder_of_zero_draws_no_row_test() {
   let page_model = fixture.owners()
 
-  owners_builder.with_remainder(page_model, procs: 0, heap_cap: Known(0)).remainder
+  owners_builder.with_remainder(
+    page_model,
+    procs: 0,
+    heap_cap: Known(0),
+    ets_bytes: Known(0),
+  ).remainder
   |> should.equal(model.NoRemainder)
 
   owners_builder.with_remainder(
     page_model,
     procs: 5,
     heap_cap: measure.Missing(measure.BudgetExhausted),
+    ets_bytes: measure.Missing(measure.DeadlineReached),
   ).remainder
   |> should.equal(model.Remainder(
     procs: Known(5),
     heap_cap: measure.Missing(measure.BudgetExhausted),
+    ets_bytes: measure.Missing(measure.DeadlineReached),
   ))
 }
 

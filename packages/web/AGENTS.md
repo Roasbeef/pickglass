@@ -48,6 +48,17 @@ typed in the plan form's field) and "Sample stacks instead". `TraceProcess`,
 call timelines that `chart/activity` draws on a time axis of their own, and
 `ExportTrace` asks for their Chrome traces.
 
+`memory_model` holds the types of the agent's ETS and binaries readings, kept
+out of `model` for the size `timeline_model` is: `OwnersEts` and `EtsReach` (what
+the owners page's ETS column covers), `EtsListing` and `EtsRow` (the memory
+page's table listing) and `Binaries` and `BinaryRow` (the process page's read).
+`OwnerRow` carries `ets_bytes` and `ets_tables` as measurements, so a row the
+agent's per-owner aggregate does not cover shows the word for why and never
+zero. `Request.PlanBinaries` plans a binaries read of a pinned process, and
+`PlanWhat.BinariesPlan` is its card. A strip whose source is `Detached` draws
+"Detached: no target" with no grants, not the role it had. A "Requested: ..."
+notice is cleared when the profile feed that answers it arrives.
+
 `key.Key` is the only name a browser event may carry:`key.Key` is the only name a browser event may carry: 1 to 64 characters from
 a closed alphabet, issued by the viewer for rows, boxes, nodes, plans and
 checkpoints. Pids, module names and function names never travel from the

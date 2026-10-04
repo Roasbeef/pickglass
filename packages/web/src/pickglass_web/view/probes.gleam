@@ -130,6 +130,7 @@ fn what_title(what: model.PlanWhat) -> String {
     model.ProbePlan(kind:) -> kind_title(kind)
     model.GcPlan -> "Collect garbage in one process"
     model.MeasurePlan -> "Ask one process to measure itself"
+    model.BinariesPlan -> "Read the binaries one process holds"
   }
 }
 
@@ -143,6 +144,12 @@ fn what_action(what: model.PlanWhat) -> String {
       "Sends the pinned process a request to measure a term it holds and "
       <> "waits for its answer. Only a process that advertises the "
       <> "capability is asked."
+    model.BinariesPlan ->
+      "Asks the target for one entry per reference-counted binary the pinned "
+      <> "process holds and reports the distinct binaries, their total size "
+      <> "and the largest. The target builds a tuple for every reference, so "
+      <> "the cost grows with how many the process holds, and a process with "
+      <> "more than 50,000 references is refused without a partial figure."
   }
 }
 
@@ -155,6 +162,10 @@ fn what_does_not_prove(what: model.PlanWhat) -> String {
     model.MeasurePlan ->
       "That the reading is complete: the process reports what it chooses to "
       <> "and the viewer does not check it against its heap."
+    model.BinariesPlan ->
+      "That the process alone owns this memory: a binary is shared by every "
+      <> "process that references it, and a sub-binary counts the whole "
+      <> "binary it points into."
   }
 }
 
@@ -463,7 +474,7 @@ fn scope_rows(card: PlanCard, scope: policy.PlanScope) -> List(Element(Msg)) {
 
     // A collection or a self-measure acts on the processes only; it names no
     // module and matches no function.
-    model.GcPlan | model.MeasurePlan -> ""
+    model.GcPlan | model.MeasurePlan | model.BinariesPlan -> ""
     model.ProbePlan(..) ->
       " · modules "
       <> list.fold(scope.modules, "", join_words)

@@ -280,6 +280,11 @@ pub type Request {
   /// Ask a pinned process to measure itself.
   RequestSelfMeasure(pin: Key)
 
+  /// Plan a read of the reference-counted binaries one pinned process holds.
+  /// The read is costly for a process holding many, so it waits for Confirm
+  /// like a probe does.
+  PlanBinaries(pin: Key)
+
   /// Confirm a plan the viewer showed.
   ConfirmPlan(plan: Key)
 

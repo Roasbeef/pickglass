@@ -36,6 +36,7 @@ import pickglass_core/policy.{type Capability}
 import pickglass_core/unit
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
+import pickglass_web/memory_model
 import pickglass_web/model.{
   type CheckpointRef, type OwnerRow, type OwnersModel, type ProcRow,
 }
@@ -118,6 +119,7 @@ pub fn view(
         <> "its five largest processes; open it for the rest.",
       ),
       ui.note(labelled_text(data.labelled)),
+      ui.note(ets_text(data.ets)),
     ],
   )
 }
@@ -137,6 +139,46 @@ fn heap_of(member: ProcRow) -> Int {
   case member.heap_cap {
     measure.Known(value:) -> value
     measure.Missing(_) | measure.NotApplicable -> -1
+  }
+}
+
+// What the ETS column rests on, stated beside it: how much of the node's
+// tables the agent's pass read, and the two ways its figures can understate.
+fn ets_text(ets: memory_model.OwnersEts) -> String {
+  case ets {
+    memory_model.EtsNotRead(reason:) -> "ETS column not read: " <> reason <> "."
+    memory_model.EtsPassRead(
+      tables:,
+      bytes:,
+      skipped:,
+      reach:,
+      owners:,
+      tracked:,
+    ) ->
+      "ETS: the agent's pass read "
+      <> fmt.count(tables)
+      <> " tables holding "
+      <> fmt.bytes(bytes)
+      <> " on the node, from table properties only and never contents; "
+      <> "tables of a process with no label count under unknown. "
+      <> case skipped {
+        0 -> ""
+        n -> fmt.count(n) <> " tables were deleted before they could be read. "
+      }
+      <> case reach {
+        memory_model.EveryTable -> ""
+        memory_model.StoppedAtDeadline ->
+          "The pass stopped at its deadline with tables unread, so every ETS figure here understates. "
+      }
+      <> case tracked > owners {
+        True ->
+          "The agent lists aggregates for "
+          <> fmt.count(owners)
+          <> " of "
+          <> fmt.count(tracked)
+          <> " owners; a row without one says so."
+        False -> ""
+      }
   }
 }
 
@@ -184,6 +226,14 @@ fn head(rate_ms: Option(Int)) -> Element(Msg) {
       ui.th("owner", None),
       ui.th_num("procs", None),
       ui.th_num("heap capacity", Some("process_info(memory), bytes")),
+      ui.th_num(
+        "ETS",
+        Some(
+          "bytes in the ETS tables the group's processes own, and how many "
+          <> "tables, from the agent's table walk; properties only, never "
+          <> "contents",
+        ),
+      ),
       ui.th_num("Δ", Some("change of heap capacity since the checkpoint")),
       ui.th_num("mailbox", Some("messages waiting")),
       ui.th_num(
@@ -267,6 +317,7 @@ fn group_row(
     ]),
     ui.num(row.procs, unit.Count),
     heap_cell(row),
+    ets_cell(row),
     ui.delta(row.delta, unit.Bytes),
     ui.num(row.mailbox, unit.Count),
     ui.num(row.reductions, unit.Reductions),
@@ -280,7 +331,7 @@ fn group_row(
 fn remainder_row(remainder: model.Remainder) -> Element(Msg) {
   case remainder {
     model.NoRemainder -> element.none()
-    model.Remainder(procs:, heap_cap:) ->
+    model.Remainder(procs:, heap_cap:, ets_bytes:) ->
       html.tr([attribute.class("group remainder")], [
         html.td([attribute.class("owner-cell depth-0")], [
           html.span([attribute.class("twisty twisty-none")], []),
@@ -290,6 +341,7 @@ fn remainder_row(remainder: model.Remainder) -> Element(Msg) {
         ]),
         ui.num(procs, unit.Count),
         ui.num(heap_cap, unit.Bytes),
+        ui.num(ets_bytes, unit.Bytes),
         ui.num(measure.NotApplicable, unit.Bytes),
         ui.num(measure.NotApplicable, unit.Count),
         ui.num(measure.NotApplicable, unit.Reductions),
@@ -314,6 +366,22 @@ fn heap_cell(row: OwnerRow) -> Element(Msg) {
         ],
         [element.text("≥ " <> fmt.cell(row.heap_cap, unit.Bytes))],
       )
+  }
+}
+
+// The bytes of ETS the row's processes own, with the table count in the same
+// cell. A row the agent's aggregate does not cover shows the word for why and
+// never a zero.
+fn ets_cell(row: OwnerRow) -> Element(Msg) {
+  case row.ets_bytes, row.ets_tables {
+    measure.Known(_), measure.Known(tables) ->
+      html.td([attribute.class("num")], [
+        element.text(fmt.cell(row.ets_bytes, unit.Bytes)),
+        html.span([attribute.class("muted")], [
+          element.text(" · " <> fmt.count(tables)),
+        ]),
+      ])
+    _, _ -> ui.num(row.ets_bytes, unit.Bytes)
   }
 }
 
@@ -389,6 +457,7 @@ fn member_row(member: ProcRow, links: Links) -> Element(Msg) {
     ]),
     ui.num(model_count(), unit.Count),
     ui.num(member.heap_cap, unit.Bytes),
+    html.td([attribute.class("num")], []),
     html.td([attribute.class("num")], []),
     ui.num(member.mailbox, unit.Count),
     ui.num(member.reductions, unit.Reductions),

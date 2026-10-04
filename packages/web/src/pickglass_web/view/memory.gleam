@@ -28,6 +28,7 @@ import lustre/element/html
 import pickglass_core/measure
 import pickglass_core/unit
 import pickglass_web/fmt
+import pickglass_web/memory_model
 import pickglass_web/model.{type CategoryRow, type MemoryModel, type Panel}
 import pickglass_web/msg.{type Msg}
 import pickglass_web/view/ui
@@ -52,7 +53,110 @@ pub fn view(data: MemoryModel) -> Element(Msg) {
     category_panel("Categories (erlang:memory)", data.categories),
     category_panel("Allocators", data.allocators),
     category_panel("Tables and binaries", data.tables),
+    ets_panel(data.ets),
   ])
+}
+
+// The largest ETS tables, by properties. The panel says what the agent's walk
+// covered, because a table created or deleted during the walk is in neither
+// count and a walk that ran out of time understates every figure here.
+fn ets_panel(panel: Panel(memory_model.EtsListing)) -> Element(Msg) {
+  ui.panel(
+    title: "ETS tables, largest first",
+    info: panel.info,
+    controls: [],
+    body: case panel.body {
+      memory_model.EtsListingMissing(reason:) -> [
+        ui.note("The ETS table walk has not answered: " <> reason <> "."),
+      ]
+      memory_model.EtsListed(
+        rows:,
+        total:,
+        read:,
+        skipped:,
+        reach:,
+        objects:,
+        bytes:,
+        age_ms:,
+      ) -> [
+        html.table([attribute.class("tbl")], [
+          html.thead([], [
+            html.tr([], [
+              ui.th("table", None),
+              ui.th("owner", None),
+              ui.th("type", None),
+              ui.th("protection", None),
+              ui.th_num("objects", None),
+              ui.th_num("memory", None),
+            ]),
+          ]),
+          html.tbody([], list.map(rows, ets_row)),
+        ]),
+        ui.note(ets_coverage(
+          listed: list.length(rows),
+          total:,
+          read:,
+          skipped:,
+          reach:,
+          objects:,
+          bytes:,
+          age_ms:,
+        )),
+      ]
+    },
+  )
+}
+
+fn ets_row(row: memory_model.EtsRow) -> Element(Msg) {
+  html.tr([], [
+    html.td([attribute.class("category"), attribute.title(row.id)], [
+      element.text(row.label),
+    ]),
+    html.td([], [
+      html.span([attribute.class("mono")], [element.text(row.owner_pid)]),
+      html.span([attribute.class("owner-label muted")], [
+        element.text(" " <> row.owner_label),
+      ]),
+    ]),
+    html.td([], [element.text(row.kind)]),
+    html.td([], [element.text(row.protection)]),
+    ui.num(row.objects, unit.Count),
+    ui.num(row.bytes, unit.Bytes),
+  ])
+}
+
+fn ets_coverage(
+  listed listed: Int,
+  total total: Int,
+  read read: Int,
+  skipped skipped: Int,
+  reach reach: memory_model.EtsReach,
+  objects objects: measure.Measurement,
+  bytes bytes: measure.Measurement,
+  age_ms age_ms: Int,
+) -> String {
+  "Listing the largest "
+  <> fmt.count(listed)
+  <> " of "
+  <> fmt.count(read)
+  <> " tables read ("
+  <> fmt.count(total)
+  <> " when the walk began), "
+  <> fmt.cell(objects, unit.Count)
+  <> " objects and "
+  <> fmt.cell(bytes, unit.Bytes)
+  <> " in all, read "
+  <> fmt.duration_ms(age_ms)
+  <> " ago. Table properties only: contents are never read. "
+  <> case skipped {
+    0 -> ""
+    n -> fmt.count(n) <> " tables were deleted before they could be read. "
+  }
+  <> case reach {
+    memory_model.EveryTable -> ""
+    memory_model.StoppedAtDeadline ->
+      "The walk stopped at its deadline with tables unread, so these figures understate. "
+  }
 }
 
 fn category_panel(

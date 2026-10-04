@@ -32,8 +32,10 @@ import lustre/element/html
 import pickglass_core/measure
 import pickglass_core/owner
 import pickglass_core/policy.{type Capability}
+import pickglass_core/unit
 import pickglass_web/chart/spark
 import pickglass_web/fmt
+import pickglass_web/memory_model
 import pickglass_web/model.{type Counter, type Evidence, type ProcessDetailModel}
 import pickglass_web/msg.{type Msg}
 import pickglass_web/page.{type Links}
@@ -64,8 +66,87 @@ pub fn view(
         "Not shown by design: mailbox contents, process dictionary, state.",
       ),
     ]),
+    binaries_panel(data.binaries),
     history_panel(data),
   ])
+}
+
+// The binaries the process holds, once read. The page is plain about what the
+// figures are: a binary held through several references counts once, and a
+// sub-binary counts the whole binary it points into, so the total is what the
+// process keeps alive and not memory that belongs to it alone.
+fn binaries_panel(binaries: memory_model.Binaries) -> Element(Msg) {
+  ui.plain_panel(title: "Binaries", body: case binaries {
+    memory_model.BinariesNotRead -> [
+      ui.note(
+        "Not read. Pin the process and choose Read binaries: the read builds "
+        <> "one entry per reference in the target, so it is planned and "
+        <> "confirmed first, and a process that holds more than 50,000 "
+        <> "references is refused.",
+      ),
+    ]
+    memory_model.BinariesRefused(reason:, age_ms:) -> [
+      html.p([attribute.class("notice"), attribute.role("status")], [
+        element.text(
+          "Refused " <> fmt.duration_ms(age_ms) <> " ago: " <> reason,
+        ),
+      ]),
+      ui.note(
+        "Nothing was read, and no partial figure is shown for a process over the budget.",
+      ),
+    ]
+    memory_model.BinariesListed(
+      distinct:,
+      bytes:,
+      references:,
+      largest:,
+      age_ms:,
+    ) -> [
+      html.p([], [
+        element.text(
+          fmt.count(distinct)
+          <> " distinct binaries, "
+          <> fmt.bytes(bytes)
+          <> ", held through "
+          <> fmt.count(references)
+          <> " references; read "
+          <> fmt.duration_ms(age_ms)
+          <> " ago.",
+        ),
+      ]),
+      html.table([attribute.class("tbl")], [
+        html.thead([], [
+          html.tr([], [
+            ui.th("binary", None),
+            ui.th_num("size", None),
+            ui.th_num(
+              "refs",
+              Some("references to this binary that exist on the whole node"),
+            ),
+          ]),
+        ]),
+        html.tbody(
+          [],
+          list.map(largest, fn(row) {
+            html.tr([], [
+              html.td([attribute.class("mono")], [element.text(row.address)]),
+              ui.num(row.bytes, unit.Bytes),
+              ui.num(row.refc, unit.Count),
+            ])
+          }),
+        ),
+      ]),
+      ui.note(
+        "The largest "
+        <> fmt.count(list.length(largest))
+        <> " of "
+        <> fmt.count(distinct)
+        <> " are listed. A binary held through several references counts once; "
+        <> "a sub-binary counts the whole binary it points into, so the size is "
+        <> "what this process keeps alive, not memory it alone owns.",
+      ),
+    ]
+  })
 }
 
 fn header(
@@ -115,6 +196,16 @@ fn actions(
     _, _ -> []
   }
 
+  // Reading a process's binaries builds one tuple per reference in the target,
+  // so it is planned and confirmed, and it needs the observe capability that
+  // every read needs.
+  let binaries = case data.pin, list.contains(grants, policy.Observe) {
+    model.Pinned(pin:), True -> [
+      button("Read binaries…", "btn", msg.Ask(msg.PlanBinaries(pin))),
+    ]
+    _, _ -> []
+  }
+
   let summary = case
     data.pin,
     data.self_measure,
@@ -149,7 +240,14 @@ fn actions(
 
   [
     pin_button,
-    ..list.flatten([profile, tracing(data, grants, modules), probe, gc, summary])
+    ..list.flatten([
+      profile,
+      tracing(data, grants, modules),
+      probe,
+      binaries,
+      gc,
+      summary,
+    ])
   ]
 }
 

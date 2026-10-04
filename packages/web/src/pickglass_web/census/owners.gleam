@@ -32,6 +32,7 @@ import pickglass_core/measure.{type Measurement, Known}
 import pickglass_core/owner
 import pickglass_core/unit
 import pickglass_web/key
+import pickglass_web/memory_model
 import pickglass_web/model.{
   type CheckpointRef, type OwnerRow, type OwnersModel, type PanelInfo,
   type ProcRow,
@@ -75,8 +76,77 @@ pub fn build(
     baseline:,
     labelled: #(list.length(census) - unlabelled, unlabelled),
     remainder: model.NoRemainder,
+    ets: memory_model.EtsNotRead("the agent's ETS pass has not been read"),
     rate_ms: None,
   )
+}
+
+/// Which row of the owners page an ETS reading is asked for.
+pub type EtsRowKey {
+  /// An owner row, by its label (`session:abc`).
+  EtsOwner(label: String)
+
+  /// A role row, by its owner's label and its role.
+  EtsRole(owner: String, role: String)
+
+  /// The unknown row.
+  EtsUnknown
+}
+
+/// What the ETS column shows for one row: the bytes and the table count, each
+/// a measurement so a row the pass did not cover says why instead of reading
+/// zero.
+pub type EtsCell {
+  EtsCell(bytes: Measurement, tables: Measurement)
+}
+
+/// Fill the ETS column of every row from `lookup` and record what the column
+/// rests on. `lookup` is asked once for each row, so it decides what a row
+/// the agent's per-owner aggregate does not cover says.
+///
+/// ## Examples
+///
+/// ```gleam
+/// owners.with_ets(page, note, fn(_) { EtsCell(Known(0), Known(0)) })
+/// ```
+pub fn with_ets(
+  page: OwnersModel,
+  note: memory_model.OwnersEts,
+  lookup: fn(EtsRowKey) -> EtsCell,
+) -> OwnersModel {
+  let #(rows, _) =
+    list.fold(page.rows, #([], ""), fn(state, row) {
+      let #(done, owner_label) = state
+
+      case row.kind {
+        model.OwnerGroup -> #(
+          [with_cell(row, lookup(EtsOwner(row.label))), ..done],
+          row.label,
+        )
+        model.RoleGroup -> #(
+          [
+            with_cell(row, lookup(EtsRole(owner: owner_label, role: row.label))),
+            ..done
+          ],
+          owner_label,
+        )
+        model.UnknownGroup -> #(
+          [with_cell(row, lookup(EtsUnknown)), ..done],
+          owner_label,
+        )
+      }
+    })
+
+  model.OwnersModel(
+    ..page,
+    rows: list.reverse(rows),
+    unknown: with_cell(page.unknown, lookup(EtsUnknown)),
+    ets: note,
+  )
+}
+
+fn with_cell(row: OwnerRow, cell: EtsCell) -> OwnerRow {
+  model.OwnerRow(..row, ets_bytes: cell.bytes, ets_tables: cell.tables)
 }
 
 /// Record what the owner rows leave out.
@@ -90,18 +160,19 @@ pub fn build(
 /// ## Examples
 ///
 /// ```gleam
-/// owners.with_remainder(page, procs: 3398, heap_cap: Known(41 * mib))
+/// owners.with_remainder(page, procs: 3398, heap_cap: Known(41 * mib), ets_bytes: Known(mib))
 /// ```
 pub fn with_remainder(
   page: OwnersModel,
   procs procs: Int,
   heap_cap heap_cap: Measurement,
+  ets_bytes ets_bytes: Measurement,
 ) -> OwnersModel {
   case procs > 0 {
     True ->
       model.OwnersModel(
         ..page,
-        remainder: model.Remainder(procs: Known(procs), heap_cap:),
+        remainder: model.Remainder(procs: Known(procs), heap_cap:, ets_bytes:),
       )
     False -> model.OwnersModel(..page, remainder: model.NoRemainder)
   }
@@ -207,6 +278,8 @@ fn summary_row(
     mailbox: total(members, fn(p) { p.mailbox }, unit.Count),
     reductions: total(members, fn(p) { p.reductions }, unit.Reductions),
     binary_refs: measure.NotApplicable,
+    ets_bytes: measure.Missing(measure.NotCollected),
+    ets_tables: measure.Missing(measure.NotCollected),
     members:,
   )
 }

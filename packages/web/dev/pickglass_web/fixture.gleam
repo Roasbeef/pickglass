@@ -48,6 +48,7 @@ import pickglass_web/fixture/stacks
 import pickglass_web/fixture/traced
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
+import pickglass_web/memory_model
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/page.{type Links, type Page}
@@ -660,9 +661,28 @@ pub fn owners() -> model.OwnersModel {
     idle_0(),
     delta_for,
   )
+  |> owners_builder.with_ets(
+    memory_model.EtsPassRead(
+      tables: 210,
+      bytes: 58 * mib,
+      skipped: 0,
+      reach: memory_model.EveryTable,
+      owners: 100,
+      tracked: 100,
+    ),
+    fn(row) {
+      case row {
+        owners_builder.EtsUnknown ->
+          owners_builder.EtsCell(Known(3 * mib), Known(9))
+        owners_builder.EtsOwner(_) | owners_builder.EtsRole(..) ->
+          owners_builder.EtsCell(Known(mib), Known(2))
+      }
+    },
+  )
   |> owners_builder.with_remainder(
     procs: 3412 - listed,
     heap_cap: Known(44 * mib),
+    ets_bytes: Known(2 * mib),
   )
 }
 
@@ -784,6 +804,24 @@ pub fn process_detail() -> model.ProcessDetailModel {
       ),
     ],
     self_measure: model.Available,
+    binaries: memory_model.BinariesListed(
+      distinct: 212,
+      bytes: 9 * mib,
+      references: 1840,
+      largest: [
+        memory_model.BinaryRow(
+          address: "7f31a0c4e010",
+          bytes: Known(2 * mib),
+          refc: Known(4),
+        ),
+        memory_model.BinaryRow(
+          address: "7f31a0d02a48",
+          bytes: Known(mib),
+          refc: Known(1),
+        ),
+      ],
+      age_ms: 8000,
+    ),
   )
 }
 
@@ -960,6 +998,40 @@ pub fn memory() -> model.MemoryModel {
           "count differs by holder",
         ),
       ],
+    ),
+    ets: model.Panel(
+      info: info("ets_tables", "ets:info/1 over 210 tables", 210, 210, "tables"),
+      body: memory_model.EtsListed(
+        rows: [
+          memory_model.EtsRow(
+            label: "conversation_index",
+            id: "#Ref<0.1.2.3>",
+            owner_pid: "<0.211.0>",
+            owner_label: "daemon core / conversation index",
+            kind: "ordered_set",
+            objects: Known(481_200),
+            bytes: Known(41 * mib),
+            protection: "protected",
+          ),
+          memory_model.EtsRow(
+            label: "session_registry",
+            id: "#Ref<0.1.2.4>",
+            owner_pid: "<0.212.0>",
+            owner_label: "unknown",
+            kind: "set",
+            objects: Known(310),
+            bytes: Known(7 * mib),
+            protection: "public",
+          ),
+        ],
+        total: 210,
+        read: 210,
+        skipped: 0,
+        reach: memory_model.EveryTable,
+        objects: Known(481_510),
+        bytes: Known(58 * mib),
+        age_ms: 4000,
+      ),
     ),
   )
 }

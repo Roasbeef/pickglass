@@ -215,21 +215,28 @@ fn probe_indicator(strip: StripModel, links: Links) -> Element(msg) {
 fn banner(strip: StripModel) -> Element(msg) {
   let b = strip.banner
 
-  let role = case b.role {
-    model.Diagnostic -> "Diagnostic: read-only"
-    model.AttachedFullTrust -> "Attached: full trust"
-  }
-
-  let role_class = case b.role {
-    model.Diagnostic -> "role role-diagnostic"
-    model.AttachedFullTrust -> "role role-trust"
+  // A strip whose node is gone is no longer attached, whatever role the
+  // attachment had: no command can run and no grant can be used, so the
+  // banner must not go on saying "full trust".
+  let #(role, role_class, grants) = case strip.source, b.role {
+    model.Detached(_), _ -> #("Detached: no target", "role role-diagnostic", [])
+    _, model.Diagnostic -> #(
+      "Diagnostic: read-only",
+      "role role-diagnostic",
+      b.grants,
+    )
+    _, model.AttachedFullTrust -> #(
+      "Attached: full trust",
+      "role role-trust",
+      b.grants,
+    )
   }
 
   html.div([attribute.class("banner")], [
     html.span([attribute.class(role_class)], [element.text(role)]),
     html.span(
       [attribute.class("grants")],
-      list.map(b.grants, fn(grant) {
+      list.map(grants, fn(grant) {
         html.span([attribute.class("grant")], [element.text(capability(grant))])
       }),
     ),

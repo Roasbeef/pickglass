@@ -206,13 +206,73 @@ fn store(model: Model, feed: Feed) -> Model {
     msg.FedMemory(data) -> Model(..model, memory: Ready(data))
     msg.FedSupervision(data) -> Model(..model, supervision: Ready(data))
     msg.FedProbes(data) -> Model(..model, probes: Ready(data))
-    msg.FedProfile(data) -> Model(..model, profile: Ready(data))
+    msg.FedProfile(data) ->
+      Model(..clear_answered(model, answered_by_profile), profile: Ready(data))
     msg.FedTimeline(data) -> Model(..model, timeline: Ready(data))
     msg.FedCompare(data) -> Model(..model, compare: Ready(data))
     msg.FedAudit(data) -> Model(..model, audit: Ready(data))
     msg.FedCaptures(data) -> Model(..model, captures: Ready(data))
     msg.FedPlanTarget(target) -> offer_target(model, target)
     msg.FedFlow(data) -> Model(..model, flow: Ready(data))
+  }
+}
+
+// A notice that still reads "Requested: ..." is a promise, and it stops being
+// true when the feed that answers it arrives. The page then draws the
+// outcome, so the promise is cleared; a refusal or any other notice is left
+// alone, because it is not answered by a feed.
+fn clear_answered(model: Model, answers: fn(Request) -> Presence) -> Model {
+  case model.ui.last_request, model.ui.notice {
+    Some(request), Some(shown) ->
+      case answers(request), shown == describe(request) {
+        Present, True ->
+          Model(
+            ..model,
+            ui: state.UiState(..model.ui, notice: None, last_request: None),
+          )
+        _, _ -> model
+      }
+    _, _ -> model
+  }
+}
+
+// The requests whose result is a new profile feed: the view of the samples,
+// the filter chain and the export list change what the profile page draws.
+fn answered_by_profile(request: Request) -> Presence {
+  case request {
+    msg.ChooseSamples(_)
+    | msg.AddFilter(..)
+    | msg.AddFilterAt(..)
+    | msg.TruncateChain(_)
+    | msg.ExportProfile(_) -> Present
+
+    msg.RequestPin(_)
+    | msg.RequestUnpin(_)
+    | msg.PlanProbe(_)
+    | msg.PlanGc(_)
+    | msg.RequestSelfMeasure(_)
+    | msg.PlanBinaries(_)
+    | msg.ConfirmPlan(_)
+    | msg.CancelPlan(_)
+    | msg.StopProbe(_)
+    | msg.ChooseBaseline(_)
+    | msg.ChooseCandidate(_)
+    | msg.TakeCheckpoint(_)
+    | msg.DetachViewer
+    | msg.SaveCapture
+    | msg.SortProcesses(_)
+    | msg.MovePage(_)
+    | msg.PlanProbeFor(_)
+    | msg.ProfileOwner(_)
+    | msg.ProfileBusiest
+    | msg.ProfileProcess(_)
+    | msg.AdjustProfile(..)
+    | msg.TraceCallsInstead(..)
+    | msg.SampleStacksInstead(_)
+    | msg.TraceProcess(..)
+    | msg.RecordProcess(_)
+    | msg.RecordOwner(_)
+    | msg.ExportTrace(_) -> Absent
   }
 }
 
@@ -518,6 +578,7 @@ pub fn describe(request: Request) -> String {
     msg.PlanProbe(_) -> "plan a probe"
     msg.PlanGc(_) -> "plan a targeted collection"
     msg.RequestSelfMeasure(_) -> "ask a process to measure itself"
+    msg.PlanBinaries(_) -> "plan a read of a process's binaries"
     msg.ConfirmPlan(_) -> "confirm the plan"
     msg.CancelPlan(_) -> "cancel the plan"
     msg.StopProbe(_) -> "stop a probe"
@@ -561,6 +622,8 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
     msg.PlanGc(pin) ->
       require(pin_known(model, pin), "That pin is not held by this page.")
     msg.RequestSelfMeasure(pin) ->
+      require(pin_known(model, pin), "That pin is not held by this page.")
+    msg.PlanBinaries(pin) ->
       require(pin_known(model, pin), "That pin is not held by this page.")
     msg.ConfirmPlan(plan) ->
       require(plan_known(model, plan), "That plan is not the one shown.")

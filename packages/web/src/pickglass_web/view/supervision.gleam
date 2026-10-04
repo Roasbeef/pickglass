@@ -65,6 +65,7 @@ fn node(item: SupNode, links: Links, depth: Int) -> Element(Msg) {
     model.Supervisor -> ui.badge("sup", "supervisor")
     model.Leaf -> ui.badge("worker", "leaf")
     model.UnknownKind -> ui.badge("muted", "kind unknown")
+    model.Worker -> ui.badge("worker", "worker")
   }
 
   let owner_tag = case item.owner_label {
