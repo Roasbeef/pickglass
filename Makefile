@@ -4,7 +4,7 @@
 # and what you run locally are the same commands. Packages live under
 # packages/; tools/lint is Loom's house lint, vendored.
 
-PACKAGES := core pickglass
+PACKAGES := core agent pickglass
 # The vendored lint is formatted and tested as a package of its own, but it
 # is not part of `check`'s lint run: it is the linter, not its subject.
 TOOLS := lint
@@ -14,8 +14,8 @@ TOOLS := lint
 # ---------------------------------------------------------------- checking
 
 .PHONY: check
-check: ## Full gate: format, warning-free build, tests, lint, doc-check
-	@$(MAKE) --no-print-directory fmt-check build test lint doc-check
+check: ## Full gate: format, warning-free build, tests, lint, doc-check, agent checks
+	@$(MAKE) --no-print-directory fmt-check build test lint doc-check agent-imports agent-e2e
 	@echo "check clean"
 
 .PHONY: build
@@ -49,6 +49,24 @@ fmt-check: ## Verify formatting without writing (what CI enforces)
 .PHONY: lint
 lint: ## Run the house lint (R0, R2, R4, R6, R10, R13-R16 gate; the rest warn)
 	@scripts/lint.sh
+
+# ------------------------------------------------------------------- agent
+
+# The agent is pushed into someone else's VM, so two checks that no unit test
+# can make run over its compiled beams. The import check proves no call
+# leaves the agent and the OTP modules every node has. The end-to-end script
+# pushes the beams into a peer node and proves the teardown guarantees.
+AGENT_EBIN := packages/agent/build/dev/erlang/pickglass_agent/ebin
+
+.PHONY: agent-imports
+agent-imports: ## Fail if a compiled agent beam calls outside its allowed modules
+	@(cd packages/agent && gleam build --warnings-as-errors)
+	@escript scripts/agent_imports.escript $(AGENT_EBIN)
+
+.PHONY: agent-e2e
+agent-e2e: ## Push the agent into a peer node; check teardown on link death and kill -9
+	@(cd packages/agent && gleam build --warnings-as-errors)
+	@escript scripts/agent_e2e.escript $(AGENT_EBIN)
 
 # -------------------------------------------------------------------- docs
 
