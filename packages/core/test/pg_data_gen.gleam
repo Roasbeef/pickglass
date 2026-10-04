@@ -154,6 +154,7 @@ pub fn outcome() -> Generator(measure.Outcome) {
     ),
     qcheck.map(text(), fn(reason) { measure.Refused(reason:) }),
     qcheck.map(text(), fn(reason) { measure.Errored(reason:) }),
+    qcheck.constant(measure.Unrecorded),
   ])
 }
 
@@ -511,7 +512,9 @@ fn cost_record() -> Generator(Record(String)) {
   use events <- qcheck.bind(measurement())
   use collector_reductions <- qcheck.bind(measurement())
   use bytes <- qcheck.bind(measurement())
-  use wall_ms <- qcheck.map(measurement())
+  use wall_ms <- qcheck.bind(measurement())
+  use outcome <- qcheck.bind(outcome())
+  use matched <- qcheck.map(maybe(non_negative()))
 
   capture.ProbeCostRecord(capture.ProbeCost(
     probe:,
@@ -520,6 +523,8 @@ fn cost_record() -> Generator(Record(String)) {
     collector_reductions:,
     bytes:,
     wall_ms:,
+    outcome:,
+    matched:,
   ))
 }
 

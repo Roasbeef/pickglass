@@ -425,6 +425,11 @@ pub type Outcome {
 
   /// The collection failed; the string says why.
   Errored(reason: String)
+
+  /// The capture does not say how the collection ended. It is not
+  /// `Complete`: an older capture, or one written before the outcome was
+  /// kept, may hide a probe that was cut short.
+  Unrecorded
 }
 
 /// What one collection covered.
@@ -501,6 +506,6 @@ pub fn parse_partial(code: String) -> Result(PartialReason, Nil) {
 pub fn is_complete(outcome: Outcome) -> Bool {
   case outcome {
     Complete -> True
-    Partial(_) | Refused(_) | Errored(_) -> False
+    Partial(_) | Refused(_) | Errored(_) | Unrecorded -> False
   }
 }

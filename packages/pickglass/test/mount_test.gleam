@@ -69,6 +69,8 @@ fn sampled() -> probe_book.ProbeRecord {
         collector_reductions: measure.NotApplicable,
         bytes: measure.NotApplicable,
         wall_ms: measure.Known(10_000),
+        outcome: measure.Complete,
+        matched: Some(1),
       ),
       profile: Some(built),
       notes: [],

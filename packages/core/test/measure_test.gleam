@@ -51,7 +51,10 @@ pub fn property_partial_codes_round_trip_test() {
     measure.Partial(reason:) -> {
       assert measure.parse_partial(measure.partial_code(reason)) == Ok(reason)
     }
-    measure.Complete | measure.Refused(_) | measure.Errored(_) -> Nil
+    measure.Complete
+    | measure.Refused(_)
+    | measure.Errored(_)
+    | measure.Unrecorded -> Nil
   }
 }
 

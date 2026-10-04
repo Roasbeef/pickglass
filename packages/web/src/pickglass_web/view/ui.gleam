@@ -87,6 +87,7 @@ pub fn truncation_text(outcome: measure.Outcome) -> String {
     measure.Partial(reason:) -> "partial: " <> measure.partial_code(reason)
     measure.Refused(reason:) -> "refused: " <> reason
     measure.Errored(reason:) -> "error: " <> reason
+    measure.Unrecorded -> "not recorded"
   }
 }
 

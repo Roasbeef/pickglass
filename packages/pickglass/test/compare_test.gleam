@@ -11,6 +11,7 @@ import pickglass/compare_build
 import pickglass/compare_report
 import pickglass/observation.{Observation}
 import pickglass/probe_book
+import pickglass_core/capture
 import pickglass_core/identity
 import pickglass_core/measure.{Known, Missing}
 import pickglass_core/policy
@@ -192,36 +193,37 @@ pub fn matching_captures_state_a_direction_in_the_text_test() {
 // A sampled-stacks probe that ran at `hz`, with the same two stacks and
 // `samples` samples spread over them.
 fn sampled(hz: Int, samples: Int) -> probe_book.ProbeRecord {
-  let snapshot =
-    wire.StacksSnapshot(
-      probe_id: 11,
-      state: wire.ProbeFinished,
-      stop: wire.SamplingDeadline,
-      meter: wire.SamplerMeter(
-        requested_hz: hz,
-        achieved_millihz: hz * 1000,
-        rounds: samples,
-        samples:,
-        elapsed_ms: 1000,
-        depth_limit: 8,
-        at_depth_limit: 0,
-        targets_gone: 0,
-        dropped_samples: 0,
-        distinct_stacks: 2,
-        truncated_samples: 0,
-      ),
-      frames: [
-        wire.StackFrame("m", "leaf", 1, wire.NoLocation),
-        wire.StackFrame("m", "root", 1, wire.NoLocation),
-      ],
-      stacks: [
-        wire.SampledStack(samples * 7 / 10, "running", [0, 1]),
-        wire.SampledStack(samples * 3 / 10, "waiting", [1]),
-      ],
-    )
-
   probe_book.started(11, policy.Sampling, [], 0, 10_000, 1)
-  |> probe_book.finish_stacks(snapshot, 1000)
+  |> probe_book.finish_stacks(sampled_snapshot(hz, samples), 1000)
+}
+
+fn sampled_snapshot(hz: Int, samples: Int) -> wire.StacksSnapshot {
+  wire.StacksSnapshot(
+    probe_id: 11,
+    state: wire.ProbeFinished,
+    stop: wire.SamplingDeadline,
+    meter: wire.SamplerMeter(
+      requested_hz: hz,
+      achieved_millihz: hz * 1000,
+      rounds: samples,
+      samples:,
+      elapsed_ms: 1000,
+      depth_limit: 8,
+      at_depth_limit: 0,
+      targets_gone: 0,
+      dropped_samples: 0,
+      distinct_stacks: 2,
+      truncated_samples: 0,
+    ),
+    frames: [
+      wire.StackFrame("m", "leaf", 1, wire.NoLocation),
+      wire.StackFrame("m", "root", 1, wire.NoLocation),
+    ],
+    stacks: [
+      wire.SampledStack(samples * 7 / 10, "running", [0, 1]),
+      wire.SampledStack(samples * 3 / 10, "waiting", [1]),
+    ],
+  )
 }
 
 pub fn probes_sampled_at_different_rates_get_no_verdict_test() {
@@ -257,4 +259,48 @@ pub fn a_longer_probe_at_the_same_rate_is_scaled_not_called_growth_test() {
   // candidate is scaled to the baseline's total, so nothing is drawn as
   // grown. Unscaled, every box would be red.
   assert flame.layout.boxes == []
+}
+
+fn replayed(probe: probe_book.ProbeRecord) -> probe_book.ProbeRecord {
+  let loaded = capture_with("idle", passes(1_000_000), [probe])
+  let assert [found] = probe_book.of_records(loaded.capture.records)
+
+  found
+}
+
+pub fn a_probe_read_from_a_capture_keeps_how_it_ended_test() {
+  let cut =
+    probe_book.started(11, policy.Sampling, [], 0, 10_000, 4)
+    |> probe_book.finish_stacks(
+      wire.StacksSnapshot(
+        ..sampled_snapshot(50, 500),
+        stop: wire.SamplingBudget,
+      ),
+      1000,
+    )
+  let found = replayed(cut)
+  let assert probe_book.Finished(outcome:, ..) = found.state
+
+  assert outcome == measure.Partial(measure.Truncated(measure.BudgetReached))
+  assert found.matched == 4
+}
+
+pub fn a_probe_from_a_capture_without_an_outcome_is_not_called_complete_test() {
+  let unrecorded =
+    probe_book.ProbeRecord(..sampled(50, 500), state: {
+      let assert probe_book.Finished(cost:, ..) as done = sampled(50, 500).state
+
+      probe_book.Finished(
+        ..done,
+        cost: capture.ProbeCost(
+          ..cost,
+          outcome: measure.Unrecorded,
+          matched: None,
+        ),
+      )
+    })
+  let found = replayed(unrecorded)
+  let assert probe_book.Finished(outcome:, ..) = found.state
+
+  assert outcome == measure.Unrecorded
 }

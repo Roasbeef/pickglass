@@ -305,7 +305,9 @@ pub fn series_decoder() -> Decoder(Series) {
 
 // -------------------------------------------------------------- coverage
 
-fn outcome_fields(outcome: Outcome) -> List(#(String, Json)) {
+/// The fields that say how a collection ended: `outcome`, and `reason` for
+/// the outcomes that have one.
+pub fn outcome_fields(outcome: Outcome) -> List(#(String, Json)) {
   case outcome {
     measure.Complete -> [#("outcome", json.string("complete"))]
     measure.Partial(reason:) -> [
@@ -320,6 +322,22 @@ fn outcome_fields(outcome: Outcome) -> List(#(String, Json)) {
       #("outcome", json.string("errored")),
       #("reason", json.string(reason)),
     ]
+    measure.Unrecorded -> [#("outcome", json.string("unrecorded"))]
+  }
+}
+
+/// Decode the fields written by `outcome_fields`, or `Unrecorded` when the
+/// record has none, as the cost records of older captures do not.
+pub fn recorded_outcome_decoder() -> Decoder(Outcome) {
+  use code <- decode.optional_field(
+    "outcome",
+    None,
+    decode.optional(decode.string),
+  )
+
+  case code {
+    Some(_) -> outcome_decoder()
+    None -> decode.success(measure.Unrecorded)
   }
 }
 
@@ -343,6 +361,7 @@ fn outcome_decoder() -> Decoder(Outcome) {
       use reason <- decode.field("reason", decode.string)
       decode.success(measure.Errored(reason:))
     }
+    "unrecorded" -> decode.success(measure.Unrecorded)
     _ -> decode.failure(measure.Complete, "a coverage outcome")
   }
 }
@@ -552,7 +571,7 @@ fn target_decoder() -> Decoder(Target) {
 // A value the collector may not have recorded: written as null, and read
 // from null or from a header that lacks the key. A zero in an older capture
 // is read as the zero it claims.
-fn optional_int(
+pub fn optional_int(
   name: String,
   next: fn(Option(Int)) -> Decoder(a),
 ) -> Decoder(a) {

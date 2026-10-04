@@ -227,6 +227,10 @@ pub type ProbeCost {
     collector_reductions: Measurement,
     bytes: Measurement,
     wall_ms: Measurement,
+    /// How the probe ended. `Unrecorded` for a capture that did not keep it.
+    outcome: Outcome,
+    /// How many functions or processes the agent matched, when it said.
+    matched: Option(Int),
   )
 }
 
@@ -461,6 +465,8 @@ fn fields_of(
       ),
       #("bytes", codec.measurement_json(cost.bytes)),
       #("wall_ms", codec.measurement_json(cost.wall_ms)),
+      #("matched", json.nullable(cost.matched, json.int)),
+      ..codec.outcome_fields(cost.outcome)
     ]
     AuditRecord(entry) -> codec.audit_fields(entry)
     FooterRecord(footer) -> [
@@ -781,6 +787,8 @@ fn cost_decoder() -> Decoder(ProbeCost) {
   )
   use bytes <- decode.field("bytes", codec.measurement_decoder())
   use wall_ms <- decode.field("wall_ms", codec.measurement_decoder())
+  use matched <- codec.optional_int("matched")
+  use outcome <- decode.then(codec.recorded_outcome_decoder())
 
   decode.success(ProbeCost(
     probe:,
@@ -789,6 +797,8 @@ fn cost_decoder() -> Decoder(ProbeCost) {
     collector_reductions:,
     bytes:,
     wall_ms:,
+    outcome:,
+    matched:,
   ))
 }
 

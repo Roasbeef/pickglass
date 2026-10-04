@@ -144,6 +144,14 @@ pub fn finish_counters(
   snapshot: wire.CountersSnapshot,
   now_ms: Int,
 ) -> ProbeRecord {
+  recorded(closed_finish_counters(probe, snapshot, now_ms))
+}
+
+fn closed_finish_counters(
+  probe: ProbeRecord,
+  snapshot: wire.CountersSnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
   let cost =
     capture.ProbeCost(
       probe: probe.id,
@@ -152,6 +160,8 @@ pub fn finish_counters(
       collector_reductions: NotApplicable,
       bytes: NotApplicable,
       wall_ms: Known(snapshot.elapsed_ms),
+      outcome: measure.Unrecorded,
+      matched: None,
     )
 
   ProbeRecord(..probe, state: case counters_profile.build(snapshot) {
@@ -191,6 +201,14 @@ pub fn finish_stacks(
   snapshot: wire.StacksSnapshot,
   now_ms: Int,
 ) -> ProbeRecord {
+  recorded(closed_finish_stacks(probe, snapshot, now_ms))
+}
+
+fn closed_finish_stacks(
+  probe: ProbeRecord,
+  snapshot: wire.StacksSnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
   let meter = snapshot.meter
   let cost =
     capture.ProbeCost(
@@ -200,6 +218,8 @@ pub fn finish_stacks(
       collector_reductions: NotApplicable,
       bytes: NotApplicable,
       wall_ms: Known(meter.elapsed_ms),
+      outcome: measure.Unrecorded,
+      matched: None,
     )
 
   case aggregated_of(snapshot) {
@@ -359,6 +379,14 @@ pub fn finish_lost(
   reason: String,
   now_ms: Int,
 ) -> ProbeRecord {
+  recorded(closed_finish_lost(probe, reason, now_ms))
+}
+
+fn closed_finish_lost(
+  probe: ProbeRecord,
+  reason: String,
+  now_ms: Int,
+) -> ProbeRecord {
   ProbeRecord(
     ..probe,
     state: Finished(
@@ -371,11 +399,38 @@ pub fn finish_lost(
         collector_reductions: NotApplicable,
         bytes: NotApplicable,
         wall_ms: measure.Missing(measure.ProcessExited),
+        outcome: measure.Unrecorded,
+        matched: None,
       ),
       profile: None,
       notes: [],
     ),
   )
+}
+
+// The cost record is what a capture keeps of a finished probe, so it must
+// say how the probe ended and how much the agent matched; the closing
+// functions build it without those and this fills them in from the state they
+// chose.
+fn recorded(probe: ProbeRecord) -> ProbeRecord {
+  case probe.state {
+    Running -> probe
+    Finished(ended_ms:, outcome:, cost:, profile:, notes:) ->
+      ProbeRecord(
+        ..probe,
+        state: Finished(
+          ended_ms:,
+          outcome:,
+          cost: capture.ProbeCost(
+            ..cost,
+            outcome:,
+            matched: Some(probe.matched),
+          ),
+          profile:,
+          notes:,
+        ),
+      )
+  }
 }
 
 /// The newest finished probe that has a profile, from a list newest first.
@@ -491,10 +546,15 @@ fn probe_of(
     modules: [],
     started_ms: 0,
     duration_ms: 0,
-    matched: 0,
+    // A capture that did not keep the match count has no request to put
+    // the profile's size against, so the profile's own size stands in.
+    matched: option.unwrap(cost.matched, case found {
+      Some(item) -> list.length(profile.samples(item.payload))
+      None -> 0
+    }),
     state: Finished(
       ended_ms: 0,
-      outcome: measure.Complete,
+      outcome: cost.outcome,
       cost:,
       profile: option.map(found, fn(item) { item.payload }),
       notes: ["Read from a capture: when the probe ran is not recorded."],

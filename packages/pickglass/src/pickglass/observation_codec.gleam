@@ -1026,7 +1026,7 @@ fn section(
 ) -> Result(a, String) {
   case coverage.outcome {
     measure.Errored(reason) | measure.Refused(reason) -> Error(reason)
-    measure.Complete | measure.Partial(_) -> read()
+    measure.Complete | measure.Partial(_) | measure.Unrecorded -> read()
   }
 }
 

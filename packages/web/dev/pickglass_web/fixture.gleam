@@ -1118,6 +1118,8 @@ pub fn probes() -> model.ProbesModel {
           collector_reductions: measure.NotApplicable,
           bytes: Known(1_400_000),
           wall_ms: Known(30_004),
+          outcome: measure.Complete,
+          matched: Some(12),
         ),
       ),
       model.ProbeHistoryRow(
@@ -1133,6 +1135,10 @@ pub fn probes() -> model.ProbesModel {
           collector_reductions: Known(880_000),
           bytes: Missing(measure.CounterDisabled),
           wall_ms: Known(10_011),
+          outcome: measure.Partial(reason: measure.Truncated(
+            reason: measure.BudgetReached,
+          )),
+          matched: None,
         ),
       ),
     ],
@@ -1477,7 +1483,11 @@ pub fn compare() -> Result(model.CompareModel, String) {
         candidate: Known(2760),
       ),
     ],
-    diff: Some(model.DiffFlame(profile: merged, layout:, sources: model.SameSource)),
+    diff: Some(model.DiffFlame(
+      profile: merged,
+      layout:,
+      sources: model.SameSource,
+    )),
   ))
 }
 
