@@ -16,20 +16,26 @@ temporary process.
 `request.decode` the total decoder for it. `server.State` holds the pins, the
 counters probes (`counters.Probe`, whose `Running` phase holds the only strong
 trace session handle), the stack probes (`server.StackProbe`, a sampler pid and
-its monitor), the workers and the lease. `census.Report`,
+its monitor), the event probes (`server.TraceProbe`, a tracer pid, its monitor
+and, while it runs, the only strong session handle of its kind), the workers and
+the lease. `census.Report`,
 `supervision.Report`, `detail.Detail`, `system.Report`,
-`counters.Snapshot` and `stacks.Built` are the bounded results.
+`counters.Snapshot`, `stacks.Built`, `calltree.Built` and `activity.Built` are
+the bounded results.
 `owner.Owner` is `Unknown` or `Owned(path, role)`, decoded from a
 `{pickglass_owner, 1, Path, Role}` label with an optional fifth element of
 capability binaries; the agent labels every process it starts as
 `tool=pickglass`, role `agent`.
 
-Three kinds of process do the work. A **worker** (`server.start_worker`)
+Four kinds of process do the work. A **worker** (`server.start_worker`)
 computes one read-only reply (census, detail, supervision, system, targeted
 collection) under a heap cap and a deadline the tick enforces. A **helper**
 (`measure`) is a gen_server that waits for one self-measurement reply and
 validates it. A **sampler** (`sampler`) is a gen_server per stack probe that
-polls `current_stacktrace` and aggregates in `stacks`. Each replies to the
+polls `current_stacktrace` and aggregates in `stacks`. A **tracer**
+(`tracer`) is a gen_server per call tree or events probe that owns the events of
+one trace session: the VM sends it one message per event, and it folds each
+into `calltree` or `activity` as it arrives and keeps none. Each replies to the
 viewer itself, so the agent never copies a result and never blocks on a
 target.
 
@@ -49,7 +55,10 @@ the registered name; replies are `{<<"pg">>, 1, Ref, {<<"tag">>, ...}}`. The
 wire uses binaries, integers, lists, tuples and `true`/`false` only, never an
 atom, so the agent creates no atom from input. Names in a probe spec resolve
 with `binary_to_existing_atom`. The agent monitors the viewer's link process
-and node, and ticks every 250 ms to enforce a lease and probe deadlines.
+and node, and ticks every 250 ms to enforce a lease and probe deadlines. A tracer sends
+the agent `{pickglass_trace_finished, ProbeId}` when its probe stops, and the
+agent sends it the session's weak handle `{pickglass_trace_session, Weak}`,
+`{pickglass_trace_read, ReplyTo, Ref}` and `{pickglass_trace_stop, ReplyTo, Ref}`.
 
 ## Wire requests and replies
 
@@ -71,8 +80,8 @@ the viewer's own request timeout, and `ping`'s `probes` count tells it what
 is still running.
 
 **Existing, unchanged.** `{<<"ping">>}` gives `{<<"pong">>, BootId, Node,
-OtpRelease, UptimeMs, Pins, Probes}` (`Probes` counts running counters probes
-and running stack probes). `{<<"memory">>}` gives `{<<"memory">>,
+OtpRelease, UptimeMs, Pins, Probes}` (`Probes` counts running counters probes,
+running stack probes and running call tree and events probes). `{<<"memory">>}` gives `{<<"memory">>,
 [{Category, Bytes}], WordSize, ProcessCount, OtpRelease, ErtsVersion,
 SchedulersOnline}`. `{<<"pin">>, PidText}` gives `{<<"pinned">>, BootId,
 PinId, PidText}`; `{<<"unpin">>, Token}` gives `{<<"unpinned">>, PinId}`.
@@ -225,6 +234,122 @@ turned into atoms), `no_match` (any one pattern matching nothing refuses the
 set), `pattern_too_broad`, `too_many_functions`, `memory_unavailable`,
 `probe_limit`, `stale_pin`.
 
+**Call tree probe.** `{<<"start_calltrace">>, Tokens, Patterns, DurationMs,
+MaxEvents, Timeline}` takes 1 to 4 pin tokens, 1 to 8 `{Module, Function}`
+patterns resolved and checked exactly as a counters probe's are (existing
+atoms only, the hot-module deny list, the 5,000-function cap, a pattern that
+matches nothing refuses the set), `DurationMs` 100 to 10,000, `MaxEvents` 1 to
+200,000 and `Timeline` 0 to 2,000, all clamped, and gives
+`{<<"calltrace_started">>, ProbeId, Targets, MatchedFunctions, DurationMs,
+MaxEvents, Timeline}` with the values after clamping. `{<<"read_calltrace">>,
+ProbeId}` and `{<<"stop_calltrace">>, ProbeId}` give `{<<"calltrace">>,
+ProbeId, State, Stop, Meter, Frames, Paths, {Processes, Slices}}`:
+- The probe traces `call` and `return_to` with `arity` and
+  `monotonic_timestamp`, `local` patterns, on the pinned processes only. It
+  uses `return_to` and not `{return_trace}` because a return trace makes a
+  tail-recursive function non-tail, so a looping target would grow its stack
+  for the whole window, and copies every return value into a message.
+  `return_to` copies nothing and leaves tail calls alone. The match
+  specification is `[{'_', [], [{message, {caller}}]}]`, which adds the
+  caller to each call: the function the call will return to, which for a tail
+  call is the caller of the chain.
+- The tracer folds events into a call tree as they arrive (`calltree`) and
+  keeps no event. Each open frame remembers what it returns to. A call with a
+  known caller first ends the frames on top that return to the same function,
+  since they tail-called it, then pushes its frame, so a callback from an
+  untraced framework, a nested call, a tail call and a state machine of
+  mutually tail-calling functions all rebuild correctly. A `return_to` ends the
+  frame on top, and also any frames above the named function when it is on the
+  stack. The caller is `undefined` at the bottom of a process, and then a call
+  to the function already on top is folded into that frame and counted, which
+  is how a loop started by `spawn` reads. Directly recursive calls more than
+  one level deep share a continuation with the level above and read as two
+  levels. Frames open at the stop are closed at the latest timestamp seen.
+  Time is traced time: it includes time the process was descheduled and
+  excludes everything outside the traced functions.
+- `State` is `<<"running"|"finished"|"stopped">>`. `Stop` is
+  `<<"running"|"deadline"|"event_budget"|"overrun"|"targets_gone"|"stopped">>`.
+  The window ends the probe at its deadline, the event budget at exactly the
+  budgeted event, and `overrun` when the tracer's mailbox is longer than
+  50,000 messages at a check made every 64 events. The tracer clears the
+  targets' flags and destroys the session itself, through the weak handle,
+  before it messages the agent.
+- `Meter` is `{<<"traced_call_return_to">>, ElapsedMs, Events, MaxEvents,
+  DroppedEvents, InFlightAtStop, PeakQueue, QueueLimit, TargetsGone,
+  ForcedCloses, DistinctPaths, DroppedCalls, ElidedCalls, Strays,
+  DepthLimit}`. `Events` were folded. `DroppedEvents` arrived after the stop
+  and were discarded unread, and `InFlightAtStop` were already queued at the
+  stop; the first is a little larger. `DroppedCalls` were on a path past the
+  5,000-path table, `ElidedCalls` were deeper than `DepthLimit` (64), whose
+  time stays in the deepest recorded frame, and `Strays` were events for
+  another process or of a bad shape. `Calls` over all paths plus `DroppedCalls`
+  plus `ElidedCalls` equals the number of call events folded.
+- `Frames` is `[{Module, Function, Arity, {<<"none">>}}]`, the stack probe's
+  shape with no location, so one reader serves both. `Paths` is `[{Calls,
+  InclusiveNs, ExclusiveNs, [FrameIndex]}]`, largest inclusive time first, each
+  path leaf first. Exclusive times over all paths sum to the traced time.
+- `Processes` are the targets' pid texts in request order, and `Slices` are
+  `{ProcessIndex, FrameIndex, StartNs, DurationNs, Depth}` for the first
+  frames to close, at most `Timeline`, with `StartNs` counted from the
+  tracer's start.
+- Errors: those of `start_counter_set` (`unknown_module`, `unknown_function`,
+  `no_match`, `pattern_too_broad`, `too_many_functions`), and `stale_pin`,
+  `agent_process` (a target is one of the agent's own processes),
+  `target_gone`, `probe_limit` (a call tree probe is already running, or two
+  probes run in all), `no_such_probe`, `start_failed`.
+- A module reloaded during the window drops its patterns from the session
+  silently. The probe does not detect it; the module's events stop.
+
+**Scheduling and garbage collection probe.** `{<<"start_events">>, Tokens,
+DurationMs, MaxEvents, MaxSlices, LongGcMs, LongScheduleMs}` takes 1 to 8 pin
+tokens, `DurationMs` 100 to 60,000, `MaxEvents` 1 to 200,000, `MaxSlices` 0 to
+5,000 and two thresholds 0 to 10,000, where 0 is off, all clamped, and gives
+`{<<"events_started">>, ProbeId, Targets, DurationMs, MaxEvents, MaxSlices,
+LongGcMs, LongScheduleMs}`. `{<<"read_events">>, ProbeId}` and
+`{<<"stop_events">>, ProbeId}` give `{<<"events">>, ProbeId, State, Stop,
+Meter, Processes, Slices, Long}`:
+- The probe sets `running` and `garbage_collection` with `monotonic_timestamp`
+  on the pinned processes. A nonzero threshold also sets `trace:system/3`
+  `long_gc` or `long_schedule` on the probe's session, which reports slow
+  collections and timeslices of any process on the node and exists on OTP 28
+  and later. On an older release a probe that sets one is refused with
+  `thresholds_unavailable` and nothing is armed.
+- `State` and `Stop` are as for the call tree probe, and the window, the
+  event budget (scheduling and collection events, not threshold events) and
+  the mailbox check are the same.
+- `Meter` is `{<<"traced_running_gc">>, ElapsedMs, Events, MaxEvents,
+  DroppedEvents, InFlightAtStop, PeakQueue, QueueLimit, TargetsGone,
+  UnpairedEvents, DroppedSlices, LongEventsSeen, Strays, LongGcMs,
+  LongScheduleMs}`. `UnpairedEvents` had no start or end to pair with, such as
+  an `out` of a run that began before the probe, and are never turned into a
+  slice. `DroppedSlices` were past `MaxSlices`. `LongEventsSeen` counts every
+  threshold event, including those past the 200 kept in `Long`.
+- `Processes` is `[{PidText, Runs, RunNs, MinorGcs, MajorGcs, GcNs}]` in
+  request order. `RunNs` is time on a scheduler, which is the closest the BEAM
+  comes to per-process CPU time and includes any time the operating system
+  took the scheduler thread away. `Slices` is `[{ProcessIndex, Kind, StartNs,
+  DurationNs}]` for the first runs and collections to close, `Kind` one of
+  `<<"run"|"gc_minor"|"gc_major">>`. Runs and collections still open at the
+  stop are closed at the latest timestamp seen.
+- `Long` is `[{<<"long_gc">>, PidText, DurationMs, HeapWords}` or
+  `{<<"long_schedule">>, PidText, DurationMs, Function}]` where `Function`
+  is `module:function/arity` or `""`. Events about the agent and its tracers
+  are dropped.
+- Errors: `stale_pin`, `agent_process`, `target_gone`, `probe_limit` (an
+  events probe is already running, or two probes run in all),
+  `thresholds_unavailable`, `no_such_probe`, `start_failed`.
+
+**Tracers and backpressure.** A process tracer has no backpressure: the VM
+queues every event whatever the mailbox holds, and destroying the session
+does not recall the events already queued. A tracer therefore folds instead of
+storing, runs at high priority with its mailbox off its heap (so a backlog
+does not enlarge each collection and spiral), and stops the probe itself when
+its mailbox passes the limit. A flooded probe reports `overrun`, with the
+backlog it left in `InFlightAtStop` and `DroppedEvents`. Measured with four
+targets in a tight call loop, a call tree probe stops in about ten
+milliseconds with the mailbox near 50,000, having folded 20,000 to 30,000 events
+and dropped 60,000 to 70,000.
+
 ## Invariants
 
 - Imports stay inside `pickglass_agent@*`, `erlang`, `trace`, `code`, `maps`,
@@ -232,15 +357,23 @@ set), `pattern_too_broad`, `too_many_functions`, `memory_unavailable`,
   agent-imports` checks the compiled beams. `pickglass_agent@@main` is the
   compiler's entry module, is never pushed, and is skipped.
 - The strong trace session handle is held only in `server.State`. It is never
-  sent, returned or logged.
+  sent, returned or logged. A tracer holds the weak handle, which cannot delay
+  the session's destruction and is enough to clear flags and destroy the
+  session.
 - The agent process never sends a signal that waits on a target
   (`process_info`, `garbage_collect`): those run in workers, helpers or
   samplers that have deadlines. A target that does not answer therefore
   cannot stall the lease or teardown.
-- Every worker, helper and sampler is monitored by the agent, killed by
-  `shut_down`. A sampler monitors the agent and ends with it, and a helper
-  ends at its own budget (five seconds at most), so a viewer killed
-  mid-probe leaves no process.
+- Every worker, helper, sampler and tracer is monitored by the agent, killed by
+  `shut_down`. A sampler or a tracer monitors the agent and ends with it, and a
+  helper ends at its own budget (five seconds at most), so a viewer killed
+  mid-probe leaves no process. A tracer that dies leaves its session's patterns
+  running, so the agent destroys the session on the tracer's `DOWN`.
+- An event probe is bounded three ways and always says which bound stopped
+  it: a window, an event budget and a mailbox limit. A tracer past its window
+  by more than a second is killed by the agent's tick with its session. At most
+  one call tree probe and one events probe run at once, and both count toward
+  the two-probe limit. A probe never traces the agent's own processes.
 - Every exit path calls `shut_down`: detach, viewer link DOWN, `nodedown`,
   lease expiry, and `terminate` after a crash. A kill signal skips it and the
   VM destroys the sessions because the agent was their sole holder.
@@ -248,7 +381,9 @@ set), `pattern_too_broad`, `too_many_functions`, `memory_unavailable`,
   them. It purges its own module last, which ends it.
 - Calls that can raise on outside input go through `ffi_safe.call`.
 - `make agent-e2e` pushes the beams into a peer and checks teardown after a
-  killed link, a detach and `kill -9` of the viewer.
+  killed link, a detach and `kill -9` of the viewer, with counters, stack, call
+  tree and events probes running, and drives each event probe to its window, its
+  budget and, with flooding targets, to `overrun`.
 
 ## Deep Docs
 
