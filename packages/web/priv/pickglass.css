@@ -369,6 +369,7 @@ input.text { width: 100%; }
 
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; }
+.field-off { display: none; }
 .field-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
 .form-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
 .notice { color: var(--warn); font-size: 12.5px; font-weight: 550; }

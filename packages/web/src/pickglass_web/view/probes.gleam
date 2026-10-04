@@ -362,28 +362,28 @@ fn draft_form(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
   ])
 }
 
-// A stack or events probe names no modules, so its form has no field for
-// them; a counters or call tree probe names the modules it traces.
+// A stack or events probe names no modules; a counters or call tree probe
+// names the modules it traces. The field is the same element for every kind
+// and only its class changes, so the text typed into it survives a switch of
+// kind and back. The submit always names exactly one `modules` field, and
+// `update` ignores its text for a kind that traces nothing.
 fn modules_field(draft: state.PlanDraft) -> Element(Msg) {
-  case policy.needs_modules(draft.kind) {
-    // The submit always names the field, so a kind that traces nothing sends
-    // an empty one that `update` ignores.
-    False ->
-      html.input([
-        attribute.type_("hidden"),
-        attribute.name("modules"),
-        attribute.value(""),
-      ])
-    True ->
-      field("Module patterns", [
-        html.input([
-          attribute.class("text mono"),
-          attribute.type_("text"),
-          attribute.name("modules"),
-          attribute.placeholder("loom@runtime@keeper  lists"),
-        ]),
-      ])
+  let class = case policy.needs_modules(draft.kind) {
+    True -> "field"
+    False -> "field field-off"
   }
+
+  html.label([attribute.class(class)], [
+    html.span([attribute.class("field-label")], [
+      element.text("Module patterns"),
+    ]),
+    html.input([
+      attribute.class("text mono"),
+      attribute.type_("text"),
+      attribute.name("modules"),
+      attribute.placeholder("loom@runtime@keeper  lists"),
+    ]),
+  ])
 }
 
 fn field(label: String, controls: List(Element(Msg))) -> Element(Msg) {

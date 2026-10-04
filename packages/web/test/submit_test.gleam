@@ -8,12 +8,15 @@
 
 import gleam/dynamic/decode
 import gleam/json
+import gleam/list
 import gleam/option.{Some}
 import gleam/result
 import gleam/string
 import lustre/dev/query
 import lustre/dev/simulate
+import lustre/element
 import pickglass_core/policy
+import pickglass_web/app
 import pickglass_web/fixture
 import pickglass_web/key
 import pickglass_web/msg
@@ -144,4 +147,33 @@ pub fn a_forged_submit_is_refused_by_its_decoder_test() {
     #("modules", json.string(string.repeat("a", wire.max_text + 1))),
   ])
   assert !accepted([#("modules", json.int(3))])
+}
+
+// The plan form carries exactly one `modules` field whatever the kind, so the
+// submit names one field and text typed before a kind switch is not thrown
+// away with the element. Only the class says whether the kind uses it.
+pub fn the_modules_field_is_one_element_for_every_kind_test() {
+  let drawn = fn(kind) {
+    let #(model, _) =
+      app.update(
+        fn(_) { panic as "no request expected" },
+        app.init(fixture.start(page.Probes, page.Files)),
+        msg.Ui(msg.DraftKind(kind)),
+      )
+
+    app.view(model) |> element.to_string
+  }
+
+  list.each(
+    [policy.Counters, policy.Sampling, policy.CallTree, policy.SchedulingGc],
+    fn(kind) {
+      let html = drawn(kind)
+
+      assert support.count(html, "name=\"modules\"") == 1
+      assert !string.contains(html, "type=\"hidden\" name=\"modules\"")
+    },
+  )
+
+  assert string.contains(drawn(policy.Sampling), "field field-off")
+  assert !string.contains(drawn(policy.CallTree), "field field-off")
 }

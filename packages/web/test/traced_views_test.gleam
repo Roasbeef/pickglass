@@ -444,15 +444,17 @@ pub fn changing_the_kind_replaces_a_duration_the_kind_cannot_run_test() {
   assert kept.ui.plan.duration == msg.Seconds60
 }
 
-// Only a kind that traces named modules has a field for them.
-pub fn only_counters_and_call_trees_ask_for_modules_test() {
-  assert string.contains(html(pick_kind(policy.Counters)), "Module patterns")
-  assert string.contains(html(pick_kind(policy.CallTree)), "Module patterns")
-  assert !string.contains(html(pick_kind(policy.Sampling)), "Module patterns")
-  assert !string.contains(
-    html(pick_kind(policy.SchedulingGc)),
-    "Module patterns",
-  )
+// Only a kind that traces named modules shows the field for them; for the
+// others it is in the form but hidden.
+pub fn only_counters_and_call_trees_show_the_modules_field_test() {
+  let shown = fn(kind) {
+    !string.contains(html(pick_kind(kind)), "field field-off")
+  }
+
+  assert shown(policy.Counters)
+  assert shown(policy.CallTree)
+  assert !shown(policy.Sampling)
+  assert !shown(policy.SchedulingGc)
 }
 
 fn with_target(model: app.Model) -> app.Model {
