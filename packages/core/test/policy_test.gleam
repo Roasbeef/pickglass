@@ -227,6 +227,15 @@ pub fn perturbation_classes_test() {
   assert policy.perturbation_of(policy.StartProbe(spec(policy.Sampling)))
     == policy.Polling
   assert policy.perturbation_of(policy.ReadMemory) == policy.Passive
+
+  // Counters send no trace message; the other trace probes do.
+  assert policy.perturbation_of(policy.StartProbe(spec(policy.Counters)))
+    == policy.Counting
+  assert policy.perturbation_of(policy.StartProbe(spec(policy.CallTree)))
+    == policy.Tracing
+  assert policy.perturbation_of(policy.StartProbe(spec(policy.SchedulingGc)))
+    == policy.Tracing
+  assert policy.perturbation_code(policy.Counting) == "counting"
 }
 
 pub fn confirm_authorizes_the_planned_command_test() {

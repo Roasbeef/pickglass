@@ -260,7 +260,14 @@ pub type Perturbation {
   /// Polls target processes.
   Polling
 
-  /// Sets trace flags or patterns on target processes.
+  /// Switches on the VM's per-function call counters (`call_count`,
+  /// `call_time`) with a silent trace pattern. No trace message is ever
+  /// sent: the cost is the emulator's counting overhead on the matched
+  /// functions, and the result is one bounded snapshot.
+  Counting
+
+  /// Sets trace flags or patterns that make the VM send a trace message for
+  /// each event to a collector.
   Tracing
 
   /// Forces a garbage collection.
@@ -272,6 +279,7 @@ pub fn perturbation_code(class: Perturbation) -> String {
   case class {
     Passive -> "passive"
     Polling -> "polling"
+    Counting -> "counting"
     Tracing -> "tracing"
     ForcedGc -> "forced_gc"
   }
@@ -301,7 +309,8 @@ pub fn perturbation_of(command: Command) -> Perturbation {
 fn probe_perturbation(kind: ProbeKind) -> Perturbation {
   case kind {
     Sampling -> Polling
-    Counters | CallTree | SchedulingGc -> Tracing
+    Counters -> Counting
+    CallTree | SchedulingGc -> Tracing
   }
 }
 
