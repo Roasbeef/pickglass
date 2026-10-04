@@ -93,6 +93,8 @@ scenario_link_killed(Target, Work) ->
         ask(Target, {<<"gc">>, {<<"boot-1">>, PinId}, 5000}),
     check("a targeted collection reports the heap before and after", true),
     scenario_measure(Target, WorkText),
+    scenario_ets(Target),
+    scenario_binaries(Target),
     {<<"scheduler">>, <<"collecting">>, _} = ask(Target, {<<"scheduler">>, <<"on">>}),
     check("scheduler wall time is on", is_list(statistics_on(Target))),
     {<<"counters_started">>, ProbeId, Matched, _} =
@@ -497,6 +499,113 @@ scenario_measure(Target, WorkText) ->
     [exit(P, kill) || P <- [Good, Bad, Silent]],
     ok.
 
+%% The ETS listing, the owners census with per-owner ETS memory and initial
+%% calls, and tables that vanish while the walk runs.
+scenario_ets(Target) ->
+    Cache = {pickglass_owner, 1, [{<<"app">>, <<"e2e_ets">>}], <<"cache">>},
+    Mine = erpc:call(Target, pg_e2e_ets, table, [pg_e2e_ets_labelled, 3000, Cache]),
+    Plain = erpc:call(Target, pg_e2e_ets, table, [pg_e2e_ets_plain, 500, none]),
+    timer:sleep(200),
+    {<<"ets_tables">>, {Total, Counted, Skipped, <<"finished">>, _}, Tables, {NTables, NObjects, NBytes}} =
+        ask(Target, {<<"ets_tables">>, 500}),
+    check("the listing covers every table", Counted + Skipped =< Total andalso Counted >= 2),
+    check("the totals cover every table read", NTables =:= Counted andalso NObjects >= 3500 andalso NBytes > 0),
+    Find = fun(Name) ->
+               [T || {_, N, _, _, _, _, _, _, _} = T <- Tables, N =:= Name]
+           end,
+    [{LId, <<"pg_e2e_ets_labelled">>, LOwnerPid, LOwner, <<"set">>, 3000, LMem, <<"public">>, <<>>}] =
+        Find(<<"pg_e2e_ets_labelled">>),
+    check("a named table is listed with its owner, size and memory",
+          LOwnerPid =:= pid_text(Target, Mine) andalso LMem > 3000 andalso
+          is_binary(LId) andalso byte_size(LId) > 0),
+    check("the owner's label is decoded",
+          LOwner =:= {<<"owner">>, [{<<"app">>, <<"e2e_ets">>}], <<"cache">>}),
+    [{_, _, PPid, POwner, _, 500, _, _, _}] = Find(<<"pg_e2e_ets_plain">>),
+    check("an unlabelled owner is unknown", PPid =:= pid_text(Target, Plain) andalso POwner =:= {<<"unknown">>}),
+    Mems = [M || {_, _, _, _, _, _, M, _, _} <- Tables],
+    check("tables are listed largest first", Mems =:= lists:reverse(lists:sort(Mems))),
+    {<<"ets_tables">>, _, Two, _} = ask(Target, {<<"ets_tables">>, 2}),
+    check("the listing is bounded by the requested count", length(Two) =:= 2),
+    {<<"ets_tables">>, _, Default, _} = ask(Target, {<<"ets_tables">>}),
+    check("the listing defaults to at most 100 tables", length(Default) =< 100),
+    io:format("       ets listing: ~b tables, ~b objects, ~b bytes; top: ~p~n",
+              [NTables, NObjects, NBytes,
+               [{N, M} || {_, N, _, _, _, _, M, _, _} <- lists:sublist(Tables, 3)]]),
+    {<<"owners_detail">>, _, DRows, DAggs, DTotals, {EtsTables, EtsBytes, _, <<"finished">>}} =
+        ask(Target, {<<"owners_detail">>, 100000, 200}),
+    check("owners_detail rows carry a twelfth field, the initial call",
+          DRows =/= [] andalso lists:all(fun(R) -> tuple_size(R) =:= 12 end, DRows)),
+    check("a supervisor's initial call identifies it as one",
+          lists:any(fun(R) -> case element(12, R) of
+                                  <<"supervisor:", _/binary>> -> true;
+                                  _ -> false
+                              end end, DRows)),
+    check("owners_detail aggregates carry ETS tables and bytes",
+          lists:all(fun(A) -> tuple_size(A) =:= 8 end, DAggs)),
+    check("an owner's ETS memory is attributed to its label",
+          lists:any(fun({{<<"owner">>, [{<<"app">>, <<"e2e_ets">>}], <<"cache">>}, _, _, _, _, _, T, B}) ->
+                            T =:= 1 andalso B > 3000;
+                       (_) -> false end, DAggs)),
+    check("tables of an unlabelled process count under unknown",
+          lists:any(fun({{<<"unknown">>}, _, _, _, _, _, T, B}) -> T >= 1 andalso B > 500;
+                       (_) -> false end, DAggs)),
+    check("the ETS pass covers at least the listed owners' tables",
+          EtsTables >= 2 andalso EtsBytes >= 3500 andalso tuple_size(DTotals) =:= 7),
+    {<<"owners">>, _, _, OldAggs, _} = ask(Target, {<<"owners">>, 100000, 10}),
+    check("the older owners reply keeps its six-field shape",
+          lists:all(fun(A) -> tuple_size(A) =:= 6 end, OldAggs)),
+    %% Tables created and deleted by another process while the walk runs: each
+    %% walk accounts for every table it listed, as counted or as skipped.
+    Churn = erpc:call(Target, pg_e2e_ets, churn, []),
+    Walks = [ask(Target, {<<"ets_tables">>, 5}) || _ <- lists:seq(1, 40)],
+    SkippedSeen = lists:sum([Sk || {<<"ets_tables">>, {_, _, Sk, _, _}, _, _} <- Walks]),
+    check("a table deleted mid-walk is counted and never a crash",
+          lists:all(fun({<<"ets_tables">>, {T, C, Sk, <<"finished">>, _}, _, _}) ->
+                            C + Sk =< T andalso C >= 1;
+                       (_) -> false end, Walks)),
+    io:format("       ~b tables were deleted mid-walk across 40 listings~n", [SkippedSeen]),
+    [exit(P, kill) || P <- [Mine, Plain, Churn]],
+    ok.
+
+%% Binary references of a pinned process: summed and listed within a budget,
+%% and refused, never summarised, for a process that holds more than the agent
+%% reads.
+scenario_binaries(Target) ->
+    Pin = fun(P) ->
+              {<<"pinned">>, <<"boot-1">>, Id, _} = ask(Target, {<<"pin">>, pid_text(Target, P)}),
+              {<<"boot-1">>, Id}
+          end,
+    Small = erpc:call(Target, pg_e2e_ets, hold, [100, 1000]),
+    Few = erpc:call(Target, pg_e2e_ets, hold, [3, 200000]),
+    timer:sleep(200),
+    {<<"binaries">>, SmallText, Count, Bytes, Rows} =
+        ask(Target, {<<"binaries">>, Pin(Small), 5}),
+    check("the binaries of a pinned process are summed",
+          SmallText =:= pid_text(Target, Small) andalso Count >= 100 andalso Bytes >= 100000),
+    check("the listing is bounded and largest first",
+          length(Rows) =:= 5 andalso
+          lists:all(fun({A, B, R}) -> is_binary(A) andalso B >= 1000 andalso R >= 1 end, Rows)),
+    {<<"binaries">>, _, 3, FewBytes, [{_, 200000, _} | _] = FewRows} =
+        ask(Target, {<<"binaries">>, Pin(Few), 200}),
+    check("large binaries are listed with their sizes",
+          FewBytes >= 600000 andalso length(FewRows) =:= 3),
+    {<<"error">>, <<"stale_pin">>, _} = ask(Target, {<<"binaries">>, {<<"boot-1">>, 99999}, 5}),
+    check("binaries refuses a pin that does not exist", true),
+    %% More than the budget: counted and refused.
+    Many = erpc:call(Target, pg_e2e_ets, hold, [60000, 70]),
+    timer:sleep(1500),
+    {<<"error">>, <<"too_many_binaries">>, _} = ask(Target, {<<"binaries">>, Pin(Many), 5}),
+    check("a process past the list budget is refused as too_many_binaries", true),
+    %% So many that receiving the list passes the worker's heap cap.
+    Huge = erpc:call(Target, pg_e2e_ets, hold, [400000, 70]),
+    timer:sleep(4000),
+    {<<"error">>, <<"too_many_binaries">>, _} = ask(Target, {<<"binaries">>, Pin(Huge), 5}),
+    check("a process whose list overruns the worker's heap is refused the same way", true),
+    {<<"pong">>, _, _, _, _, _, _} = ask(Target, {<<"ping">>}),
+    check("the agent answers after both refusals", true),
+    [exit(P, kill) || P <- [Small, Few, Many, Huge]],
+    ok.
+
 %% An explicit detach replies after the session is destroyed.
 scenario_detach(Target, Work) ->
     heading("explicit detach"),
@@ -699,6 +808,20 @@ push_workload(Target) ->
         "spin() -> hot(1), spin(). "
         "hot(X) -> X + 1. "
         "yielder() -> erlang:yield(), yielder(). "),
+    _ = load_source(Target, "pg_e2e_ets",
+        "-module(pg_e2e_ets). -export([table/3, hold/2, churn/0]). "
+        "table(Name, N, Label) -> spawn(fun() -> "
+        "  case Label of none -> ok; _ -> proc_lib:set_label(Label) end, "
+        "  T = ets:new(Name, [named_table, public, set]), "
+        "  [ets:insert(T, {I, I}) || I <- lists:seq(1, N)], "
+        "  receive stop -> ok end end). "
+        "hold(N, Size) -> spawn(fun() -> "
+        "  L = [binary:copy(<<\"x\">>, Size) || _ <- lists:seq(1, N)], "
+        "  receive stop -> length(L) end end). "
+        "churn() -> spawn(fun() -> churn_loop() end). "
+        "churn_loop() -> "
+        "  Ts = [ets:new(pg_e2e_churn, []) || _ <- lists:seq(1, 300)], "
+        "  [ets:delete(T) || T <- Ts], churn_loop(). "),
     _ = load_source(Target, "pg_e2e_measurable",
         "-module(pg_e2e_measurable). -export([start/1]). "
         "start(Mode) -> spawn(fun() -> "
