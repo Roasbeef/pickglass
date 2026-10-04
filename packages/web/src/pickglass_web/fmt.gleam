@@ -275,18 +275,31 @@ pub fn cell(m: Measurement, in u: Unit) -> String {
 /// Write a change: a known value with an explicit sign, or the word for an
 /// absent one. A known zero is written `0`, because it is a real reading.
 ///
+/// A change in a ratio that is below the first decimal cannot be written as
+/// a signed figure, because `+<0.1%` reads as an operator and a comparison
+/// run together. It is written `up under 0.1%` or `down under 0.1%`, which
+/// keeps the direction and says the size is bounded, not zero.
+///
 /// ## Examples
 ///
 /// ```gleam
 /// fmt.signed(Known(188 * 1024 * 1024), unit.Bytes)
 /// // -> "+188 MiB"
+///
+/// fmt.signed(Known(3), unit.Ratio(per: 10_000))
+/// // -> "up under 0.1%"
 /// ```
 pub fn signed(m: Measurement, in u: Unit) -> String {
-  case m {
-    Known(value:) if value > 0 -> "+" <> known(value, u)
-    Known(value:) if value < 0 -> minus <> known(-value, u)
-    Known(_) -> "0"
-    _ -> measure.render(m, u)
+  case m, u {
+    Known(value:), unit.Ratio(per:) if value != 0 && value * 1000 / per == 0 ->
+      case value > 0 {
+        True -> "up under 0.1%"
+        False -> "down under 0.1%"
+      }
+    Known(value:), _ if value > 0 -> "+" <> known(value, u)
+    Known(value:), _ if value < 0 -> minus <> known(-value, u)
+    Known(_), _ -> "0"
+    _, _ -> measure.render(m, u)
   }
 }
 

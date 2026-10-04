@@ -38,6 +38,17 @@ pub fn changes_carry_a_sign_test() {
   fmt.signed(Known(2048), unit.Bytes) |> should.equal("+2.00 KiB")
   fmt.signed(Known(-2048), unit.Bytes) |> should.equal("−2.00 KiB")
   fmt.signed(Known(0), unit.Bytes) |> should.equal("0")
+
+  // A ratio change below the first decimal keeps its direction and says it is
+  // small, instead of printing "+<0.1%".
+  fmt.signed(Known(3), unit.Ratio(per: 10_000))
+  |> should.equal("up under 0.1%")
+  fmt.signed(Known(-3), unit.Ratio(per: 10_000))
+  |> should.equal("down under 0.1%")
+  fmt.signed(Known(0), unit.Ratio(per: 10_000)) |> should.equal("0")
+  fmt.signed(Known(30), unit.Ratio(per: 10_000)) |> should.equal("+0.3%")
+  fmt.signed(Known(-30), unit.Ratio(per: 10_000))
+  |> should.equal("−0.3%")
   fmt.signed(Missing(measure.DeadlineReached), unit.Bytes)
   |> should.equal("missing (deadline_reached)")
 }
