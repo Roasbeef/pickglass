@@ -15,7 +15,8 @@
 //// thousands of processes would otherwise be thousands of elements.
 ////
 //// A node's kind is read from its initial call, which is a hint and nothing
-//// stronger: a supervisor's initial call names a supervisor module, a
+//// stronger: a supervisor's initial call names a supervisor module (or its
+//// registered name ends in `_sup`, which is how OTP's own are named), a
 //// process with no children is a worker, and a process with children whose
 //// initial call is not recognised is `UnknownKind`.
 
@@ -144,7 +145,10 @@ fn label_of(edge: wire.SpawnEdge) -> String {
 }
 
 fn kind_of(edge: wire.SpawnEdge, below: List(wire.SpawnEdge)) -> model.SupKind {
-  case string.contains(edge.initial_call, "supervisor"), below {
+  let named = string.contains(edge.initial_call, "supervisor")
+  let supervisor = named || string.ends_with(edge.registered_name, "_sup")
+
+  case supervisor, below {
     True, _ -> model.Supervisor
     False, [] -> model.Worker
     False, [_, ..] -> model.UnknownKind

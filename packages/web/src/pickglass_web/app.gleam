@@ -440,6 +440,7 @@ pub fn describe(request: Request) -> String {
     msg.ChooseBaseline(_) -> "compare against another baseline"
     msg.ChooseCandidate(_) -> "use a capture as the candidate"
     msg.TakeCheckpoint -> "take a checkpoint"
+    msg.SaveCapture -> "save a capture"
     msg.SortProcesses(_) -> "sort the processes"
     msg.MovePage(_) -> "move the window"
     msg.AddFilter(..) -> "add a filter step"
@@ -487,6 +488,7 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
     msg.AddFilterAt(kind:, frame:) -> check_filter_at(model, kind, frame)
     msg.TruncateChain(from:) -> check_chain_index(model, from)
     msg.TakeCheckpoint -> Ok(Nil)
+    msg.SaveCapture -> Ok(Nil)
     msg.SortProcesses(_) -> Ok(Nil)
     msg.MovePage(_) -> Ok(Nil)
     msg.AddFilter(..) -> Ok(Nil)

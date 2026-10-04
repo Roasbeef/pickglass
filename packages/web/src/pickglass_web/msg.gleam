@@ -254,6 +254,10 @@ pub type Request {
   /// Take a checkpoint now.
   TakeCheckpoint
 
+  /// Write the viewer's live window to a capture file in its save
+  /// directory, where the compare page offers it.
+  SaveCapture
+
   /// Sort the processes by another column.
   SortProcesses(column: model.SortColumn)
 

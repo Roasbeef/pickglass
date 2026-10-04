@@ -1250,6 +1250,24 @@ fn profile_header(
     profile.AllocationCounts -> #("allocation counts", "allocator statistics")
   }
 
+  // Counters cover functions the agent matched; sampled stacks cover the
+  // samples taken, which is the profile's own total.
+  let #(coverage_scope, requested, achieved) = case profile.source(found) {
+    profile.SampledStacks(..) -> {
+      let samples = case profile.columns(found) {
+        [first, ..] -> profile.total(found, first)
+        [] -> 0
+      }
+
+      #("samples", samples, samples)
+    }
+    profile.TracedCounters | profile.TracedCalls | profile.AllocationCounts -> #(
+      "functions",
+      probe.matched,
+      list.length(profile.samples(found)),
+    )
+  }
+
   model.ProfileHeader(
     title: "probe "
       <> probe.id
@@ -1262,9 +1280,9 @@ fn profile_header(
       inputs,
       source,
       method,
-      "functions",
-      probe.matched,
-      list.length(profile.samples(found)),
+      coverage_scope,
+      requested,
+      achieved,
       case probe.state {
         probe_book.Finished(outcome:, ..) -> outcome
         probe_book.Running -> measure.Complete

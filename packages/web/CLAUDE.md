@@ -24,7 +24,7 @@ The viewer turns the first into a chain step with `view/profile.step_at`,
 which builds an exact-match pattern from the function it holds, so no function
 name travels from the browser. `Feed` also has `FedOwnerMovers` (the overview's "largest change by
 owner" list), `FedCaptures` (the capture files the compare page offers, chosen
-with `ChooseBaseline` and `ChooseCandidate`) and `FedPlanTarget` (a pin the
+with `ChooseBaseline` and `ChooseCandidate`) and `SaveCapture` is a request that writes the live window to the save directory. `FedPlanTarget` (a pin the
 plan form offers first, applied only if it is among the targets). `Ui(SelectReading)`
 selects a timeline bar or span.
 

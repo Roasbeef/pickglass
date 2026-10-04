@@ -202,3 +202,12 @@ pub fn an_export_offers_a_link_and_a_refusal_gives_its_reason_test() {
   assert string.contains(html, "/download/abc_DEF-123")
   assert string.contains(html, "no stacks")
 }
+
+pub fn saving_a_capture_is_a_request_the_page_may_always_make_test() {
+  let sim =
+    support.simulation(on: page.Compare)
+    |> with_offers
+    |> simulate.message(msg.Ask(msg.SaveCapture))
+
+  assert simulate.model(sim).ui.last_request == Some(msg.SaveCapture)
+}

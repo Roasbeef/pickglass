@@ -182,10 +182,13 @@ pub const sampling_hz = 50
 
 fn stacks_started(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
   let seconds = int.max(1, spec.duration_ms / 1000)
+
+  // Twice the samples the duration allows, so a probe that ends at its
+  // deadline never also ends at its sample budget and is not called partial.
   let samples =
     int.min(
       200_000,
-      sampling_hz * seconds * int.max(1, list.length(spec.targets)),
+      2 * sampling_hz * seconds * int.max(1, list.length(spec.targets)),
     )
 
   case

@@ -500,6 +500,7 @@ pub fn ask(state: State, request: msg.Request) -> State {
         baseline: None,
       )
 
+    msg.SaveCapture -> submit(state, seam.SaveCapture)
     msg.ChooseBaseline(choice) -> choose_baseline(state, current, choice)
     msg.ChooseCandidate(choice) -> choose_candidate(state, current, choice)
 

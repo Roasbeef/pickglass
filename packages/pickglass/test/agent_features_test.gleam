@@ -616,3 +616,44 @@ pub fn the_owners_remainder_is_the_totals_minus_the_listed_rows_test() {
 fn base_with(observed: observation.Observation) -> feeds.Inputs {
   feeds.Inputs(..base_inputs(live_page()), observations: [observed])
 }
+
+pub fn a_stack_probe_asks_for_twice_the_samples_its_duration_allows_test() {
+  let rig = harness.live(script, None)
+  let page = harness.page(rig, "alice", harness.all)
+  let token = pinned(page)
+  let assert seam.PlanReady(id, _) =
+    page.submit(seam.PlanProbe(policy.Sampling, [token], ["*"], 10_000))
+  let assert seam.ProbeStarted(..) = page.submit(seam.ConfirmPlan(id))
+
+  // 50 Hz for 10 s over one target is 500 samples; the budget is 1 000, so
+  // reaching the deadline is not also reaching the budget.
+  assert list.any(fixture.drain(rig.seen, 50), fn(request) {
+    case request {
+      wire.Extended(wire.AskStartStacks(_, 50, 10_000, 1000)) -> True
+      _ -> False
+    }
+  })
+}
+
+pub fn a_supervisor_is_recognised_by_its_initial_call_or_its_name_test() {
+  let edge = fn(child, parent, name, call) {
+    wire.SpawnEdge(child, parent, name, call, wire.Unlabelled)
+  }
+  let page =
+    supervision_build.build(
+      info(),
+      wire.SupervisionSnapshot(
+        coverage: wire.SupervisionCoverage(3, 3, wire.SupervisionFinished, 1),
+        edges: [
+          edge("<0.1.0>", "", "kernel_sup", "proc_lib:init_p/5"),
+          edge("<0.2.0>", "<0.1.0>", "", "supervisor:init/1"),
+          edge("<0.3.0>", "<0.1.0>", "", "m:run/1"),
+        ],
+      ),
+    )
+  let assert [root] = page.roots
+
+  assert root.kind == model.Supervisor
+  assert list.map(root.children, fn(node) { node.kind })
+    == [model.Supervisor, model.Worker]
+}

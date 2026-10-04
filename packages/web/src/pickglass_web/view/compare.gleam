@@ -60,38 +60,44 @@ import pickglass_web/wire
 /// compare.offers_view(offers)
 /// ```
 pub fn offers_view(data: CapturesModel) -> Element(Msg) {
-  ui.panel(title: "Captures", info: data.info, controls: [], body: [
-    case data.offers {
-      [] -> ui.note("No capture files are saved yet. Save one from the strip.")
-      offers ->
-        html.table([attribute.class("tbl")], [
-          html.thead([], [
-            html.tr([], [
-              ui.th("file", None),
-              ui.th("use as", None),
-              ui.th("", None),
-            ]),
-          ]),
-          html.tbody(
-            [],
-            list.map(offers, fn(offer) {
+  ui.panel(
+    title: "Captures",
+    info: data.info,
+    controls: [choice_button("Save a capture now", msg.SaveCapture)],
+    body: [
+      case data.offers {
+        [] ->
+          ui.note("No capture files are saved yet. Save one from the strip.")
+        offers ->
+          html.table([attribute.class("tbl")], [
+            html.thead([], [
               html.tr([], [
-                html.td([attribute.class("mono")], [element.text(offer.name)]),
-                html.td([], [chosen_badge(offer.chosen)]),
-                html.td([], [
-                  choice_button("Baseline", msg.ChooseBaseline(offer.key)),
-                  choice_button("Candidate", msg.ChooseCandidate(offer.key)),
-                ]),
-              ])
-            }),
-          ),
-        ])
-    },
-    case data.note {
-      "" -> element.none()
-      note -> ui.note(note)
-    },
-  ])
+                ui.th("file", None),
+                ui.th("use as", None),
+                ui.th("", None),
+              ]),
+            ]),
+            html.tbody(
+              [],
+              list.map(offers, fn(offer) {
+                html.tr([], [
+                  html.td([attribute.class("mono")], [element.text(offer.name)]),
+                  html.td([], [chosen_badge(offer.chosen)]),
+                  html.td([], [
+                    choice_button("Baseline", msg.ChooseBaseline(offer.key)),
+                    choice_button("Candidate", msg.ChooseCandidate(offer.key)),
+                  ]),
+                ])
+              }),
+            ),
+          ])
+      },
+      case data.note {
+        "" -> element.none()
+        note -> ui.note(note)
+      },
+    ],
+  )
 }
 
 fn chosen_badge(chosen: model.ChosenAs) -> Element(Msg) {
