@@ -37,6 +37,7 @@ import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/svg
+import pickglass_web/chart/names
 import pickglass_web/chart/svg_util
 import pickglass_web/chart/timeline as timeline_chart
 import pickglass_web/fmt
@@ -471,7 +472,7 @@ fn call_rect(call: CallBox, top: Int, axis: Int) -> Element(msg) {
             svg_util.num("y", top + call.depth * call_row + call_row - 4),
             attribute.class("call-label"),
           ],
-          svg_util.fit(call.name, width - 6, 6),
+          names.fit(call.name, width - 6, 6),
         )
       False -> element.none()
     },

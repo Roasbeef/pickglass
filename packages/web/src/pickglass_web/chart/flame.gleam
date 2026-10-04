@@ -4,7 +4,8 @@
 //// positions in a fixed width. This module only turns each box into SVG. A
 //// box is a `<g>` holding a native `<title>` for the hover text, a `<rect>`
 //// whose colour is a class, and a `<text>` label fitted by character count
-//// (the face is monospace, so the server needs no font metrics). The
+//// (the face is monospace, so the server needs no font metrics). The label is
+//// the most specific part of the name that fits, as `names` chooses it. The
 //// elements are keyed by the box's place in the tree, so a zoom or a new
 //// selection re-renders moved boxes with keyed moves instead of rewrites.
 ////
@@ -41,6 +42,7 @@ import pickglass_core/layout/flame.{type Box, type Layout}
 import pickglass_core/measure
 import pickglass_core/unit.{type Unit}
 import pickglass_web/chart/colour
+import pickglass_web/chart/names
 import pickglass_web/chart/svg_util
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
@@ -256,9 +258,11 @@ fn box_element(
   )
 }
 
-// The label sits inside the box when it fits and is absent otherwise.
+// The label sits inside the box when it fits and is absent otherwise. It is
+// the most specific part of the name that fits, so a box does not read as the
+// module prefix every function shares; the hover title has the whole name.
 fn label(box: Box, name: String, y: Int) -> Element(msg) {
-  case svg_util.fit(name, box.width, glyph) {
+  case names.fit(name, box.width, glyph) {
     "" -> element.none()
     text ->
       svg.text(
