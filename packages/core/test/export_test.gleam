@@ -3,7 +3,7 @@ import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/string
 import pickglass_core/export
 import pickglass_core/export/chrome_trace.{Counter, Instant, Slice, Track}
@@ -443,4 +443,57 @@ fn shape_profile() -> decode.Decoder(ShapeProfile) {
   use samples <- decode.field("samples", decode.list(decode.list(decode.int)))
   use weights <- decode.field("weights", decode.list(decode.int))
   decode.success(ShapeProfile(kind:, unit:, start:, end:, samples:, weights:))
+}
+
+// ------------------------------------------------------- traced time as text
+
+// A column of nanoseconds is written as a time and named by the column, never
+// as samples: calling traced time "samples" would be wrong.
+pub fn a_time_column_is_written_as_time_not_samples_test() {
+  let function = fn(id, name) {
+    profile.Function(
+      id:,
+      module: "m",
+      name:,
+      arity: 0,
+      file: None,
+      line: None,
+      precision: profile.NoLine,
+    )
+  }
+  let assert Ok(p) =
+    profile.new(
+      profile.TracedCalls,
+      [
+        profile.ValueType("calls", unit.Count),
+        profile.ValueType("exclusive time", unit.Nanoseconds),
+      ],
+      [function(0, "work"), function(1, "main")],
+      [
+        profile.Sample(frames: [0, 1], values: [3, 3_000_000], labels: []),
+        profile.Sample(frames: [1], values: [1, 1_000_000], labels: []),
+      ],
+    )
+  let assert Ok(time) = profile.column_named(p, "exclusive time")
+  let table = text.functions(p, time, 5)
+
+  assert string.contains(
+    table,
+    "top 2 functions by exclusive time of their own (4.00 ms in all)",
+  )
+  assert string.contains(table, " 75.0%  3.00 ms   75.0%  3.00 ms  m:work/0")
+  assert string.contains(table, " 25.0%  1.00 ms  100.0%  4.00 ms  m:main/0")
+  assert !string.contains(table, "samples")
+
+  let assert Ok(tree) = text.tree(p, time, text.default_config)
+
+  assert string.contains(tree, "call tree (share of 4.00 ms, exclusive time)")
+
+  // The count column still reads as samples would, in plain integers.
+  let assert Ok(calls) = profile.column_named(p, "calls")
+
+  assert string.contains(
+    text.functions(p, calls, 5),
+    "functions by calls of their own (4 samples in all)",
+  )
 }

@@ -14,6 +14,10 @@
 //// computed with integer arithmetic. A column whose total is zero has
 //// nothing to divide by, and the text says so instead of printing zeros.
 ////
+//// A column of counts is written as samples. A column of nanoseconds, such as
+//// the exclusive time of a call tree, is written as a time and named by the
+//// column, because calling traced time "samples" would be wrong.
+////
 //// ## Flow
 ////
 //// `export` joins `functions` and `tree`. `functions` takes its rows from
@@ -30,6 +34,7 @@ import gleam/string
 import pickglass_core/analysis/top
 import pickglass_core/export.{type Export, type ExportError, Export}
 import pickglass_core/profile.{type Column, type Profile}
+import pickglass_core/unit.{type Unit}
 
 /// How much of the profile the text shows.
 pub type Config {
@@ -92,6 +97,7 @@ pub fn losses() -> List(String) {
 pub fn functions(profile: Profile, column: Column, limit: Int) -> String {
   let total = profile.total(profile, column)
   let index = profile.column_index(column)
+  let words = words_of(profile, column)
 
   // A table with no base cannot fail; the error arm is the type's, not a
   // reachable case.
@@ -107,9 +113,9 @@ pub fn functions(profile: Profile, column: Column, limit: Int) -> String {
       let totals = at(row.totals, index)
 
       pad_start(share(totals.flat, total), 7)
-      <> pad_start(int.to_string(totals.flat), 9)
+      <> pad_start(value_text(words.unit, totals.flat), 9)
       <> pad_start(share(totals.cum, total), 8)
-      <> pad_start(int.to_string(totals.cum), 9)
+      <> pad_start(value_text(words.unit, totals.cum), 9)
       <> "  "
       <> row.name
     })
@@ -118,9 +124,14 @@ pub fn functions(profile: Profile, column: Column, limit: Int) -> String {
     [
       "top "
         <> int.to_string(list.length(shown))
-        <> " functions by samples of their own ("
-        <> int.to_string(total)
-        <> " samples in all)",
+        <> " functions by "
+        <> words.own
+        <> " of their own ("
+        <> value_text(words.unit, total)
+        <> case words.unit {
+        unit.Count -> " samples in all)"
+        _ -> " in all)"
+      },
       pad_start("flat", 7)
         <> pad_start("", 9)
         <> pad_start("cum", 8)
@@ -180,7 +191,14 @@ pub fn tree(
       insert(node, path, stack.1)
     })
 
-  let heading = "call tree (share of " <> int.to_string(total) <> " samples)"
+  let words = words_of(profile, column)
+  let heading =
+    "call tree (share of "
+    <> value_text(words.unit, total)
+    <> case words.unit {
+      unit.Count -> " samples)"
+      _ -> ", " <> words.own <> ")"
+    }
 
   case total > 0 {
     False -> Ok(heading <> "\n  no samples\n")
@@ -242,6 +260,56 @@ fn render(
 
     [line, ..render(node.children, total, config, depth + 1)]
   })
+}
+
+// ----------------------------------------------------------------- words
+
+// What a column's values are, for the headings: its unit, and the phrase for
+// "of their own" values (samples, or the column's name).
+type Words {
+  Words(unit: Unit, own: String)
+}
+
+fn words_of(profile: Profile, column: Column) -> Words {
+  case profile.column_type(profile, column) {
+    Ok(profile.ValueType(name:, unit: unit.Count)) ->
+      case name {
+        "samples" -> Words(unit: unit.Count, own: "samples")
+        _ -> Words(unit: unit.Count, own: name)
+      }
+    Ok(profile.ValueType(name:, unit: other)) -> Words(unit: other, own: name)
+    Error(Nil) -> Words(unit: unit.Count, own: "samples")
+  }
+}
+
+// A value in its unit. Counts are plain integers. Times are written in the
+// largest unit that keeps at least one whole digit, with integer arithmetic.
+fn value_text(u: Unit, value: Int) -> String {
+  case u {
+    unit.Nanoseconds -> time_text(value)
+    unit.Count | unit.Bytes | unit.Reductions | unit.Ratio(_) ->
+      int.to_string(value)
+  }
+}
+
+fn time_text(ns: Int) -> String {
+  case ns {
+    _ if ns >= 1_000_000_000 -> scaled(ns, 1_000_000_000, " s")
+    _ if ns >= 1_000_000 -> scaled(ns, 1_000_000, " ms")
+    _ if ns >= 1000 -> scaled(ns, 1000, " us")
+    _ -> int.to_string(ns) <> " ns"
+  }
+}
+
+// Two decimals of a unit, by integer arithmetic.
+fn scaled(value: Int, per: Int, suffix: String) -> String {
+  let hundredths = value * 100 / per
+  let fraction = hundredths % 100
+
+  int.to_string(hundredths / 100)
+  <> "."
+  <> string.pad_start(int.to_string(fraction), 2, "0")
+  <> suffix
 }
 
 // ---------------------------------------------------------------- shares

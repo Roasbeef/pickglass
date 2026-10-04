@@ -445,6 +445,40 @@ pub fn a_sampling_probe_is_limited_to_what_the_agent_runs_test() {
   assert policy.max_duration_ms(policy.Counters) == policy.max_probe_duration_ms
 }
 
+// The agent runs a call tree probe for at most ten seconds over at most four
+// processes and eight patterns, and an events probe for at most a minute over
+// eight processes. A plan for more would describe a scope the agent does not
+// run, so the limits are checked before the agent is asked.
+pub fn trace_probes_are_limited_to_what_the_agent_runs_test() {
+  let calls = spec(policy.CallTree)
+
+  assert policy.max_duration_ms(policy.CallTree) == 10_000
+  assert policy.validate_spec(policy.ProbeSpec(..calls, duration_ms: 10_000))
+    == Ok(Nil)
+  assert policy.validate_spec(policy.ProbeSpec(..calls, duration_ms: 10_001))
+    == Error(policy.BadDuration(10_000))
+  assert policy.validate_spec(
+      policy.ProbeSpec(..calls, targets: list.repeat(token(1), 5)),
+    )
+    == Error(policy.TooManyTargets(4))
+  assert policy.validate_spec(
+      policy.ProbeSpec(..calls, modules: list.repeat("m", 9)),
+    )
+    == Error(policy.TooManyModules(8))
+
+  let events = spec(policy.SchedulingGc)
+
+  assert policy.max_duration_ms(policy.SchedulingGc) == 60_000
+  assert policy.validate_spec(
+      policy.ProbeSpec(..events, targets: list.repeat(token(1), 8), modules: []),
+    )
+    == Ok(Nil)
+  assert policy.validate_spec(
+      policy.ProbeSpec(..events, duration_ms: 60_001, modules: []),
+    )
+    == Error(policy.BadDuration(60_000))
+}
+
 // A sampling probe carries the rate it asked for, and the agent's ceiling is
 // shared by its targets, so the plan can say what will really run.
 pub fn a_sampling_rate_is_bounded_and_shared_between_targets_test() {

@@ -52,6 +52,8 @@ import pickglass_core/measure.{
 import pickglass_core/owner.{type Source}
 import pickglass_core/policy.{type AuditEntry}
 import pickglass_core/provenance.{type Provenance}
+import pickglass_core/trace_codec
+import pickglass_core/wire
 
 // ----------------------------------------------------------------- schema
 
@@ -202,6 +204,13 @@ pub type Profile(p) {
 }
 
 /// A block of timeline events on one track.
+///
+/// The first five fields are the format's own and are all a generic reader
+/// needs. A tracing probe's record also carries what the probe returned
+/// whole in `traced`, because slices of microseconds do not survive a
+/// millisecond timestamp, and the stop reason and the per-process totals
+/// have no place in the other fields. A reader that does not know `traced`
+/// still sees the slices, rounded to milliseconds.
 pub type Events {
   Events(
     track: Int,
@@ -209,7 +218,100 @@ pub type Events {
     timestamps_ms: List(Int),
     durations_ms: List(Int),
     args: List(String),
+    /// A tracing probe's result, when this record holds one.
+    traced: Option(Traced),
   )
+}
+
+/// What a tracing probe returned, kept in an `events` record.
+pub type Traced {
+  /// A scheduling and garbage collection probe: per-process totals, the run
+  /// and collection slices, and the node-wide threshold events.
+  SchedulingTraced(snapshot: wire.EventsSnapshot)
+
+  /// A call tree probe's result. The viewer keeps the call paths in the
+  /// probe's `profile` record, so its snapshot here carries none.
+  CallTreeTraced(snapshot: wire.CalltraceSnapshot)
+}
+
+/// The `events` record of a scheduling and garbage collection probe. The
+/// generic fields hold each slice rounded to milliseconds, the process it
+/// belongs to and its kind, so a reader that does not know the probe's own
+/// field still has the timeline.
+///
+/// ## Examples
+///
+/// ```gleam
+/// capture.scheduling_events(snapshot)
+/// ```
+pub fn scheduling_events(snapshot: wire.EventsSnapshot) -> Events {
+  Events(
+    track: 0,
+    kind: scheduling_kind,
+    timestamps_ms: list.map(snapshot.slices, fn(slice) {
+      slice.start_ns / 1_000_000
+    }),
+    durations_ms: list.map(snapshot.slices, fn(slice) {
+      slice.duration_ns / 1_000_000
+    }),
+    args: list.map(snapshot.slices, fn(slice) {
+      process_text(snapshot.processes, slice.process)
+      <> " "
+      <> trace_codec.kind_code(slice.kind)
+    }),
+    traced: Some(SchedulingTraced(snapshot)),
+  )
+}
+
+/// The `events` record of a call tree probe's slices, without the paths.
+///
+/// ## Examples
+///
+/// ```gleam
+/// capture.call_tree_events(snapshot)
+/// ```
+pub fn call_tree_events(snapshot: wire.CalltraceSnapshot) -> Events {
+  Events(
+    track: 0,
+    kind: call_tree_kind,
+    timestamps_ms: list.map(snapshot.slices, fn(slice) {
+      slice.start_ns / 1_000_000
+    }),
+    durations_ms: list.map(snapshot.slices, fn(slice) {
+      slice.duration_ns / 1_000_000
+    }),
+    args: list.map(snapshot.slices, fn(slice) {
+      case list.drop(snapshot.processes, slice.process) {
+        [pid, ..] -> pid
+        [] -> "?"
+      }
+      <> " "
+      <> case list.drop(snapshot.frames, slice.frame) {
+        [frame, ..] ->
+          frame.module
+          <> ":"
+          <> frame.function
+          <> "/"
+          <> int.to_string(frame.arity)
+        [] -> "?"
+      }
+    }),
+    traced: Some(CallTreeTraced(wire.CalltraceSnapshot(..snapshot, paths: []))),
+  )
+}
+
+/// The `kind` of the `events` record of a scheduling and garbage collection
+/// probe.
+pub const scheduling_kind = "scheduling_gc"
+
+/// The `kind` of the `events` record of a call tree probe.
+pub const call_tree_kind = "call_tree"
+
+fn process_text(processes: List(wire.TracedProcess), index: Int) -> String {
+  case list.drop(processes, index) {
+    [process, ..] -> process.pid_text
+    [] -> "?"
+  }
 }
 
 /// A named point in time: a window start, a session close, a restart.
@@ -442,13 +544,20 @@ fn fields_of(
       #("source", json.string(profile_source_code(profile.source))),
       #("payload", encode_profile(profile.payload)),
     ]
-    EventsRecord(events) -> [
-      #("track", json.int(events.track)),
-      #("kind", json.string(events.kind)),
-      #("timestamps_ms", json.array(events.timestamps_ms, json.int)),
-      #("durations_ms", json.array(events.durations_ms, json.int)),
-      #("args", json.array(events.args, json.string)),
-    ]
+    EventsRecord(events) ->
+      list.append(
+        [
+          #("track", json.int(events.track)),
+          #("kind", json.string(events.kind)),
+          #("timestamps_ms", json.array(events.timestamps_ms, json.int)),
+          #("durations_ms", json.array(events.durations_ms, json.int)),
+          #("args", json.array(events.args, json.string)),
+        ],
+        case events.traced {
+          None -> []
+          Some(traced) -> [#("traced", traced_json(traced))]
+        },
+      )
     CoverageRecord(coverage) -> codec.coverage_fields(coverage)
     CheckpointRecord(checkpoint) -> [
       #("name", json.string(checkpoint.name)),
@@ -765,8 +874,86 @@ fn events_decoder() -> Decoder(Events) {
   use timestamps_ms <- decode.field("timestamps_ms", decode.list(decode.int))
   use durations_ms <- decode.field("durations_ms", decode.list(decode.int))
   use args <- decode.field("args", decode.list(decode.string))
+  use traced <- decode.optional_field(
+    "traced",
+    None,
+    decode.map(traced_decoder(), Some),
+  )
 
-  decode.success(Events(track:, kind:, timestamps_ms:, durations_ms:, args:))
+  decode.success(Events(
+    track:,
+    kind:,
+    timestamps_ms:,
+    durations_ms:,
+    args:,
+    traced:,
+  ))
+}
+
+fn traced_json(traced: Traced) -> Json {
+  case traced {
+    SchedulingTraced(snapshot:) ->
+      json.object([
+        #("probe", json.string(scheduling_kind)),
+        #("result", trace_codec.events_json(snapshot)),
+      ])
+    CallTreeTraced(snapshot:) ->
+      json.object([
+        #("probe", json.string(call_tree_kind)),
+        #("result", trace_codec.calltrace_json(snapshot)),
+      ])
+  }
+}
+
+// The probe's code says which result follows, so a result of the wrong shape
+// is refused and not read as the other kind.
+fn traced_decoder() -> Decoder(Traced) {
+  use probe <- decode.field("probe", decode.string)
+
+  case probe {
+    "scheduling_gc" ->
+      decode.field("result", trace_codec.events_decoder(), fn(snapshot) {
+        decode.success(SchedulingTraced(snapshot:))
+      })
+    "call_tree" ->
+      decode.field("result", trace_codec.calltrace_decoder(), fn(snapshot) {
+        decode.success(CallTreeTraced(snapshot:))
+      })
+    _ ->
+      decode.failure(
+        SchedulingTraced(snapshot: empty_events()),
+        "scheduling_gc or call_tree",
+      )
+  }
+}
+
+fn empty_events() -> wire.EventsSnapshot {
+  wire.EventsSnapshot(
+    probe_id: 0,
+    state: wire.ProbeRunning,
+    stop: wire.TraceRunning,
+    meter: wire.EventsMeter(
+      trace: wire.TraceMeter(
+        elapsed_ms: 0,
+        events: 0,
+        max_events: 0,
+        dropped_events: 0,
+        in_flight_at_stop: 0,
+        peak_queue: 0,
+        queue_limit: 0,
+        targets_gone: 0,
+      ),
+      unpaired_events: 0,
+      dropped_slices: 0,
+      long_events_seen: 0,
+      strays: 0,
+      long_gc_ms: 0,
+      long_schedule_ms: 0,
+    ),
+    processes: [],
+    slices: [],
+    long: [],
+  )
 }
 
 fn checkpoint_decoder() -> Decoder(Checkpoint) {

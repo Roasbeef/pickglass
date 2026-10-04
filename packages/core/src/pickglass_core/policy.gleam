@@ -463,8 +463,9 @@ pub const max_probe_modules = 16
 pub const max_probe_duration_ms = 300_000
 
 /// The longest a probe of this kind may run. The agent cuts a stack sampling
-/// probe to a minute, so a plan for longer would describe a scope the agent
-/// does not run; the limit here is what the agent enforces.
+/// or events probe to a minute and a call tree probe to ten seconds, so a plan
+/// for longer would describe a scope the agent does not run; the limit here is
+/// what the agent enforces.
 ///
 /// ## Examples
 ///
@@ -474,13 +475,15 @@ pub const max_probe_duration_ms = 300_000
 /// ```
 pub fn max_duration_ms(kind: ProbeKind) -> Int {
   case kind {
-    Sampling -> 60_000
-    Counters | CallTree | SchedulingGc -> max_probe_duration_ms
+    Sampling | SchedulingGc -> 60_000
+    CallTree -> 10_000
+    Counters -> max_probe_duration_ms
   }
 }
 
 /// The most pinned targets a probe of this kind may name. The agent takes
-/// sixteen for a stack probe and the viewer holds trace probes to eight.
+/// sixteen for a stack probe, four for a call tree probe and eight for an
+/// events probe, and the viewer holds a counters probe to eight.
 ///
 /// ## Examples
 ///
@@ -491,9 +494,27 @@ pub fn max_duration_ms(kind: ProbeKind) -> Int {
 pub fn target_limit(kind: ProbeKind) -> Int {
   case kind {
     Sampling -> 16
-    Counters | CallTree | SchedulingGc -> 8
+    CallTree -> 4
+    Counters | SchedulingGc -> 8
   }
 }
+
+/// How many trace events a call tree or an events probe may fold before the
+/// agent stops it. The plan states it as the probe's event budget.
+pub const trace_event_budget = 100_000
+
+/// How many raw call slices a call tree probe is asked to keep for a
+/// timeline, and how many run and collection slices an events probe keeps.
+pub const timeline_slice_limit = 2000
+
+/// The node-wide thresholds an events probe sets, in milliseconds: a
+/// collection or a timeslice this long is reported whichever process it
+/// belongs to. The agent exists on OTP 28 and later, and a probe on an older
+/// release runs without them.
+pub const long_gc_ms = 50
+
+/// See `long_gc_ms`.
+pub const long_schedule_ms = 100
 
 /// The ceiling on samples per second, summed over every target of one stack
 /// probe. It mirrors the agent's own constant, so the viewer can tell the
@@ -517,7 +538,33 @@ pub fn sampling_rate_hz(requested: Int, targets: Int) -> Int {
   int.max(1, int.min(requested, ceiling))
 }
 
-fn needs_modules(kind: ProbeKind) -> Bool {
+/// The most modules a probe of this kind may name. The agent takes eight
+/// patterns for a call tree probe, the same set a counters probe takes.
+///
+/// ## Examples
+///
+/// ```gleam
+/// policy.module_limit(policy.CallTree)
+/// // -> 8
+/// ```
+pub fn module_limit(kind: ProbeKind) -> Int {
+  case kind {
+    CallTree -> 8
+    Counters | Sampling | SchedulingGc -> max_probe_modules
+  }
+}
+
+/// Whether a probe of this kind names the modules it traces. Counters and
+/// call tree probes do, and the agent refuses one that names none; a stack or
+/// events probe has no use for them.
+///
+/// ## Examples
+///
+/// ```gleam
+/// policy.needs_modules(policy.CallTree)
+/// // -> True
+/// ```
+pub fn needs_modules(kind: ProbeKind) -> Bool {
   case kind {
     Counters | CallTree -> True
     Sampling | SchedulingGc -> False
@@ -537,6 +584,7 @@ pub fn validate_spec(spec: ProbeSpec) -> Result(Nil, SpecError) {
   let targets = list.length(spec.targets)
   let limit = target_limit(spec.kind)
   let longest = max_duration_ms(spec.kind)
+  let module_cap = module_limit(spec.kind)
 
   case
     targets,
@@ -546,8 +594,7 @@ pub fn validate_spec(spec: ProbeSpec) -> Result(Nil, SpecError) {
   {
     0, _, _, _ -> Error(NoTargets)
     n, _, _, _ if n > limit -> Error(TooManyTargets(limit:))
-    _, m, _, _ if m > max_probe_modules ->
-      Error(TooManyModules(limit: max_probe_modules))
+    _, m, _, _ if m > module_cap -> Error(TooManyModules(limit: module_cap))
     _, 0, True, _ -> Error(NoModules)
     _, _, _, d if d < 1 || d > longest -> Error(BadDuration(max_ms: longest))
     _, _, _, _ -> check_rate(spec)

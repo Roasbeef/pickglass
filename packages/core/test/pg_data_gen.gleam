@@ -6,7 +6,7 @@
 //// rejected are written out by hand in the tests that need them.
 
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import pickglass_core/capture.{type Record}
 import pickglass_core/identity
 import pickglass_core/measure
@@ -14,6 +14,7 @@ import pickglass_core/owner
 import pickglass_core/policy
 import pickglass_core/provenance
 import pickglass_core/unit
+import pickglass_core/wire
 import qcheck.{type Generator}
 
 /// Run a property over 200 generated cases. Records are large, so this is
@@ -140,6 +141,7 @@ pub fn truncation() -> Generator(measure.TruncationReason) {
     measure.DeadlineHit,
     measure.RingOverflow,
     measure.ScanLimit,
+    measure.CollectorOverrun,
   ])
 }
 
@@ -495,7 +497,17 @@ fn events_record() -> Generator(Record(String)) {
   use kind <- qcheck.bind(text())
   use timestamps_ms <- qcheck.bind(small_list(non_negative()))
   use durations_ms <- qcheck.bind(small_list(non_negative()))
-  use args <- qcheck.map(small_list(text()))
+  use args <- qcheck.bind(small_list(text()))
+  use traced <- qcheck.map(
+    qcheck.from_generators(qcheck.constant(None), [
+      qcheck.map(events_snapshot(), fn(snapshot) {
+        Some(capture.SchedulingTraced(snapshot:))
+      }),
+      qcheck.map(calltrace_snapshot(), fn(snapshot) {
+        Some(capture.CallTreeTraced(snapshot:))
+      }),
+    ]),
+  )
 
   capture.EventsRecord(capture.Events(
     track:,
@@ -503,7 +515,178 @@ fn events_record() -> Generator(Record(String)) {
     timestamps_ms:,
     durations_ms:,
     args:,
+    traced:,
   ))
+}
+
+fn probe_state() -> Generator(wire.ProbeState) {
+  one_of(wire.ProbeRunning, [wire.ProbeFinished, wire.ProbeStopped])
+}
+
+fn trace_stop() -> Generator(wire.TraceStop) {
+  one_of(wire.TraceRunning, [
+    wire.TraceDeadline,
+    wire.TraceBudget,
+    wire.TraceOverrun,
+    wire.TraceTargetsGone,
+    wire.TraceStopped,
+  ])
+}
+
+fn trace_meter() -> Generator(wire.TraceMeter) {
+  use elapsed_ms <- qcheck.bind(non_negative())
+  use events <- qcheck.bind(non_negative())
+  use max_events <- qcheck.bind(non_negative())
+  use dropped_events <- qcheck.bind(non_negative())
+  use in_flight_at_stop <- qcheck.bind(non_negative())
+  use peak_queue <- qcheck.bind(non_negative())
+  use queue_limit <- qcheck.bind(non_negative())
+  use targets_gone <- qcheck.map(non_negative())
+
+  wire.TraceMeter(
+    elapsed_ms:,
+    events:,
+    max_events:,
+    dropped_events:,
+    in_flight_at_stop:,
+    peak_queue:,
+    queue_limit:,
+    targets_gone:,
+  )
+}
+
+/// A scheduling and garbage collection probe's result.
+pub fn events_snapshot() -> Generator(wire.EventsSnapshot) {
+  use probe_id <- qcheck.bind(non_negative())
+  use state <- qcheck.bind(probe_state())
+  use stop <- qcheck.bind(trace_stop())
+  use trace <- qcheck.bind(trace_meter())
+  use processes <- qcheck.bind(
+    small_list(qcheck.tuple3(
+      text(),
+      qcheck.tuple3(non_negative(), non_negative(), non_negative()),
+      non_negative(),
+    )),
+  )
+  use slices <- qcheck.bind(
+    small_list(tuple3(
+      one_of(wire.RunSlice, [wire.MinorGcSlice, wire.MajorGcSlice]),
+      tuple2(non_negative(), non_negative()),
+      non_negative(),
+    )),
+  )
+  use long <- qcheck.map(
+    small_list(
+      qcheck.from_generators(
+        qcheck.map(tuple3(text(), non_negative(), non_negative()), fn(t) {
+          wire.LongGc(pid_text: t.0, duration_ms: t.1, heap_words: t.2)
+        }),
+        [
+          qcheck.map(tuple3(text(), non_negative(), text()), fn(t) {
+            wire.LongSchedule(pid_text: t.0, duration_ms: t.1, function: t.2)
+          }),
+        ],
+      ),
+    ),
+  )
+  wire.EventsSnapshot(
+    probe_id:,
+    state:,
+    stop:,
+    meter: wire.EventsMeter(
+      trace:,
+      unpaired_events: 1,
+      dropped_slices: 2,
+      long_events_seen: 3,
+      strays: 4,
+      long_gc_ms: 50,
+      long_schedule_ms: 100,
+    ),
+    processes: list.map(processes, fn(p) {
+      wire.TracedProcess(
+        pid_text: p.0,
+        runs: p.1.0,
+        run_ns: p.1.1,
+        minor_gcs: p.1.2,
+        major_gcs: p.2,
+        gc_ns: p.2 + 1,
+      )
+    }),
+    slices: list.map(slices, fn(s) {
+      wire.ActivitySlice(
+        process: s.1.0 % 3,
+        kind: s.0,
+        start_ns: s.1.1,
+        duration_ns: s.2,
+      )
+    }),
+    long:,
+  )
+}
+
+/// A call tree probe's result.
+pub fn calltrace_snapshot() -> Generator(wire.CalltraceSnapshot) {
+  use probe_id <- qcheck.bind(non_negative())
+  use state <- qcheck.bind(probe_state())
+  use stop <- qcheck.bind(trace_stop())
+  use trace <- qcheck.bind(trace_meter())
+  use frames <- qcheck.bind(small_list(tuple3(text(), text(), non_negative())))
+  use paths <- qcheck.bind(
+    small_list(tuple3(
+      tuple3(non_negative(), non_negative(), non_negative()),
+      small_list(non_negative()),
+      non_negative(),
+    )),
+  )
+  use processes <- qcheck.bind(small_list(text()))
+  use slices <- qcheck.map(
+    small_list(tuple3(
+      tuple3(non_negative(), non_negative(), non_negative()),
+      non_negative(),
+      non_negative(),
+    )),
+  )
+
+  wire.CalltraceSnapshot(
+    probe_id:,
+    state:,
+    stop:,
+    meter: wire.CalltraceMeter(
+      trace:,
+      forced_closes: 1,
+      distinct_paths: 2,
+      dropped_calls: 3,
+      elided_calls: 4,
+      strays: 5,
+      depth_limit: 64,
+    ),
+    frames: list.map(frames, fn(f) {
+      wire.StackFrame(
+        module: f.0,
+        function: f.1,
+        arity: f.2,
+        location: wire.NoLocation,
+      )
+    }),
+    paths: list.map(paths, fn(p) {
+      wire.CallPath(
+        calls: p.0.0,
+        inclusive_ns: p.0.1,
+        exclusive_ns: p.0.2,
+        frames: p.1,
+      )
+    }),
+    processes:,
+    slices: list.map(slices, fn(s) {
+      wire.CallSlice(
+        process: s.0.0,
+        frame: s.0.1,
+        start_ns: s.0.2,
+        duration_ns: s.1,
+        depth: s.2,
+      )
+    }),
+  )
 }
 
 fn cost_record() -> Generator(Record(String)) {

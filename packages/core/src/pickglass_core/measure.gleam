@@ -411,6 +411,10 @@ pub type TruncationReason {
 
   /// A scan limit, such as bytes unscanned, stopped the walk.
   ScanLimit
+
+  /// The collector fell behind the events it was sent, so the probe was
+  /// stopped and the backlog was dropped.
+  CollectorOverrun
 }
 
 /// Why a capture or collection is less than complete.
@@ -472,13 +476,21 @@ pub fn truncation_code(reason: TruncationReason) -> String {
     DeadlineHit -> "deadline_hit"
     RingOverflow -> "ring_overflow"
     ScanLimit -> "scan_limit"
+    CollectorOverrun -> "collector_overrun"
   }
 }
 
 /// Parse a truncation code; any other text is an error.
 pub fn parse_truncation(code: String) -> Result(TruncationReason, Nil) {
   list.find(
-    [TopKLimit, BudgetReached, DeadlineHit, RingOverflow, ScanLimit],
+    [
+      TopKLimit,
+      BudgetReached,
+      DeadlineHit,
+      RingOverflow,
+      ScanLimit,
+      CollectorOverrun,
+    ],
     fn(reason) { truncation_code(reason) == code },
   )
 }
