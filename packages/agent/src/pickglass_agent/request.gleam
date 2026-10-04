@@ -30,6 +30,10 @@
 //// | ask a process to measure itself | `{<<"measure">>, Token, BudgetMs}` |
 //// | start a stack sampling probe | `{<<"start_stacks">>, [Token], RateHz, DurationMs, MaxSamples}` |
 //// | read or stop a stack probe | `{<<"read_stacks">>, Id}`, `{<<"stop_stacks">>, Id}` |
+//// | start a call tree probe | `{<<"start_calltrace">>, [Token], [{Module, Function}], DurationMs, MaxEvents, TimelineSlices}` |
+//// | read or stop a call tree probe | `{<<"read_calltrace">>, Id}`, `{<<"stop_calltrace">>, Id}` |
+//// | start a scheduling and collection probe | `{<<"start_events">>, [Token], DurationMs, MaxEvents, MaxSlices, LongGcMs, LongScheduleMs}` |
+//// | read or stop an events probe | `{<<"read_events">>, Id}`, `{<<"stop_events">>, Id}` |
 //// | detach | `{<<"detach">>}` |
 ////
 //// `Targets` is `{<<"all">>}` or `{<<"pins">>, [{BootId, PinId}]}`. Numeric
@@ -44,6 +48,7 @@ import pickglass_agent/internal/ffi_trace.{
   type CounterMode, TimeAndMemory, TimeOnly,
 }
 import pickglass_agent/internal/seq
+import pickglass_agent/tracing
 
 /// The wire version this agent speaks.
 pub const wire_version = 1
@@ -157,6 +162,25 @@ pub type Request {
   )
   ReadStacks(probe_id: Int)
   StopStacks(probe_id: Int)
+  StartCalltrace(
+    tokens: List(Token),
+    patterns: List(Pattern),
+    duration_ms: Int,
+    max_events: Int,
+    timeline_limit: Int,
+  )
+  ReadCalltrace(probe_id: Int)
+  StopCalltrace(probe_id: Int)
+  StartEvents(
+    tokens: List(Token),
+    duration_ms: Int,
+    max_events: Int,
+    slice_limit: Int,
+    long_gc_ms: Int,
+    long_schedule_ms: Int,
+  )
+  ReadEvents(probe_id: Int)
+  StopEvents(probe_id: Int)
   Detach
 }
 
@@ -253,6 +277,12 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "start_stacks", 5 -> decode_start_stacks(term)
     "read_stacks", 2 -> decode_probe(term, ReadStacks)
     "stop_stacks", 2 -> decode_probe(term, StopStacks)
+    "start_calltrace", 6 -> decode_start_calltrace(term)
+    "read_calltrace", 2 -> decode_probe(term, ReadCalltrace)
+    "stop_calltrace", 2 -> decode_probe(term, StopCalltrace)
+    "start_events", 7 -> decode_start_events(term)
+    "read_events", 2 -> decode_probe(term, ReadEvents)
+    "stop_events", 2 -> decode_probe(term, StopEvents)
     "gc", 3 -> decode_wait(term, TargetedGc, min_gc_wait_ms, max_gc_wait_ms)
     "measure", 3 ->
       decode_wait(term, SelfMeasure, min_measure_wait_ms, max_measure_wait_ms)
@@ -403,7 +433,10 @@ fn decode_wait(
 // The rate ceiling is a total across targets, so it is divided by how many
 // there are: sixteen pins sample at most 62 times a second each.
 fn decode_start_stacks(term: Term) -> Result(Request, String) {
-  use tokens <- fallible.then(decode_token_list(ffi_term.element(2, term)))
+  use tokens <- fallible.then(decode_token_list(
+    ffi_term.element(2, term),
+    max_targets,
+  ))
   use rate <- fallible.then(integer(ffi_term.element(3, term), "rate"))
   use duration <- fallible.then(integer(ffi_term.element(4, term), "duration"))
   use samples <- fallible.then(integer(ffi_term.element(5, term), "samples"))
@@ -416,15 +449,61 @@ fn decode_start_stacks(term: Term) -> Result(Request, String) {
   ))
 }
 
-fn decode_token_list(term: Term) -> Result(List(Token), String) {
+// A list of pin tokens of between one and `limit`. The two trace probes take
+// fewer targets than the others, because each traced process costs a message
+// per event.
+fn decode_token_list(term: Term, limit: Int) -> Result(List(Token), String) {
   case ffi_safe.proper_length(term) {
     Error(Nil) -> Error("tokens is not a list")
     Ok(count) ->
-      case count < 1 || count > max_targets {
-        True -> Error("a probe takes between one and sixteen pins")
+      case count < 1 || count > limit {
+        True -> Error("this probe takes between one and its limit of pins")
         False -> decode_tokens(ffi_term.coerce(term), [])
       }
   }
+}
+
+fn decode_start_calltrace(term: Term) -> Result(Request, String) {
+  use tokens <- fallible.then(decode_token_list(
+    ffi_term.element(2, term),
+    tracing.max_calltrace_targets,
+  ))
+  use patterns <- fallible.then(decode_patterns(ffi_term.element(3, term)))
+  use duration <- fallible.then(integer(ffi_term.element(4, term), "duration"))
+  use events <- fallible.then(integer(ffi_term.element(5, term), "events"))
+  use timeline <- fallible.then(integer(ffi_term.element(6, term), "timeline"))
+
+  Ok(StartCalltrace(
+    tokens,
+    patterns,
+    clamp(duration, tracing.min_window_ms, tracing.max_calltrace_ms),
+    clamp(events, 1, tracing.max_events),
+    clamp(timeline, 0, tracing.max_timeline),
+  ))
+}
+
+fn decode_start_events(term: Term) -> Result(Request, String) {
+  use tokens <- fallible.then(decode_token_list(
+    ffi_term.element(2, term),
+    tracing.max_events_targets,
+  ))
+  use duration <- fallible.then(integer(ffi_term.element(3, term), "duration"))
+  use events <- fallible.then(integer(ffi_term.element(4, term), "events"))
+  use slices <- fallible.then(integer(ffi_term.element(5, term), "slices"))
+  use long_gc <- fallible.then(integer(ffi_term.element(6, term), "long gc"))
+  use long_schedule <- fallible.then(integer(
+    ffi_term.element(7, term),
+    "long schedule",
+  ))
+
+  Ok(StartEvents(
+    tokens,
+    clamp(duration, tracing.min_window_ms, tracing.max_events_ms),
+    clamp(events, 1, tracing.max_events),
+    clamp(slices, 0, tracing.max_slices),
+    clamp(long_gc, 0, tracing.max_threshold_ms),
+    clamp(long_schedule, 0, tracing.max_threshold_ms),
+  ))
 }
 
 fn decode_probe(

@@ -4,6 +4,7 @@ import pickglass_agent/internal/ffi_trace.{TimeAndMemory, TimeOnly}
 import pickglass_agent/request.{
   AllProcesses, Census, Detach, Malformed, NotARequest, Ping, Valid,
 }
+import pickglass_agent/tracing
 
 @external(erlang, "erlang", "self")
 fn self() -> ffi_term.Pid
@@ -240,4 +241,127 @@ pub fn clamp_test() {
 fn pins(count: Int) -> List(#(String, Int)) {
   list.repeat(Nil, count)
   |> list.index_map(fn(_, index) { #("boot-1", index + 1) })
+}
+
+// A call tree probe takes at most four pins and eight patterns, and its
+// window, event budget and timeline are clamped to the probe's own bounds.
+pub fn calltrace_requests_decode_and_clamp_test() {
+  let one = [#("boot-1", 1)]
+  let patterns = [#("pg_a", "run")]
+
+  assert decoded_request(
+      envelope(#("start_calltrace", one, patterns, 1, 0, -5)),
+    )
+    == Ok(request.StartCalltrace(
+      [request.Token("boot-1", 1)],
+      [request.Pattern("pg_a", "run")],
+      tracing.min_window_ms,
+      1,
+      0,
+    ))
+  assert decoded_request(
+      envelope(#(
+        "start_calltrace",
+        one,
+        patterns,
+        999_999_999,
+        999_999_999,
+        999_999_999,
+      )),
+    )
+    == Ok(request.StartCalltrace(
+      [request.Token("boot-1", 1)],
+      [request.Pattern("pg_a", "run")],
+      tracing.max_calltrace_ms,
+      tracing.max_events,
+      tracing.max_timeline,
+    ))
+  assert decoded_request(envelope(#("read_calltrace", 4)))
+    == Ok(request.ReadCalltrace(4))
+  assert decoded_request(envelope(#("stop_calltrace", 4)))
+    == Ok(request.StopCalltrace(4))
+}
+
+pub fn malformed_calltrace_requests_are_refused_test() {
+  let none: List(#(String, Int)) = []
+  let patterns = [#("pg_a", "run")]
+  let no_patterns: List(#(String, String)) = []
+  let nine = list.map(upto(9), fn(_) { #("pg_a", "run") })
+
+  assert decoded_request(
+      envelope(#("start_calltrace", none, patterns, 500, 100, 0)),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_calltrace", pins(5), patterns, 500, 100, 0)),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_calltrace", pins(4), no_patterns, 500, 100, 0)),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_calltrace", pins(1), nine, 500, 100, 0)),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_calltrace", pins(1), patterns, "soon", 100, 0)),
+    )
+    |> is_error
+  assert decoded_request(envelope(#("start_calltrace", pins(1), patterns, 500)))
+    |> is_error
+  assert decoded_request(envelope(#("read_calltrace", "x"))) |> is_error
+}
+
+// An events probe takes up to eight pins, and a threshold of zero is off.
+pub fn events_requests_decode_and_clamp_test() {
+  assert decoded_request(envelope(#("start_events", pins(8), 1, 0, -1, -1, -1)))
+    == Ok(request.StartEvents(
+      list.map(upto(8), fn(n) { request.Token("boot-1", n) }),
+      tracing.min_window_ms,
+      1,
+      0,
+      0,
+      0,
+    ))
+  assert decoded_request(
+      envelope(#(
+        "start_events",
+        pins(1),
+        999_999_999,
+        999_999_999,
+        999_999_999,
+        999_999_999,
+        7,
+      )),
+    )
+    == Ok(request.StartEvents(
+      [request.Token("boot-1", 1)],
+      tracing.max_events_ms,
+      tracing.max_events,
+      tracing.max_slices,
+      tracing.max_threshold_ms,
+      7,
+    ))
+  assert decoded_request(envelope(#("read_events", 9)))
+    == Ok(request.ReadEvents(9))
+  assert decoded_request(envelope(#("stop_events", 9)))
+    == Ok(request.StopEvents(9))
+}
+
+pub fn malformed_events_requests_are_refused_test() {
+  assert decoded_request(envelope(#("start_events", pins(9), 500, 10, 1, 0, 0)))
+    |> is_error
+  assert decoded_request(envelope(#("start_events", pins(1), 500, 10, 1, 0)))
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_events", pins(1), 500, 10, 1, "slow", 0)),
+    )
+    |> is_error
+}
+
+// The numbers from one to `count`.
+fn upto(count: Int) -> List(Int) {
+  list.repeat(Nil, count)
+  |> list.index_map(fn(_, index) { index + 1 })
 }

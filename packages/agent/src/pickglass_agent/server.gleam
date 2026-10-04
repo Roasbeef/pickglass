@@ -37,6 +37,8 @@
 //// neither, and the VM then destroys the sessions because the agent was
 //// their sole holder.
 
+import pickglass_agent/activitytrace
+import pickglass_agent/calltrace
 import pickglass_agent/census
 import pickglass_agent/counters.{type Probe}
 import pickglass_agent/detail
@@ -47,7 +49,7 @@ import pickglass_agent/internal/ffi_safe
 import pickglass_agent/internal/ffi_term.{
   type Atom, type Pid, type Reference, type Term,
 }
-import pickglass_agent/internal/ffi_trace.{type CounterMode}
+import pickglass_agent/internal/ffi_trace.{type CounterMode, type Session}
 import pickglass_agent/internal/ffi_vm
 import pickglass_agent/internal/seq
 import pickglass_agent/janitor
@@ -58,6 +60,7 @@ import pickglass_agent/request.{type Envelope, type Token, Envelope}
 import pickglass_agent/sampler
 import pickglass_agent/supervision
 import pickglass_agent/system
+import pickglass_agent/tracer
 
 /// How often the agent looks at its lease and its probe deadlines.
 const tick_ms = 250
@@ -70,6 +73,22 @@ const max_running_probes = 2
 
 /// The most stack probes sampling at once.
 const max_running_stack_probes = 1
+
+/// The most call tree probes, and the most events probes, running at once.
+/// Both count toward `max_running_probes`.
+const max_running_trace_probes_per_kind = 1
+
+/// The most finished call tree and events probes kept for reading. Each holds
+/// its aggregate in its tracer's heap, so the bound is small.
+const max_finished_trace_probes = 2
+
+/// The heap a tracer may grow to, in words, before the VM kills it.
+const tracer_heap_words = 4_000_000
+
+/// How long past its window a tracer may take to stop before the agent kills
+/// it, in milliseconds. A tracer stops itself at its deadline, so this only
+/// matters to one that is stuck.
+const tracer_grace_ms = 1000
 
 /// The most finished stack probes kept for reading. Each holds up to five
 /// thousand stacks in its sampler's heap, so the bound is small.
@@ -154,6 +173,35 @@ pub type StackProbe {
   )
 }
 
+/// Which trace-based event probe a `TraceProbe` is. The two kinds are limited
+/// separately, and a read or stop names the kind it expects.
+pub type TraceKind {
+  CallTree
+  SchedulingGc
+}
+
+/// Whether an event probe is still tracing, and if so the session it owns.
+/// This is the only place the strong session handle lives. It is never sent,
+/// returned or logged, and it is gone from the probe once the session is
+/// destroyed.
+pub type TracePhase {
+  TraceRunning(session: Session)
+  TraceDone
+}
+
+/// An event probe: the tracer process that folds the events, its monitor and
+/// its deadline. The aggregate lives in the tracer, not here.
+pub type TraceProbe {
+  TraceProbe(
+    id: Int,
+    kind: TraceKind,
+    tracer: Pid,
+    monitor: Reference,
+    deadline_at_ms: Int,
+    phase: TracePhase,
+  )
+}
+
 /// Whether the agent holds the `scheduler_wall_time` flag.
 pub type Scheduler {
   Collecting
@@ -172,6 +220,7 @@ pub type State {
     next_pin: Int,
     probes: List(Probe),
     stacks: List(StackProbe),
+    traces: List(TraceProbe),
     next_probe: Int,
     workers: List(Worker),
     scheduler: Scheduler,
@@ -198,6 +247,7 @@ type Event {
   Refused(reply_to: Pid, reference: Reference, detail: String)
   Ticked
   StacksFinished(id: Int)
+  TraceFinished(id: Int)
   Exited(monitor: Reference, reason: Term)
   NodeLost(node: Atom)
   Ignored
@@ -273,6 +323,7 @@ pub fn init(config: Config) -> Result(State, Nil) {
     next_pin: 1,
     probes: [],
     stacks: [],
+    traces: [],
     next_probe: 1,
     workers: [],
     scheduler: NotCollecting,
@@ -296,6 +347,7 @@ pub fn handle_info(message: Term, state: State) -> Next(State) {
     }
     Ticked -> on_tick(state)
     StacksFinished(id) -> Noreply(mark_stacks_done(state, id))
+    TraceFinished(id) -> Noreply(mark_trace_done(state, id))
     Exited(monitor, reason) -> on_down(monitor, reason, state)
     NodeLost(node) ->
       case node == state.viewer_node {
@@ -335,42 +387,55 @@ fn classify_tuple(message: Term) -> Event {
 fn classify_notice(message: Term) -> Event {
   case ffi_term.is_tuple(message) {
     False -> Ignored
-    True ->
-      case is_down(message), is_nodedown(message), is_stacks_finished(message) {
-        True, _, _ ->
+    True -> classify_signal(message, ffi_term.tuple_size(message))
+  }
+}
+
+fn classify_signal(message: Term, size: Int) -> Event {
+  case size {
+    5 ->
+      case is_down(message) {
+        True ->
           Exited(
             ffi_term.coerce(ffi_term.element(2, message)),
             ffi_term.element(5, message),
           )
-        False, True, _ ->
-          NodeLost(ffi_term.coerce(ffi_term.element(2, message)))
-        False, False, True ->
-          StacksFinished(ffi_term.coerce(ffi_term.element(2, message)))
-        False, False, False -> Ignored
+        False -> Ignored
       }
+    2 -> classify_pair(message)
+    _ -> Ignored
   }
 }
 
-// `{pickglass_stacks_finished, ProbeId}`, which a sampler sends when it stops
-// sampling on its own.
-fn is_stacks_finished(message: Term) -> Bool {
-  ffi_term.tuple_size(message) == 2
-  && ffi_term.element(1, message) == ffi_term.coerce(sampler.finished_tag())
-  && ffi_term.is_integer(ffi_term.element(2, message))
+// `{nodedown, Node}`, or `{Tag, ProbeId}` from a sampler or a tracer that
+// stopped on its own.
+fn classify_pair(message: Term) -> Event {
+  let tag = ffi_term.element(1, message)
+  let value = ffi_term.element(2, message)
+
+  case tag == ffi_term.coerce(Nodedown) && ffi_term.is_atom(value) {
+    True -> NodeLost(ffi_term.coerce(value))
+    False -> classify_finished(tag, value)
+  }
+}
+
+fn classify_finished(tag: Term, value: Term) -> Event {
+  case
+    ffi_term.is_integer(value),
+    tag == ffi_term.coerce(sampler.finished_tag()),
+    tag == ffi_term.coerce(tracer.finished_tag())
+  {
+    True, True, _ -> StacksFinished(ffi_term.coerce(value))
+    True, False, True -> TraceFinished(ffi_term.coerce(value))
+    True, False, False -> Ignored
+    False, _, _ -> Ignored
+  }
 }
 
 // `{'DOWN', Ref, process, Pid, Reason}`.
 fn is_down(message: Term) -> Bool {
-  ffi_term.tuple_size(message) == 5
-  && ffi_term.element(1, message) == ffi_term.coerce(ffi_term.atom("DOWN"))
+  ffi_term.element(1, message) == ffi_term.coerce(ffi_term.atom("DOWN"))
   && ffi_term.is_reference(ffi_term.element(2, message))
-}
-
-// `{nodedown, Node}`.
-fn is_nodedown(message: Term) -> Bool {
-  ffi_term.tuple_size(message) == 2
-  && ffi_term.element(1, message) == ffi_term.coerce(Nodedown)
-  && ffi_term.is_atom(ffi_term.element(2, message))
 }
 
 // ----------------------------------------------------------------- requests
@@ -420,6 +485,50 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
       )
     request.ReadStacks(id) -> read_stacks(state, reply_to, reference, id)
     request.StopStacks(id) -> stop_stacks(state, reply_to, reference, id)
+    request.StartCalltrace(
+      tokens,
+      patterns,
+      duration_ms,
+      max_events,
+      timeline_limit,
+    ) ->
+      start_calltrace(
+        state,
+        reply_to,
+        reference,
+        tokens,
+        patterns,
+        duration_ms,
+        max_events,
+        timeline_limit,
+      )
+    request.ReadCalltrace(id) ->
+      read_trace(state, reply_to, reference, id, CallTree)
+    request.StopCalltrace(id) ->
+      stop_trace(state, reply_to, reference, id, CallTree)
+    request.StartEvents(
+      tokens,
+      duration_ms,
+      max_events,
+      slice_limit,
+      long_gc_ms,
+      long_schedule_ms,
+    ) ->
+      start_events(
+        state,
+        reply_to,
+        reference,
+        tokens,
+        duration_ms,
+        max_events,
+        slice_limit,
+        long_gc_ms,
+        long_schedule_ms,
+      )
+    request.ReadEvents(id) ->
+      read_trace(state, reply_to, reference, id, SchedulingGc)
+    request.StopEvents(id) ->
+      stop_trace(state, reply_to, reference, id, SchedulingGc)
     request.SystemReport ->
       start_worker(state, reply_to, reference, "system", read_deadline_ms, fn() {
         reply.system(system.read())
@@ -472,7 +581,9 @@ fn ping(state: State) -> Term {
     ffi_vm.otp_release(),
     ffi_proc.now_ms() - state.started_ms,
     seq.length(state.pins),
-    running_count(state.probes) + sampling_count(state.stacks),
+    running_count(state.probes)
+      + sampling_count(state.stacks)
+      + tracing_count(state.traces),
   )
 }
 
@@ -983,7 +1094,9 @@ fn start_probe(
 
 fn check_probe_room(state: State) -> Result(Nil, Failure) {
   case
-    running_count(state.probes) + sampling_count(state.stacks)
+    running_count(state.probes)
+    + sampling_count(state.stacks)
+    + tracing_count(state.traces)
     >= max_running_probes
   {
     True -> Error(Failure("probe_limit", "two probes are already running"))
@@ -1373,6 +1486,367 @@ fn kill_stack_probe(probe: StackProbe) -> Nil {
   Nil
 }
 
+// ------------------------------------------------------------------- traces
+
+fn start_calltrace(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  tokens: List(Token),
+  patterns: List(request.Pattern),
+  duration_ms: Int,
+  max_events: Int,
+  timeline_limit: Int,
+) -> Next(State) {
+  let started = {
+    use _ <- fallible.then(check_probe_room(state))
+    use _ <- fallible.then(check_trace_room(state, CallTree))
+    use pids <- fallible.then(trace_targets(state, tokens))
+    use resolved <- fallible.then(resolve_patterns(patterns, []))
+    use launched <- fallible.then(
+      launch(calltrace.start(
+        calltrace.Config(
+          agent: ffi_proc.self(),
+          id: state.next_probe,
+          targets: pids,
+          patterns: resolved,
+          duration_ms: duration_ms,
+          max_events: max_events,
+          timeline_limit: timeline_limit,
+        ),
+        tracer_heap_words,
+      )),
+    )
+
+    Ok(#(launched, seq.length(pids)))
+  }
+
+  case started {
+    Error(failure) -> answer(state, reply_to, reference, reply.failure(failure))
+    Ok(#(launched, targets)) ->
+      answer(
+        add_trace(state, CallTree, launched, duration_ms),
+        reply_to,
+        reference,
+        reply.calltrace_started(
+          state.next_probe,
+          targets,
+          launched.matched,
+          duration_ms,
+          max_events,
+          timeline_limit,
+        ),
+      )
+  }
+}
+
+fn start_events(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  tokens: List(Token),
+  duration_ms: Int,
+  max_events: Int,
+  slice_limit: Int,
+  long_gc_ms: Int,
+  long_schedule_ms: Int,
+) -> Next(State) {
+  let started = {
+    use _ <- fallible.then(check_probe_room(state))
+    use _ <- fallible.then(check_trace_room(state, SchedulingGc))
+    use pids <- fallible.then(trace_targets(state, tokens))
+    use launched <- fallible.then(
+      launch(activitytrace.start(
+        activitytrace.Config(
+          agent: ffi_proc.self(),
+          id: state.next_probe,
+          targets: pids,
+          duration_ms: duration_ms,
+          max_events: max_events,
+          slice_limit: slice_limit,
+          long_gc_ms: long_gc_ms,
+          long_schedule_ms: long_schedule_ms,
+        ),
+        tracer_heap_words,
+      )),
+    )
+
+    Ok(#(launched, seq.length(pids)))
+  }
+
+  case started {
+    Error(failure) -> answer(state, reply_to, reference, reply.failure(failure))
+    Ok(#(launched, targets)) ->
+      answer(
+        add_trace(state, SchedulingGc, launched, duration_ms),
+        reply_to,
+        reference,
+        reply.events_started(
+          state.next_probe,
+          targets,
+          duration_ms,
+          max_events,
+          slice_limit,
+          long_gc_ms,
+          long_schedule_ms,
+        ),
+      )
+  }
+}
+
+fn launch(
+  launched: Result(tracer.Launched, counters.Refusal),
+) -> Result(tracer.Launched, Failure) {
+  case launched {
+    Ok(found) -> Ok(found)
+    Error(counters.Refusal(code, detail)) -> Error(Failure(code, detail))
+  }
+}
+
+// Pins become pids, without repeats, and the agent's own processes are never
+// traced: a probe over the tracer or a sampler would measure the probe.
+fn trace_targets(
+  state: State,
+  tokens: List(Token),
+) -> Result(List(Pid), Failure) {
+  use pids <- fallible.then(pids_of(state, tokens, []))
+
+  let distinct = distinct_pids(pids, [])
+
+  case seq.any(distinct, fn(pid) { is_agent_process(state, pid) }) {
+    True ->
+      Error(Failure(
+        "agent_process",
+        "a probe never traces the agent's own processes",
+      ))
+    False -> Ok(distinct)
+  }
+}
+
+fn distinct_pids(pids: List(Pid), kept: List(Pid)) -> List(Pid) {
+  case pids {
+    [] -> seq.reverse(kept)
+    [pid, ..rest] ->
+      case seq.any(kept, fn(other) { other == pid }) {
+        True -> distinct_pids(rest, kept)
+        False -> distinct_pids(rest, [pid, ..kept])
+      }
+  }
+}
+
+fn is_agent_process(state: State, pid: Pid) -> Bool {
+  pid == ffi_proc.self()
+  || seq.any(state.stacks, fn(probe) { probe.sampler == pid })
+  || seq.any(state.traces, fn(probe) { probe.tracer == pid })
+  || seq.any(state.workers, fn(worker) { worker.pid == pid })
+}
+
+fn check_trace_room(state: State, kind: TraceKind) -> Result(Nil, Failure) {
+  let running =
+    seq.length(
+      seq.filter(state.traces, fn(probe) {
+        probe.kind == kind && is_tracing(probe)
+      }),
+    )
+
+  case running >= max_running_trace_probes_per_kind {
+    True ->
+      Error(Failure("probe_limit", "a probe of this kind is already tracing"))
+    False -> Ok(Nil)
+  }
+}
+
+// The probe's own id is the agent's next one, which `add_trace` consumes.
+// The session handle in `launched` goes straight into the probe and is held
+// nowhere else.
+fn add_trace(
+  state: State,
+  kind: TraceKind,
+  launched: tracer.Launched,
+  duration_ms: Int,
+) -> State {
+  let probe =
+    TraceProbe(
+      id: state.next_probe,
+      kind: kind,
+      tracer: launched.tracer,
+      monitor: ffi_proc.monitor(ffi_proc.Process, launched.tracer),
+      deadline_at_ms: ffi_proc.now_ms() + duration_ms,
+      phase: TraceRunning(launched.session),
+    )
+
+  State(
+    ..state,
+    traces: [probe, ..state.traces],
+    next_probe: state.next_probe + 1,
+  )
+}
+
+fn find_trace(
+  probes: List(TraceProbe),
+  id: Int,
+  kind: TraceKind,
+) -> Result(TraceProbe, Nil) {
+  seq.find(probes, fn(probe) { probe.id == id && probe.kind == kind })
+}
+
+// A read is answered by the tracer, which holds the aggregate. The agent only
+// forwards the request, so it never copies a probe's tables.
+fn read_trace(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  id: Int,
+  kind: TraceKind,
+) -> Next(State) {
+  case find_trace(state.traces, id, kind) {
+    Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
+    Ok(probe) -> {
+      tracer.read(probe.tracer, reply_to, reference)
+
+      Noreply(state)
+    }
+  }
+}
+
+// A stop destroys the session first, which cuts the event stream at its
+// source whatever backlog the tracer has, and then asks the tracer for its
+// final result. The tracer replies and exits. The agent drops the probe at
+// once and removes the monitor, so the tracer's exit is not mistaken for a
+// crash.
+fn stop_trace(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  id: Int,
+  kind: TraceKind,
+) -> Next(State) {
+  case find_trace(state.traces, id, kind) {
+    Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
+    Ok(probe) -> {
+      let _ = ffi_proc.demonitor(probe.monitor, [ffi_proc.Flush])
+
+      destroy_trace_session(probe)
+      tracer.stop(probe.tracer, reply_to, reference)
+
+      Noreply(
+        State(
+          ..state,
+          traces: seq.filter(state.traces, fn(other) { other.id != id }),
+        ),
+      )
+    }
+  }
+}
+
+// A tracer that stopped on its own has already cut the stream. The agent
+// destroys the session it owns as well, and keeps the probe until it is read.
+fn mark_trace_done(state: State, id: Int) -> State {
+  State(
+    ..state,
+    traces: seq.map(state.traces, fn(probe) {
+      case probe.id == id {
+        True -> {
+          destroy_trace_session(probe)
+
+          TraceProbe(..probe, phase: TraceDone)
+        }
+        False -> probe
+      }
+    }),
+  )
+}
+
+fn destroy_trace_session(probe: TraceProbe) -> Nil {
+  case probe.phase {
+    TraceRunning(session) -> {
+      let _ = ffi_trace.session_destroy(session)
+
+      Nil
+    }
+    TraceDone -> Nil
+  }
+}
+
+fn kill_trace(probe: TraceProbe) -> Nil {
+  destroy_trace_session(probe)
+
+  let _ = ffi_proc.demonitor(probe.monitor, [ffi_proc.Flush])
+  let _ = ffi_proc.exit_with(probe.tracer, ffi_proc.Kill)
+
+  Nil
+}
+
+fn is_tracing(probe: TraceProbe) -> Bool {
+  case probe.phase {
+    TraceRunning(_) -> True
+    TraceDone -> False
+  }
+}
+
+fn tracing_count(probes: List(TraceProbe)) -> Int {
+  seq.length(seq.filter(probes, is_tracing))
+}
+
+// A tracer stops itself at its window, so one still tracing well after it is
+// stuck, and is killed with its session. Finished probes wait to be read and
+// are bounded: the oldest is killed when there are too many, because its
+// tracer's heap is what they cost.
+fn expire_traces(probes: List(TraceProbe), now: Int) -> List(TraceProbe) {
+  let live =
+    seq.filter(probes, fn(probe) {
+      case is_tracing(probe) && now >= probe.deadline_at_ms + tracer_grace_ms {
+        True -> {
+          kill_trace(probe)
+
+          False
+        }
+        False -> True
+      }
+    })
+
+  case seq.length(live) - tracing_count(live) > max_finished_trace_probes {
+    False -> live
+    True -> seq.reverse(drop_oldest_finished_trace(seq.reverse(live)))
+  }
+}
+
+fn drop_oldest_finished_trace(
+  oldest_first: List(TraceProbe),
+) -> List(TraceProbe) {
+  case oldest_first {
+    [] -> []
+    [probe, ..rest] ->
+      case probe.phase {
+        TraceRunning(_) -> [probe, ..drop_oldest_finished_trace(rest)]
+        TraceDone -> {
+          kill_trace(probe)
+
+          rest
+        }
+      }
+  }
+}
+
+// A tracer that died, by its heap cap or by a crash, leaves its session's
+// patterns running with nobody to read them, so the session is destroyed
+// with the probe.
+fn drop_dead_traces(
+  probes: List(TraceProbe),
+  monitor: Reference,
+) -> List(TraceProbe) {
+  seq.filter(probes, fn(probe) {
+    case probe.monitor == monitor {
+      True -> {
+        destroy_trace_session(probe)
+
+        False
+      }
+      False -> True
+    }
+  })
+}
+
 // ------------------------------------------------------------ time and exits
 
 // Each tick enforces two deadlines: the viewer's lease, and every running
@@ -1393,6 +1867,7 @@ fn on_tick(state: State) -> Next(State) {
           ..state,
           probes: expire_probes(state.probes, now),
           stacks: expire_stacks(state.stacks, now),
+          traces: expire_traces(state.traces, now),
           workers: expire_workers(state.workers, now),
         ),
       )
@@ -1471,6 +1946,7 @@ fn on_down(monitor: Reference, reason: Term, state: State) -> Next(State) {
           stacks: seq.filter(state.stacks, fn(probe) {
             probe.monitor != monitor
           }),
+          traces: drop_dead_traces(state.traces, monitor),
         ),
       )
   }
@@ -1539,6 +2015,7 @@ fn cause_name(cause: Cause) -> String {
 fn shut_down(state: State) -> State {
   seq.each(state.probes, counters.destroy)
   seq.each(state.stacks, kill_stack_probe)
+  seq.each(state.traces, kill_trace)
   seq.each(state.workers, fn(worker) {
     ffi_proc.exit_with(worker.pid, ffi_proc.Kill)
   })
@@ -1552,6 +2029,7 @@ fn shut_down(state: State) -> State {
     ..state,
     probes: [],
     stacks: [],
+    traces: [],
     workers: [],
     pins: [],
     scheduler: NotCollecting,
