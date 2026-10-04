@@ -1,4 +1,6 @@
 import gleam/list
+import pickglass_agent/binaries
+import pickglass_agent/ets
 import pickglass_agent/internal/ffi_term.{type Term, coerce}
 import pickglass_agent/internal/ffi_trace.{TimeAndMemory, TimeOnly}
 import pickglass_agent/request.{
@@ -364,4 +366,36 @@ pub fn malformed_events_requests_are_refused_test() {
 fn upto(count: Int) -> List(Int) {
   list.repeat(Nil, count)
   |> list.index_map(fn(_, index) { index + 1 })
+}
+
+// The ETS listing has a default of one hundred when no count is given, and a
+// given count is clamped to its bound.
+pub fn ets_tables_decode_test() {
+  assert decoded_request(envelope(#("ets_tables")))
+    == Ok(request.EtsTables(ets.default_top_k))
+  assert decoded_request(envelope(#("ets_tables", 25)))
+    == Ok(request.EtsTables(25))
+  assert decoded_request(envelope(#("ets_tables", 0)))
+    == Ok(request.EtsTables(1))
+  assert decoded_request(envelope(#("ets_tables", 999_999)))
+    == Ok(request.EtsTables(ets.max_top_k))
+  assert decoded_request(envelope(#("ets_tables", "many"))) |> is_error
+  assert decoded_request(envelope(#("ets_tables", 1, 2))) |> is_error
+}
+
+// A binaries read names a pin, not a pid text, and clamps its count.
+pub fn binaries_decode_test() {
+  assert decoded_request(envelope(#("binaries", #("boot-1", 4), 20)))
+    == Ok(request.Binaries(request.Token("boot-1", 4), 20))
+  assert decoded_request(envelope(#("binaries", #("boot-1", 4), 999_999)))
+    == Ok(request.Binaries(request.Token("boot-1", 4), binaries.max_top_k))
+  assert decoded_request(envelope(#("binaries", "<0.1.0>", 20))) |> is_error
+  assert decoded_request(envelope(#("binaries", #("boot-1", 4)))) |> is_error
+}
+
+// `owners_detail` takes the census budget and clamps it the same way.
+pub fn owners_detail_decodes_test() {
+  assert decoded_request(envelope(#("owners_detail", 999_999_999, 0)))
+    == Ok(request.OwnersDetail(request.max_scan, 1))
+  assert decoded_request(envelope(#("owners_detail", 5))) |> is_error
 }

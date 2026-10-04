@@ -16,6 +16,9 @@
 //// | liveness | `{<<"ping">>}` |
 //// | census | `{<<"census">>, MaxScanned, TopK}` |
 //// | census with owner heap and totals | `{<<"owners">>, MaxScanned, TopK}` |
+//// | census with initial calls and ETS per owner | `{<<"owners_detail">>, MaxScanned, TopK}` |
+//// | ETS tables, largest first | `{<<"ets_tables">>}` or `{<<"ets_tables">>, TopK}` |
+//// | binaries one pinned process holds | `{<<"binaries">>, Token, TopK}` |
 //// | memory | `{<<"memory">>}` |
 //// | pin a process | `{<<"pin">>, PidText}` |
 //// | release a pin | `{<<"unpin">>, {BootId, PinId}}` |
@@ -41,6 +44,8 @@
 //// viewer asking for more than the budget allows gets the budget and sees
 //// it in the reply's coverage.
 
+import pickglass_agent/binaries
+import pickglass_agent/ets
 import pickglass_agent/internal/fallible
 import pickglass_agent/internal/ffi_safe
 import pickglass_agent/internal/ffi_term.{type Pid, type Reference, type Term}
@@ -136,6 +141,17 @@ pub type Request {
   Ping
   Census(max_scanned: Int, top_k: Int)
   Owners(max_scanned: Int, top_k: Int)
+
+  /// The census with each row's `proc_lib` initial call and the memory of the
+  /// ETS tables each owner's processes own.
+  OwnersDetail(max_scanned: Int, top_k: Int)
+
+  /// The largest ETS tables, at most `top_k`.
+  EtsTables(top_k: Int)
+
+  /// The reference-counted binaries one pinned process holds, the largest
+  /// `top_k` listed.
+  Binaries(token: Token, top_k: Int)
   MemoryReport
   Pin(pid_text: String)
   Unpin(token: Token)
@@ -263,6 +279,10 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "detach", 1 -> Ok(Detach)
     "census", 3 -> decode_census(term, Census)
     "owners", 3 -> decode_census(term, Owners)
+    "owners_detail", 3 -> decode_census(term, OwnersDetail)
+    "ets_tables", 1 -> Ok(EtsTables(ets.default_top_k))
+    "ets_tables", 2 -> decode_ets_tables(term)
+    "binaries", 3 -> decode_binaries(term)
     "pin", 2 -> decode_pin(term)
     "unpin", 2 -> decode_unpin(term)
     "scheduler", 2 -> decode_scheduler(term)
@@ -300,6 +320,19 @@ fn decode_census(
   use top_k <- fallible.then(integer(ffi_term.element(3, term), "top_k"))
 
   Ok(build(clamp(scanned, 1, max_scan), clamp(top_k, 1, max_top_k)))
+}
+
+fn decode_ets_tables(term: Term) -> Result(Request, String) {
+  use top_k <- fallible.then(integer(ffi_term.element(2, term), "top_k"))
+
+  Ok(EtsTables(clamp(top_k, 1, ets.max_top_k)))
+}
+
+fn decode_binaries(term: Term) -> Result(Request, String) {
+  use token <- fallible.then(decode_token(ffi_term.element(2, term)))
+  use top_k <- fallible.then(integer(ffi_term.element(3, term), "top_k"))
+
+  Ok(Binaries(token, clamp(top_k, 1, binaries.max_top_k)))
 }
 
 fn decode_pin(term: Term) -> Result(Request, String) {

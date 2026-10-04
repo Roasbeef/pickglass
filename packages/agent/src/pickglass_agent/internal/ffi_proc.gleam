@@ -14,9 +14,11 @@ import pickglass_agent/internal/ffi_term.{
 }
 
 /// The `process_info/2` items the agent reads. Every one is a number, a short
-/// atom, a bounded list of identifiers or a fixed-size property list; items
-/// that copy process-owned data (messages, dictionary, backtrace) are
-/// deliberately absent.
+/// atom, a bounded list of identifiers or a fixed-size property list, with
+/// two exceptions that are always asked of one process at a time: `Binary`,
+/// whose answer grows with what the process holds, and `Dictionary`, which
+/// names a single key. Items that copy process-owned data wholesale
+/// (messages, the whole dictionary, backtrace) are deliberately absent.
 pub type Item {
   Memory
   TotalHeapSize
@@ -36,6 +38,16 @@ pub type Item {
   MonitoredBy
   Parent
   CurrentStacktrace
+
+  /// The reference-counted binaries a process holds, `{Address, Size,
+  /// RefCount}` each. The one item whose answer is as long as what the process
+  /// holds, so only a worker with a cap and a pinned target asks for it.
+  Binary
+
+  /// One key of the process dictionary, `{dictionary, Key}`. The VM looks the
+  /// key up and returns its value alone, where the bare `dictionary` item
+  /// copies every entry the process holds.
+  Dictionary(key: Atom)
 }
 
 /// The kind of thing `monitor/2` watches. The agent only monitors

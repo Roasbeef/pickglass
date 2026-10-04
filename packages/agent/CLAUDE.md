@@ -18,7 +18,7 @@ counters probes (`counters.Probe`, whose `Running` phase holds the only strong
 trace session handle), the stack probes (`server.StackProbe`, a sampler pid and
 its monitor), the event probes (`server.TraceProbe`, a tracer pid, its monitor
 and, while it runs, the only strong session handle of its kind), the workers and
-the lease. `census.Report`,
+the lease. `census.Report`, `ets.Report`, `binaries.Report`,
 `supervision.Report`, `detail.Detail`, `system.Report`,
 `counters.Snapshot`, `stacks.Built`, `calltree.Built` and `activity.Built` are
 the bounded results.
@@ -117,6 +117,87 @@ owner's `total_heap_size`, every heap fragment its processes hold), and:
   owner falls when a process exits, so a correct rate needs a per-pid
   baseline, which the viewer owns.
 - Errors: `busy`.
+
+**Owners with initial calls and ETS.** `{<<"owners_detail">>, MaxScanned,
+TopK}` runs the owners census and then walks every ETS table, and gives
+`{<<"owners_detail">>, Coverage, Rows, Owners, Totals, Ets}`. It is a separate
+request so that `owners` keeps its shape and a view pays for the table walk
+only when it asks. Each part is the `owners` part with fields appended, so a
+reader of `owners` reads the prefix of every tuple unchanged:
+- A row has a twelfth field, `InitialCall`: the `proc_lib` `'$initial_call'`
+  as `module:function/arity`, or `""` for a process `proc_lib` did not start.
+  A supervisor reads `supervisor:my_sup/1`, which is how a view tells it from
+  a worker; a `gen_server` reads `my_server:init/1`. It is read with
+  `process_info(P, {dictionary, '$initial_call'})`, which looks the one key up
+  and copies nothing else, in the same signal as the other census items, so a
+  process with a large dictionary costs the same as one with none.
+  `proc_lib:initial_call/1` does the same read but also makes an atom for each
+  argument of a dummy argument list, so the agent does not use it.
+- An owner aggregate has two more fields after `TotalHeapWords`: `EtsTables`
+  and `EtsBytes`, the tables owned by the owner's processes and their memory.
+  A table is attributed through its owner process's label, so tables of an
+  unlabelled process count under the `unknown` owner. When the scan stopped
+  early, an owner may hold tables without any scanned process, and its
+  `Processes` is then 0.
+- `Totals` is unchanged. `Ets` is `{Tables, MemoryBytes, Skipped, Stop}` over
+  every table the pass read, listed owner or not, so a remainder row's ETS
+  figures are `Ets` minus the listed owners'. `Stop` is `<<"finished"|
+  "deadline">>`; `deadline` means the pass ran out of the census's 2 s with
+  tables unread and the ETS figures understate. `Skipped` tables were deleted
+  before they could be read.
+- Errors: `busy`.
+
+**ETS tables.** `{<<"ets_tables">>, TopK}` (1 to 500, clamped) or
+`{<<"ets_tables">>}` (100) gives `{<<"ets_tables">>, Coverage, Tables,
+Totals}`:
+- `Coverage` is `{Total, Counted, Skipped, Stop, ElapsedMs}`. `Total` is the
+  length of `ets:all()` when the walk began, `Counted` the tables read and
+  `Skipped` the tables deleted between the listing and the read. A table
+  deleted mid-walk is counted as skipped and the walk goes on. `Stop` is
+  `<<"finished"|"deadline">>`; the walk checks a 2 s deadline every 256
+  tables. A table created after the list was built is in none of the counts.
+- A table is `{Id, Name, OwnerPid, Owner, Type, Objects, MemoryBytes,
+  Protection, Heir}`: `Id` the table identifier's text (`#Ref<...>`), `Name`
+  the name of a named table and `""` otherwise, `OwnerPid` and `Heir` pid
+  texts (`Heir` `""` for none), `Owner` the decoded label of the owning
+  process as everywhere else, `Type` and `Protection` atom names as binaries
+  (`set`, `ordered_set`, `bag`, `duplicate_bag`; `public`, `protected`,
+  `private`), `Objects` the object count and `MemoryBytes` in bytes. The list
+  is the largest `TopK` by memory, largest first.
+- `Totals` is `{Tables, Objects, MemoryBytes}` over every table read, listed or
+  not.
+- Table contents are never read: the walk calls `ets:info/1`, which returns
+  the table's properties and no object, so a table with secret contents is
+  described without being seen. `info/1` and not `info/2` per property
+  because it is one call that is consistent for a table deleted halfway
+  through, where seven calls could return a mix of values and `undefined`. The
+  owner's label is read only for the listed tables, once per owner.
+- The list `ets:all()` builds is in the worker's heap; a node with enough
+  tables to pass the 1,000,000-word cap gets `ets_failed`.
+- Errors: `busy`, `ets_failed`.
+
+**Binaries of a pinned process.** `{<<"binaries">>, Token, TopK}` (1 to 200,
+clamped) gives `{<<"binaries">>, PidText, Count, Bytes, Binaries}` with a
+binary `{Address, Bytes, RefCount}`, largest first:
+- It reads `process_info(P, binary)` of the pinned process only, in a worker
+  with a 2 s deadline. It is never part of a census. `Count` is the number of
+  reference-counted binary references the process holds and `Bytes` their sum;
+  a binary referenced twice is counted twice, and a sub-binary counts the whole
+  binary's size, so `Bytes` is what the process keeps alive and not memory
+  unique to it. `Address` is hexadecimal text and identifies the same binary
+  across processes while it lives. `Count` minus the length of the list is how
+  many the list leaves out.
+- It is costly for a process that holds many binaries: the target builds a
+  tuple per reference and the answer is copied into the worker, so the cost
+  grows with the count and is paid by the target as well. The count is not known
+  before the list exists, so the budget has two parts. A process with more than
+  50,000 references is refused with `too_many_binaries` after the list arrives,
+  and a process with so many that receiving the list passes the worker's
+  1,000,000-word heap cap (between 80,000 and 100,000 references, measured with
+  70-byte binaries) has its
+  worker killed, which the agent also reports as `too_many_binaries`. No
+  partial figure is ever returned for a process over the budget.
+- Errors: `stale_pin`, `busy`, `target_gone`, `deadline`, `too_many_binaries`.
 
 **Process detail.** `{<<"process_detail">>, Token}` gives
 `{<<"process_detail">>, PidText, Sizes, Activity, Gc, Relations, Owner,
@@ -380,6 +461,10 @@ and dropped 60,000 to 70,000.
 - The janitor calls no other agent module while it runs, because it purges
   them. It purges its own module last, which ends it.
 - Calls that can raise on outside input go through `ffi_safe.call`.
+- ETS and binaries reads are bounded by what the target holds, not by the
+  agent: the table walk by its deadline and the worker's heap cap, the binaries
+  read by its count budget and the same cap. Neither runs in the census,
+  `owners` or `supervision`.
 - `make agent-e2e` pushes the beams into a peer and checks teardown after a
   killed link, a detach and `kill -9` of the viewer, with counters, stack, call
   tree and events probes running, and drives each event probe to its window, its

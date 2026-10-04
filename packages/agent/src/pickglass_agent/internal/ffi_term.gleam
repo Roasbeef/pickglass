@@ -175,3 +175,36 @@ pub fn charlist(text: String) -> List(Int) {
 pub fn text_from_charlist(chars: List(Int)) -> String {
   list_to_binary(chars)
 }
+
+@external(erlang, "erlang", "ref_to_list")
+fn ref_to_list(reference: Reference) -> List(Int)
+
+/// The text of a reference, such as `#Ref<0.1.2.3>`. An ETS table identifier
+/// is a reference, and the viewer only displays it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// ref_text(make_ref())
+/// // -> "#Ref<0.3401925212.2147483651.226107>"
+/// ```
+pub fn ref_text(reference: Reference) -> String {
+  list_to_binary(ref_to_list(reference))
+}
+
+@external(erlang, "erlang", "integer_to_binary")
+fn integer_to_binary(value: Int, base: Int) -> String
+
+/// An integer in hexadecimal, such as the address of a reference-counted
+/// binary. It crosses the wire as text because an address can pass the
+/// largest integer a JavaScript reader holds exactly.
+///
+/// ## Examples
+///
+/// ```gleam
+/// hex_text(255)
+/// // -> "FF"
+/// ```
+pub fn hex_text(value: Int) -> String {
+  integer_to_binary(value, 16)
+}

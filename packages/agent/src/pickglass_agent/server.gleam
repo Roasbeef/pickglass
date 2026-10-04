@@ -38,10 +38,12 @@
 //// their sole holder.
 
 import pickglass_agent/activitytrace
+import pickglass_agent/binaries
 import pickglass_agent/calltrace
 import pickglass_agent/census
 import pickglass_agent/counters.{type Probe}
 import pickglass_agent/detail
+import pickglass_agent/ets
 import pickglass_agent/internal/fallible
 import pickglass_agent/internal/ffi_gen_server.{type Next, Noreply, Normal, Stop}
 import pickglass_agent/internal/ffi_proc
@@ -454,6 +456,7 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
         reference,
         max_scanned,
         top_k,
+        census.Basic,
         reply.census,
       )
     request.Owners(max_scanned, top_k) ->
@@ -463,8 +466,22 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
         reference,
         max_scanned,
         top_k,
+        census.Basic,
         reply.owners,
       )
+    request.OwnersDetail(max_scanned, top_k) ->
+      census_request(
+        state,
+        reply_to,
+        reference,
+        max_scanned,
+        top_k,
+        census.Extended,
+        reply.owners_detail,
+      )
+    request.EtsTables(top_k) -> ets_request(state, reply_to, reference, top_k)
+    request.Binaries(token, top_k) ->
+      binaries_request(state, reply_to, reference, token, top_k)
     request.ProcessDetail(token) ->
       process_detail(state, reply_to, reference, token)
     request.Supervision(max_scanned, max_edges) ->
@@ -610,13 +627,69 @@ fn census_request(
   reference: Reference,
   max_scanned: Int,
   top_k: Int,
+  mode: census.Mode,
   shape: fn(census.Report) -> Term,
 ) -> Next(State) {
-  let budget = census.Budget(max_scanned, top_k, census_deadline_ms)
+  let budget = census.Budget(max_scanned, top_k, census_deadline_ms, mode)
 
   start_worker(state, reply_to, reference, "census", census_deadline_ms, fn() {
     shape(census.run(budget))
   })
+}
+
+// The ETS listing is a walk over every table on the node, bounded by the same
+// deadline as a census and run in a worker for the same reasons. The one list
+// `ets:all/0` builds lives in the worker's heap, so a node with a very large
+// number of tables is a `ets_failed` refusal and not a larger agent.
+fn ets_request(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  top_k: Int,
+) -> Next(State) {
+  let budget = ets.Budget(top_k, census_deadline_ms)
+
+  start_worker(state, reply_to, reference, "ets", census_deadline_ms, fn() {
+    reply.ets_tables(ets.run(budget))
+  })
+}
+
+// A binaries read is the one read whose cost grows with what the target
+// holds, so it takes a pin and not a pid text and runs in a worker. A process
+// with more references than the budget, or so many that the worker's heap cap
+// ends the read first, is refused as `too_many_binaries`.
+fn binaries_request(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  token: Token,
+  top_k: Int,
+) -> Next(State) {
+  case find_pin(state, token) {
+    Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
+    Ok(entry) ->
+      start_worker(
+        state,
+        reply_to,
+        reference,
+        "binaries",
+        read_deadline_ms,
+        fn() {
+          case binaries.read(entry.pid, top_k) {
+            Ok(report) -> reply.binaries(ffi_term.pid_text(entry.pid), report)
+            Error(binaries.Gone) -> reply.failure(target_gone())
+            Error(binaries.TooMany(_)) -> reply.failure(too_many_binaries())
+          }
+        },
+      )
+  }
+}
+
+fn too_many_binaries() -> Failure {
+  Failure(
+    "too_many_binaries",
+    "the process holds more binary references than the agent reads at once",
+  )
 }
 
 // Spawns a worker that computes one reply body and sends it to the
@@ -1971,15 +2044,29 @@ fn on_worker_down(monitor: Reference, reason: Term, state: State) -> State {
         reply.send(
           worker.reply_to,
           worker.request,
-          reply.failure(Failure(
-            worker.kind <> "_failed",
-            "the " <> worker.kind <> " worker ended before it could answer",
-          )),
+          reply.failure(worker_failure(worker, reason)),
         )
     }
   })
 
   State(..state, workers: rest)
+}
+
+// What a worker that ended without answering is reported as. A binaries read
+// that the VM killed, which with a heap cap is what a list too long to receive
+// causes, is the same refusal as a list counted and found too long.
+fn worker_failure(worker: Worker, reason: Term) -> Failure {
+  case
+    worker.kind == "binaries"
+    && reason == ffi_term.coerce(ffi_term.atom("killed"))
+  {
+    True -> too_many_binaries()
+    False ->
+      Failure(
+        worker.kind <> "_failed",
+        "the " <> worker.kind <> " worker ended before it could answer",
+      )
+  }
 }
 
 // ----------------------------------------------------------------- teardown

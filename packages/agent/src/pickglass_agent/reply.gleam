@@ -13,10 +13,12 @@
 //// can branch on and a sentence for a person.
 
 import pickglass_agent/activity
+import pickglass_agent/binaries
 import pickglass_agent/calltree
 import pickglass_agent/census
 import pickglass_agent/counters
 import pickglass_agent/detail
+import pickglass_agent/ets
 import pickglass_agent/internal/ffi_proc
 import pickglass_agent/internal/ffi_term.{type Pid, type Reference, type Term}
 import pickglass_agent/internal/seq
@@ -105,6 +107,110 @@ pub fn owners(report: census.Report) -> Term {
     seq.map(report.rows, row),
     seq.map(report.aggregates, detailed_aggregate),
     totals(report.totals),
+  ))
+}
+
+/// The answer to `owners_detail`: the `owners` reply with the `proc_lib`
+/// initial call appended to each row, the owner's ETS table count and bytes
+/// appended to each aggregate, and the ETS pass's own totals as a last element,
+/// `{Tables, Bytes, Skipped, Stop}` with `Stop` `finished` or `deadline`.
+/// Fields are appended and never reordered, so a reader of `owners` reads the
+/// prefix of each tuple unchanged.
+pub fn owners_detail(report: census.Report) -> Term {
+  ffi_term.coerce(#(
+    "owners_detail",
+    coverage(report.coverage),
+    seq.map(report.rows, detailed_row),
+    seq.map(report.aggregates, ets_aggregate),
+    totals(report.totals),
+    #(
+      report.ets.tables,
+      report.ets.memory_bytes,
+      report.ets.skipped,
+      ets.stop_name(report.ets.stop),
+    ),
+  ))
+}
+
+fn detailed_row(row: census.Row) -> Term {
+  ffi_term.coerce(#(
+    ffi_term.pid_text(row.pid),
+    row.memory,
+    row.total_heap_words,
+    row.heap_words,
+    row.stack_words,
+    row.queue_length,
+    row.reductions,
+    ffi_term.atom_name(row.status),
+    census.function_text(row.function),
+    census.name_text(row.name),
+    owner(row.owner),
+    census.function_text(row.proc_lib_call),
+  ))
+}
+
+fn ets_aggregate(aggregate: census.Aggregate) -> Term {
+  ffi_term.coerce(#(
+    owner(aggregate.owner),
+    aggregate.processes,
+    aggregate.memory,
+    aggregate.queue_length,
+    aggregate.reductions,
+    aggregate.total_heap_words,
+    aggregate.ets_tables,
+    aggregate.ets_bytes,
+  ))
+}
+
+/// The answer to `ets_tables`: the coverage `{Total, Counted, Skipped, Stop,
+/// ElapsedMs}`, the largest tables by memory as `{Id, Name, OwnerPid, Owner,
+/// Type, Objects, MemoryBytes, Protection, Heir}`, and the totals `{Tables,
+/// Objects, MemoryBytes}` over every table read. `Name` and `Heir` are empty
+/// strings when the table has none, and `Id` is the table identifier's text.
+pub fn ets_tables(report: ets.Report) -> Term {
+  let coverage = report.coverage
+  let totals = report.totals
+
+  ffi_term.coerce(#(
+    "ets_tables",
+    #(
+      coverage.total,
+      coverage.counted,
+      coverage.skipped,
+      ets.stop_name(coverage.stop),
+      coverage.elapsed_ms,
+    ),
+    seq.map(report.tables, ets_row),
+    #(totals.tables, totals.objects, totals.memory_bytes),
+  ))
+}
+
+fn ets_row(table: ets.Table) -> Term {
+  ffi_term.coerce(#(
+    table.id,
+    table.name,
+    ffi_term.pid_text(table.owner_pid),
+    owner(table.owner),
+    table.kind,
+    table.objects,
+    table.memory_bytes,
+    table.protection,
+    table.heir,
+  ))
+}
+
+/// The answer to `binaries`: the process, how many binary references it holds,
+/// their total size in bytes, and the largest as `{Address, Bytes, RefCount}`
+/// with `Address` in hexadecimal text.
+pub fn binaries(pid_text: String, report: binaries.Report) -> Term {
+  ffi_term.coerce(#(
+    "binaries",
+    pid_text,
+    report.count,
+    report.bytes,
+    seq.map(report.entries, fn(entry) {
+      ffi_term.coerce(#(entry.address, entry.bytes, entry.refc))
+    }),
   ))
 }
 
