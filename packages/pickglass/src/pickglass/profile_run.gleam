@@ -23,8 +23,8 @@
 ////
 //// ## Flow
 ////
-//// - `run` attaches, calls `profile` and detaches.
-//// - `profile` is the sequence above, `observe` and `choose` its first two
+//// - `run` attaches, calls `execute` and detaches.
+//// - `execute` is the sequence above, `observe` and `choose` its first two
 ////   steps, `sample` the plan, confirm and wait.
 //// - `finish` writes the file and builds the summary (`summary`).
 
@@ -580,7 +580,9 @@ fn write(
         |> result.map_error(fn(refused) { WriteFailed(refused.reason) }),
       )
       let path =
-        option.unwrap(options.out, "pickglass-" <> title <> extension(built))
+        option.lazy_unwrap(options.out, fn() {
+          "pickglass-" <> title <> extension(built)
+        })
 
       use _ <- result.map(to_file(path, built.download.body))
 

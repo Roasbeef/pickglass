@@ -20,7 +20,9 @@ same pages over a capture file with no target; `pickglass attach --once
 prints memory, a census top list and owner totals and detaches, and
 `--probe-counters MODULE --seconds N` runs a counters probe. `pickglass
 compare BASELINE CANDIDATE` prints two capture files side by side with core's
-comparability verdicts. With no
+comparability verdicts. `pickglass profile` runs one stack probe for an owner,
+the busiest N or one pid through the service's page as the local owner and
+writes speedscope, collapsed, Chrome, capture or text output (`profile_run`). With no
 arguments it prints the banner the release smoke test compares.
 
 ## Key Types
@@ -78,6 +80,16 @@ admission) and `seam.Mount`. `web_mount` mounts `pickglass_web`'s real
 application per socket: a feeder actor subscribes to the hub, builds the
 page models (`feeds`) and sends `Fed` messages, and resolves the
 application's `msg.Request` keys against current data into `seam.Request`s.
+
+One-click profiles: `profile_scope` (pure) chooses at most sixteen processes by
+reductions per second, then heap, and words the choice. `service.profile` is
+the one request that is several commands: it pins what is not pinned, plans a
+stack probe over the pins (`seam.PlanProbe` carries `rate_hz`), and records what
+it pinned as `service.Held` against the plan. The service releases those pins
+(through the gate, in a weft run) when the plan is cancelled, replaced or
+lapses, when the start fails, and when the probe ends; a pin the operator held
+first is never in `Held`. `seam.Page.profile` and `profile_notes` carry it to
+the pages, and `feeds.flow` is what every page but Probes draws above its body.
 
 Probes and profiles: `probe_book` is the viewer's record of each probe (running,
 or finished with its profile, outcome and cost); `service` polls running
@@ -174,6 +186,9 @@ messages to the feeder's subject.
 - A capture's footer digest is the SHA-256 of every line before the footer,
   each with its newline; `capture_file.read` recomputes it from the file text.
 - `pickglass_agent@@main.beam` is never pushed.
+- A one-click profile never starts without a confirmed plan, and what it
+  pinned is released when the plan or the probe ends. A lost target clears
+  `Held` without asking the agent.
 
 ## Deep Docs
 

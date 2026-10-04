@@ -260,9 +260,11 @@ fn options(
   )
 }
 
-fn out_dir() {
+fn out_dir() -> Nil {
   let assert Ok(Nil) =
     simplifile.create_directory_all("build/profile_cli_test_out")
+
+  Nil
 }
 
 // The whole command over a fake agent: it chooses the owner's two

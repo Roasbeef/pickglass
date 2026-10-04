@@ -515,7 +515,7 @@ fn adjust_controls(card: PlanCard) -> Element(Msg) {
           list.map([msg.Seconds10, msg.Seconds30, msg.Seconds60], fn(choice) {
             adjust_button(
               int.to_string(msg.duration_ms(choice) / 1000) <> " s",
-              choice_of(msg.duration_ms(choice) == duration_ms),
+              choice_of(duration_ms, msg.duration_ms(choice)),
               msg.AdjustProfile(card.key, choice, rate_or(rate_hz)),
             )
           }),
@@ -524,7 +524,7 @@ fn adjust_controls(card: PlanCard) -> Element(Msg) {
             ..list.map([msg.Hz50, msg.Hz100, msg.Hz250], fn(choice) {
               adjust_button(
                 int.to_string(msg.rate_hz(choice)) <> " Hz",
-                choice_of(msg.rate_hz(choice) == rate_hz),
+                choice_of(rate_hz, msg.rate_hz(choice)),
                 msg.AdjustProfile(card.key, duration_or(duration_ms), choice),
               )
             })
@@ -556,8 +556,8 @@ type Choice {
   Offered
 }
 
-fn choice_of(matches: Bool) -> Choice {
-  case matches {
+fn choice_of(current: Int, mine: Int) -> Choice {
+  case current == mine {
     True -> InForce
     False -> Offered
   }

@@ -26,6 +26,41 @@ pickglass open --node app@127.0.0.1
 Without `--cookie-file`, pickglass reads the cookie from `~/.erlang.cookie`,
 which is where `erl` puts it for a node started under your user.
 
+## Profiling in one step
+
+A flame graph is one click in the pages and one command in a terminal.
+
+In the pages, Owners, Overview, Processes and Process each have a profile
+button: "Profile" on an owner row, "Profile the busiest 16", and "Profile this
+process". The button pins the processes it needs and plans one stack probe over
+them, and the plan appears above the page, stating the processes, how they were
+chosen (for example "12 of 31 listed processes of session:abc, the busiest by
+reductions/s"), the rate, the duration and the sample budget. Nothing runs
+until you confirm. The plan card has buttons for another duration and rate.
+When the probe ends the page shows a link to the Profile page; the page cannot
+move your browser itself, so you follow the link. The pins the button took are
+released when the probe ends, the plan is cancelled or it lapses; a process you
+had pinned yourself stays pinned.
+
+From a terminal:
+
+```sh
+pickglass profile --node app@127.0.0.1 --owner session:abc --seconds 10
+pickglass profile --state-dir ~/.loom --top 8 --format text
+pickglass profile --node app@127.0.0.1 --pid-text '<0.123.0>' --out p.json
+```
+
+`--owner` takes `unknown`, `kind:id`, or a path such as
+`session:abc/strand:def`. `--top N` takes the N busiest processes by reductions
+per second (at most 16, the agent's limit for one stack probe). `--format` is
+`speedscope` (the default, which opens at speedscope.app), `collapsed`,
+`chrome`, `pgcap` (a capture holding the profile) or `text` (the top functions
+and an indented call tree, printed). The command goes through the same plan,
+confirm and audit path as the pages, as the local owner, and prints the top 15
+functions, the coverage and the caveats. Samples are taken at reduction safe
+points, so time in long BIFs and NIFs is under-counted. A failure prints one
+line, `profile failed (code): reason`, and exits non-zero.
+
 ## What a distributed node is
 
 A BEAM node can talk to other nodes: send them messages, call functions on

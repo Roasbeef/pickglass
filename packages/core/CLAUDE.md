@@ -78,8 +78,11 @@ breaking, longest-path layers, barycentre sweeps, no overlap in a layer).
 `layout/flame` builds the merged stack tree, folds boxes under a minimum
 width into their parent, caps the box count, and reports omitted boxes
 (drawn plus omitted equals the tree's size); icicle only changes `row`.
-`export` and `export/{collapsed,speedscope,chrome_trace}` return an
-`Export` with text and a loss list.
+`export` and `export/{collapsed,speedscope,chrome_trace,text}` return an
+`Export` with text and a loss list. `export/text` is the terminal summary: the
+top functions with flat and cumulative shares and an indented call tree.
+`policy.ProbeSpec` carries `rate_hz`; `sampling_rate_hz` is the rate the agent
+will run once its ceiling is shared between the targets.
 
 `wire` holds the agent's reply decoders and the request encoders. It grows
 additively: the original `Request` and the first-release records keep their

@@ -28,6 +28,16 @@ with `ChooseBaseline` and `ChooseCandidate`) and `SaveCapture` is a request that
 plan form offers first, applied only if it is among the targets). `Ui(SelectReading)`
 selects a timeline bar or span.
 
+The one-click profile: `ProfileOwner(Key)`, `ProfileBusiest`,
+`ProfileProcess(Key)` and `AdjustProfile(plan, DurationChoice, RateChoice)` are
+requests, never commands. The viewer pins and plans; the plan arrives as
+`FedFlow(FlowModel)` (pending plan, running stack probes, a recent finished
+profile, and why the last button planned nothing). `view/flow` draws it above
+every page but Probes and gives a link to the Profile page, because a server
+component cannot navigate the browser without more script than the CSP allows.
+`PlanCard` has `chosen` and `adjust`; its dialog (`probes.plan_dialog`) is the
+same on both pages.
+
 `key.Key` is the only name a browser event may carry: 1 to 64 characters from
 a closed alphabet, issued by the viewer for rows, boxes, nodes, plans and
 checkpoints. Pids, module names and function names never travel from the
