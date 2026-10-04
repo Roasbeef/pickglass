@@ -1,4 +1,5 @@
 import fixture
+import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process
 import gleam/list
 import gleam/option.{None, Some}
@@ -347,4 +348,49 @@ pub fn the_audit_page_reads_back_entries_test() {
     }
   })
   let _ = identity.unknown_boot
+}
+
+pub fn a_stalled_agent_request_does_not_block_other_pages_test() {
+  // The agent takes a second and a half to answer a pin of one process and
+  // answers everything else at once.
+  let rig =
+    harness.live(
+      fn(request) {
+        case request {
+          wire.AskPin("<0.9.0>") -> process.sleep(1500)
+          _ -> Nil
+        }
+
+        fixture.healthy(request)
+      },
+      None,
+    )
+  let slow = harness.page(rig, "alice", harness.all)
+  let other = harness.page(rig, "bob", harness.all)
+  let done = process.new_subject()
+
+  process.spawn(fn() {
+    process.send(done, slow.submit(seam.PinProcess("<0.9.0>")))
+  })
+
+  // Let the slow request reach the agent, then read from another page. The
+  // read must come back long before the stalled request does.
+  process.sleep(200)
+
+  let started = clock_ms()
+
+  assert other.pins() == []
+  assert clock_ms() - started < 500
+
+  let assert Ok(seam.PinIssued(..)) = process.receive(done, 5000)
+
+  // The finished request is recorded: the other page now sees the pin.
+  assert list.length(other.pins()) == 1
+}
+
+@external(erlang, "erlang", "monotonic_time")
+fn monotonic_time(unit: Atom) -> Int
+
+fn clock_ms() -> Int {
+  monotonic_time(atom.create("millisecond"))
 }

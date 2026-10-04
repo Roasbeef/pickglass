@@ -8,8 +8,13 @@
 //// value, two confirms of one plan are processed one after the other and the
 //// second finds nothing: the plan store's single-use rule needs no lock.
 ////
-//// Commands run inside the service, so a slow agent delays the next request
-//// by at most `exec.ask_deadline_ms`. The census and the other reads never
+//// The service never waits on the agent. A command is decided here and then
+//// run by the process that submitted it (the page's feeder), which blocks
+//// only itself; the outcome comes back to the service as a second message
+//// that applies it to the state. A running probe is polled by a weft task the
+//// service starts and collects, in the manner of the hub's passes. So a stall
+//// in the agent leaves every other page's reads, which are quick calls to
+//// this actor, unaffected. The census and the other reads of the target never
 //// pass through here; the hub serves them from its ring.
 ////
 //// The service watches the hub for `TargetLost`. When the target is gone it
@@ -29,7 +34,11 @@
 ////
 //// - `start` creates the actor; `page_for` builds the `Page` a principal's
 ////   socket receives.
-//// - `Submit` runs `handle_request`: intent, gate, `execute`, reply.
+//// - `Decide` runs `handle_request`: intent, gate, and either an answer or
+////   an authorized command for the submitter to run.
+//// - `Apply` takes the outcome of that command into the state (`apply`).
+//// - `Poll` starts a weft run over the running probes; `Polled` applies
+////   what it found.
 //// - `Subscribe` authorizes the read and registers the subscriber with the
 ////   hub.
 
@@ -59,6 +68,7 @@ import pickglass_core/measure
 import pickglass_core/policy.{type Command, type Principal}
 import pickglass_core/wire
 import simplifile
+import weft
 import weft/actor
 
 /// Where captures are saved and what their headers say.
@@ -91,12 +101,40 @@ pub const poll_ms = 1000
 
 /// A handle to the service.
 pub type Service {
-  Service(subject: Subject(Message), hub: Hub, audit: Log, mode: seam.Mode)
+  Service(
+    subject: Subject(Message),
+    hub: Hub,
+    audit: Log,
+    mode: seam.Mode,
+    /// The agent link, which a submitter's process runs its command on.
+    remote: Remote,
+  )
+}
+
+/// What deciding a request produced.
+pub opaque type Decided {
+  /// The service answered without the agent.
+  Answered(Reply)
+
+  /// The request is an authorized command. The submitter runs it, then
+  /// sends the outcome back with `Apply`.
+  Execute(
+    authorized: policy.Authorized(Command),
+    follow: seam.Follow,
+    /// Which kind of probe an id names, as of the decision.
+    kind_of: fn(String) -> Option(policy.ProbeKind),
+  )
 }
 
 /// What the actor receives.
 pub opaque type Message {
-  Submit(principal: Principal, request: Request, reply: Subject(Reply))
+  Decide(principal: Principal, request: Request, reply: Subject(Decided))
+  Apply(
+    authorized: policy.Authorized(Command),
+    follow: seam.Follow,
+    outcome: exec.Outcome,
+    reply: Subject(Reply),
+  )
   Subscribe(
     principal: Principal,
     subscriber: Subject(hub.Update),
@@ -121,6 +159,7 @@ pub opaque type Message {
     reply: Subject(Result(downloads.Download, downloads.Refusal)),
   )
   Poll
+  Polled(weft.Pulled(#(String, exec.Poll), String))
   TargetGone(hub.Update)
 }
 
@@ -136,7 +175,16 @@ type State {
     /// Collections and self-measures, newest first, at most `max_results`.
     results: List(seam.ProcessResult),
     downloads: downloads.Registry,
+    sink: Subject(weft.Pulled(#(String, exec.Poll), String)),
+    polling: Polling,
   )
+}
+
+// Whether a weft run over the running probes is in flight. A tick that finds
+// one running does nothing, so a slow agent is asked once, not once a second.
+type Polling {
+  PollIdle
+  PollRunning
 }
 
 /// Start the service.
@@ -162,6 +210,7 @@ pub fn start(config: Config) -> Result(Service, String) {
   let builder =
     actor.new_with_initialiser(1000, fn(subject) {
       let watcher = process.new_subject()
+      let sink = process.new_subject()
 
       hub.watch(config.hub, watcher)
 
@@ -173,11 +222,14 @@ pub fn start(config: Config) -> Result(Service, String) {
         probes: config.probes,
         results: [],
         downloads: downloads.new(),
+        sink:,
+        polling: PollIdle,
       ))
       |> actor.selecting(
         process.new_selector()
         |> process.select(subject)
-        |> process.select_map(watcher, TargetGone),
+        |> process.select_map(watcher, TargetGone)
+        |> process.select_map(sink, Polled),
       )
       |> actor.returning(subject)
       |> Ok
@@ -192,6 +244,7 @@ pub fn start(config: Config) -> Result(Service, String) {
         hub: config.hub,
         audit: config.audit,
         mode: config.mode,
+        remote:,
       ))
     Error(_) -> Error("the service did not start")
   }
@@ -199,8 +252,18 @@ pub fn start(config: Config) -> Result(Service, String) {
 
 fn handle(state: State, message: Message) -> actor.Next(State, Message) {
   case message {
-    Submit(principal, request, reply) -> {
-      let #(state, answer) = handle_request(state, principal, request)
+    Decide(principal, request, reply) -> {
+      let #(state, decided) = handle_request(state, principal, request)
+
+      process.send(reply, decided)
+
+      actor.continue(state)
+    }
+
+    // The submitter ran the command; its outcome changes the state here, in
+    // the one process that owns the gate and the records.
+    Apply(authorized, follow, outcome, reply) -> {
+      let #(state, answer) = apply(state, authorized, follow, outcome)
 
       process.send(reply, answer)
 
@@ -287,6 +350,8 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
 
     Poll -> actor.continue(poll_probes(state))
 
+    Polled(pulled) -> actor.continue(finish_poll(state, pulled))
+
     // The hub reported the target gone: every pin is dead from here on, and
     // so is every probe the agent was running.
     TargetGone(hub.TargetLost(reason)) -> {
@@ -340,7 +405,7 @@ fn handle_request(
   state: State,
   principal: Principal,
   request: Request,
-) -> #(State, Reply) {
+) -> #(State, Decided) {
   let now = state.config.clock()
 
   case seam.intent(request) {
@@ -350,7 +415,7 @@ fn handle_request(
         audit.Host(now, audit.RequestMalformed(principal.id.text, reason)),
       )
 
-      #(state, seam.Rejected(reason))
+      #(state, Answered(seam.Rejected(reason)))
     }
 
     Ok(seam.Run(command, follow)) -> {
@@ -369,9 +434,12 @@ fn handle_request(
       case planned.result {
         Ok(#(id, plan)) -> #(
           State(..state, gate: next),
-          seam.PlanReady(id, plan),
+          Answered(seam.PlanReady(id, plan)),
         )
-        Error(refusal) -> #(state, seam.Rejected(refusal_text(refusal)))
+        Error(refusal) -> #(
+          state,
+          Answered(seam.Rejected(refusal_text(refusal))),
+        )
       }
     }
 
@@ -384,7 +452,7 @@ fn handle_request(
 
     Ok(seam.Cancel(plan_id)) -> #(
       State(..state, gate: gate.cancel(state.gate, principal, plan_id)),
-      seam.Done("plan cancelled"),
+      Answered(seam.Done("plan cancelled")),
     )
   }
 }
@@ -393,26 +461,29 @@ fn run_decision(
   state: State,
   decision: gate.Decision,
   follow: seam.Follow,
-) -> #(State, Reply) {
+) -> #(State, Decided) {
   case decision.result {
-    Error(refusal) -> #(state, seam.Rejected(refusal_text(refusal)))
-    Ok(authorized) -> execute(state, authorized, follow)
+    Error(refusal) -> #(state, Answered(seam.Rejected(refusal_text(refusal))))
+    Ok(authorized) -> #(
+      state,
+      Execute(authorized, follow, fn(id) { kind_of_probe(state.probes, id) }),
+    )
   }
 }
 
-fn execute(
+// What a command's outcome does to the viewer's own records. The command ran
+// in the submitter's process; this runs in the service, so two outcomes are
+// applied one after the other.
+fn apply(
   state: State,
   authorized: policy.Authorized(Command),
   follow: seam.Follow,
+  outcome: exec.Outcome,
 ) -> #(State, Reply) {
   let command = policy.authorized_command(authorized)
   let now = state.config.clock()
 
-  case
-    exec.run(state.remote, authorized, fn(id) {
-      kind_of_probe(state.probes, id)
-    })
-  {
+  case outcome {
     exec.PinIssued(token, pid_text) -> #(
       State(..state, gate: gate.record_pin(state.gate, token, pid_text, now)),
       seam.PinIssued(identity.pin_to_string(token), pid_text),
@@ -423,10 +494,17 @@ fn execute(
       seam.Done("pin released"),
     )
 
-    exec.ProbeStarted(probe_id, matched, _) -> #(
+    exec.ProbeStarted(probe_id, matched, deadline_ms) -> #(
       State(
         ..state,
-        probes: record_started(state.probes, command, probe_id, matched, now),
+        probes: record_started(
+          state.probes,
+          command,
+          probe_id,
+          matched,
+          deadline_ms,
+          now,
+        ),
       ),
       seam.ProbeStarted(int.to_string(probe_id), matched),
     )
@@ -597,6 +675,7 @@ fn record_started(
   command: Command,
   probe_id: Int,
   matched: Int,
+  _deadline_ms: Int,
   now: Int,
 ) -> List(ProbeRecord) {
   case command {
@@ -656,54 +735,108 @@ fn close_probe(
   })
 }
 
-// Once a second each running probe is asked whether it has ended. The
+// Once a second the running probes are asked whether they have ended. The
 // agent keeps an ended probe's snapshot only until it is read or stopped, so
 // a probe that has ended is taken into a profile now and the agent is told
 // to release it. A probe the agent no longer knows is closed as lost, and one
 // that merely did not answer is asked again next time.
+//
+// The asking is a weft run with one task per probe, so a probe the agent is
+// slow to answer delays neither the others nor this actor. The run's tasks
+// make the requests; their outcomes come back as `Polled` and are applied
+// here.
 fn poll_probes(state: State) -> State {
   let running = list.filter(state.probes, probe_book.is_running)
 
-  case running {
-    [] -> state
-    _ ->
-      State(
-        ..state,
-        probes: list.map(state.probes, fn(probe) {
-          case probe_book.is_running(probe) {
-            True -> poll_one(state, probe)
-            False -> probe
-          }
-        }),
-      )
+  case state.polling, running {
+    PollRunning, _ | PollIdle, [] -> state
+    PollIdle, _ -> {
+      let remote = state.remote
+      let tasks =
+        list.map(running, fn(probe) {
+          fn() { Ok(#(probe.id, poll_one(remote, probe))) }
+        })
+
+      let _ =
+        weft.new(tasks)
+        |> weft.deadline(poll_deadline_ms)
+        |> weft.start_relayed(to: state.sink)
+
+      State(..state, polling: PollRunning)
+    }
   }
 }
 
-fn poll_one(state: State, probe: ProbeRecord) -> ProbeRecord {
+/// How long a round of probe polls may take, in milliseconds. Each ask is
+/// bounded by `exec.ask_deadline_ms`; the deadline is the backstop.
+pub const poll_deadline_ms = 20_000
+
+// One probe's ask, and the release of its result on the agent when it ended.
+fn poll_one(remote: Remote, probe: ProbeRecord) -> exec.Poll {
+  let answer = exec.poll_probe(remote, probe.id, probe.kind)
+
+  case answer {
+    exec.Polled(wire.CountersSnapshot(state: wire.ProbeRunning, ..))
+    | exec.PolledStacks(wire.StacksSnapshot(state: wire.ProbeRunning, ..))
+    | exec.PollRefused(_)
+    | exec.PollPending -> Nil
+    exec.Polled(_) | exec.PolledStacks(_) ->
+      exec.release_probe(remote, probe.id, probe.kind)
+  }
+
+  answer
+}
+
+fn finish_poll(
+  state: State,
+  pulled: weft.Pulled(#(String, exec.Poll), String),
+) -> State {
+  case pulled {
+    weft.PulledOutcome(weft.Completed(_, #(id, answer))) ->
+      State(..state, probes: apply_poll(state, id, answer))
+
+    // A task that failed or was cut off found nothing; the next round asks
+    // again.
+    weft.PulledOutcome(_) -> state
+
+    // The run is over; the next tick may start another.
+    weft.AllDelivered | weft.RunLost(_) -> State(..state, polling: PollIdle)
+
+    weft.NotYet -> state
+  }
+}
+
+// A probe the operator stopped while the round was in flight is already
+// closed, and the poll's reading of it is dropped.
+fn apply_poll(
+  state: State,
+  id: String,
+  answer: exec.Poll,
+) -> List(ProbeRecord) {
   let now = state.config.clock()
 
-  case exec.poll_probe(state.remote, probe.id, probe.kind) {
-    exec.Polled(snapshot) ->
-      case snapshot.state {
-        wire.ProbeRunning -> probe
-        wire.ProbeFinished | wire.ProbeStopped -> {
-          exec.release_probe(state.remote, probe.id, probe.kind)
-
-          probe_book.finish_counters(probe, snapshot, now)
+  list.map(state.probes, fn(probe) {
+    case probe.id == id, probe_book.is_running(probe) {
+      True, True ->
+        case answer {
+          exec.Polled(snapshot) ->
+            case snapshot.state {
+              wire.ProbeRunning -> probe
+              wire.ProbeFinished | wire.ProbeStopped ->
+                probe_book.finish_counters(probe, snapshot, now)
+            }
+          exec.PolledStacks(snapshot) ->
+            case snapshot.state {
+              wire.ProbeRunning -> probe
+              wire.ProbeFinished | wire.ProbeStopped ->
+                probe_book.finish_stacks(probe, snapshot, now)
+            }
+          exec.PollRefused(reason) -> probe_book.finish_lost(probe, reason, now)
+          exec.PollPending -> probe
         }
-      }
-    exec.PolledStacks(snapshot) ->
-      case snapshot.state {
-        wire.ProbeRunning -> probe
-        wire.ProbeFinished | wire.ProbeStopped -> {
-          exec.release_probe(state.remote, probe.id, probe.kind)
-
-          probe_book.finish_stacks(probe, snapshot, now)
-        }
-      }
-    exec.PollRefused(reason) -> probe_book.finish_lost(probe, reason, now)
-    exec.PollPending -> probe
-  }
+      _, _ -> probe
+    }
+  })
 }
 
 fn kind_of_probe(
@@ -798,11 +931,7 @@ pub fn page_for(service: Service, principal: Principal) -> seam.Page {
         Subscribe(principal, subscriber, reply)
       })
     },
-    submit: fn(request) {
-      process.call(service.subject, 30_000, fn(reply) {
-        Submit(principal, request, reply)
-      })
-    },
+    submit: fn(request) { submit(service, principal, request) },
     plans: fn() {
       process.call(service.subject, 5000, fn(reply) {
         Plans(principal.id, reply)
@@ -828,11 +957,7 @@ pub fn page_for(service: Service, principal: Principal) -> seam.Page {
       })
     },
     audit: fn(count) {
-      case
-        process.call(service.subject, 30_000, fn(reply) {
-          Submit(principal, seam.ReadAudit(count), reply)
-        })
-      {
+      case submit(service, principal, seam.ReadAudit(count)) {
         seam.AuditTail(entries) -> entries
         _ -> []
       }
@@ -856,4 +981,25 @@ pub fn take_download(
   ticket: String,
 ) -> Result(downloads.Download, downloads.Refusal) {
   process.call(service.subject, 5000, fn(reply) { TakeDownload(ticket, reply) })
+}
+
+// A request is decided by the service, run on the agent link by this
+// process when the decision is a command, and its outcome applied by the
+// service. Only this process waits on the agent.
+fn submit(service: Service, principal: Principal, request: Request) -> Reply {
+  let decided =
+    process.call(service.subject, 30_000, fn(reply) {
+      Decide(principal, request, reply)
+    })
+
+  case decided {
+    Answered(reply) -> reply
+    Execute(authorized, follow, kind_of) -> {
+      let outcome = exec.run(service.remote, authorized, kind_of)
+
+      process.call(service.subject, 30_000, fn(reply) {
+        Apply(authorized, follow, outcome, reply)
+      })
+    }
+  }
 }
