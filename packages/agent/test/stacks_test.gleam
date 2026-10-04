@@ -151,3 +151,15 @@ fn fill(stack_of: fn(Int) -> Term) -> stacks.Aggregate {
     },
   )
 }
+
+// A relative path is shown whole; an absolute path names the build host's
+// directories and is cut to its last component.
+pub fn absolute_paths_lose_their_directories_test() {
+  assert stacks.without_directories(<<"src/weft/actor.gleam":utf8>>)
+    == Ok("src/weft/actor.gleam")
+  assert stacks.without_directories(<<"/home/build/pkg/x.erl":utf8>>)
+    == Ok("x.erl")
+  assert stacks.without_directories(<<"/x.erl":utf8>>) == Ok("x.erl")
+  assert stacks.without_directories(<<"/home/build/":utf8>>) == Error(Nil)
+  assert stacks.without_directories(<<"":utf8>>) == Error(Nil)
+}

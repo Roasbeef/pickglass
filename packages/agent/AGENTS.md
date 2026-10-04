@@ -58,11 +58,17 @@ Every request is `{<<"pg">>, 1, ReplyTo, Ref, Body}` and every reply is
 tag. Only binaries, integers, lists, tuples and `true`/`false` cross the
 wire. A pin token is `{BootId, PinId}`. "Words" are VM words (multiply by the
 `memory` reply's `word_size`); a field named `Bytes` is already bytes. The
-decoders for all of these are in `pickglass_core/wire.gleam`. Any request may
-instead be answered `{<<"error">>, Code, Detail}`; the codes a request can
-produce are listed with it. A reply the viewer never receives (a crashed
-worker) is covered by the viewer's own request timeout, and `ping`'s `probes`
-count tells it what is still running.
+decoders for all of these are in `pickglass_core/wire.gleam`: the first
+release's requests are `wire.Request`, the ones added since are
+`wire.ExtendedRequest` (encoded by `wire.encode_extended_request`), and every
+reply is a `wire.Reply` variant. Any request may instead be answered
+`{<<"error">>, Code, Detail}`; the codes a request can produce are listed with
+it. A worker or helper that dies before answering is a `<request>_failed`
+refusal (`census_failed`, `gc_failed`, `measure_failed` and so on), and one
+that overruns its deadline is `deadline`. A reply the viewer never receives
+(a sampler killed by its heap cap while a read was in flight) is covered by
+the viewer's own request timeout, and `ping`'s `probes` count tells it what
+is still running.
 
 **Existing, unchanged.** `{<<"ping">>}` gives `{<<"pong">>, BootId, Node,
 OtpRelease, UptimeMs, Pins, Probes}` (`Probes` counts running counters probes
@@ -183,7 +189,10 @@ Meter, Frames, Stacks}`:
   `TruncatedSamples` were stored but left out of the reply by its frame
   bound. `Samples` equals the sum of the returned counts plus both.
 - `Frames` is `[{Module, Function, Arity, Location}]` with `Location`
-  `{<<"none">>}`, `{<<"file">>, File}` or `{<<"at">>, File, Line}`.
+  `{<<"none">>}`, `{<<"file">>, File}` or `{<<"at">>, File, Line}`. A
+  relative path such as `src/weft/actor.gleam` is kept whole. An absolute
+  path, which some dependencies' generated Erlang carries and which names the
+  build host's directories, is cut to its last component.
 - `Stacks` is `[{Count, Status, [FrameIndex]}]`, largest count first, each
   stack leaf first, `Status` the process status atom as a binary.
 - Aggregation happens in the agent. The sampler is its own process, ends
@@ -208,8 +217,8 @@ State, Memory}`, where `Memory` is `{<<"none">>}` for a probe that did not ask
 for `time_and_memory` (not a list of zeros) and otherwise `{<<"words">>,
 [{Module, Function, Arity, Words}]}`, the words allocated while each called
 function ran in the traced processes, largest first, at most 200. Read memory
-before stopping the probe, since a stop removes it. The 5,000-function cap and the deny
-list of hot modules apply to the whole set. A repeated pattern, or one a
+before stopping the probe, since a stop removes it. The 5,000-function cap and
+the deny list of hot modules apply to the whole set. A repeated pattern, or one a
 wildcard on the same module covers, is dropped before arming. Errors:
 `unknown_module`, `unknown_function` (names the node has never seen, never
 turned into atoms), `no_match` (any one pattern matching nothing refuses the

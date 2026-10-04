@@ -15,8 +15,11 @@
 //// samples of the stacks left out are reported as truncated. Frames carry
 //// the module, function and arity the VM reports, and the file and line when
 //// it reports them. A source file is the relative `src/...gleam` path the
-//// compiler records, which is the only path pickglass shows; a missing
-//// location is `NoLocation`, never an empty file or line zero.
+//// compiler records, which is the only path pickglass shows. Some frames
+//// carry an absolute path instead, such as the generated Erlang of a
+//// dependency, and that path names the build host's directories, so only its
+//// last component is kept. A missing location is `NoLocation`, never an empty
+//// file or line zero.
 ////
 //// Everything here is pure data work over terms the VM produced. The module
 //// sends nothing and starts no process.
@@ -322,10 +325,50 @@ fn file_text(file: Term) -> Result(String, Nil) {
         True -> Error(Nil)
         False ->
           case ffi_safe.call(ffi_safe.Erlang, ffi_safe.ListToBinary, [file]) {
-            Ok(text) -> Ok(ffi_term.coerce(text))
+            Ok(text) -> without_directories(ffi_term.coerce(text))
             Error(Nil) -> Error(Nil)
           }
       }
+  }
+}
+
+/// A source file as it may be shown. A relative path is kept whole. An
+/// absolute path, which names the directories of the machine that built the
+/// code, is cut to its last component. A path with nothing after its last
+/// slash has no file name to show.
+///
+/// ## Examples
+///
+/// ```gleam
+/// without_directories(<<"src/weft/actor.gleam">>)
+/// // -> Ok(<<"src/weft/actor.gleam">>)
+/// without_directories(<<"/home/build/pkg/x.erl">>)
+/// // -> Ok(<<"x.erl">>)
+/// ```
+pub fn without_directories(path: BitArray) -> Result(String, Nil) {
+  case path {
+    <<"/", _:bytes>> -> last_component(path, path)
+    _ -> text_of(path)
+  }
+}
+
+// Walks the bytes and restarts at the byte after each slash, so what remains
+// is the text after the last one.
+fn last_component(rest: BitArray, kept: BitArray) -> Result(String, Nil) {
+  case rest {
+    <<>> -> text_of(kept)
+    <<"/", after:bytes>> -> last_component(after, after)
+    <<_, after:bytes>> -> last_component(after, kept)
+    _ -> Error(Nil)
+  }
+}
+
+// A non-empty path as the string it is. Both inputs are binaries from
+// `list_to_binary`, so the cast is the identity.
+fn text_of(path: BitArray) -> Result(String, Nil) {
+  case path {
+    <<>> -> Error(Nil)
+    _ -> Ok(ffi_term.coerce(path))
   }
 }
 
