@@ -169,6 +169,14 @@ scenario_counter_set(Target, PinId) ->
                      [{<<"pg_e2e_work">>, <<"work">>}, {<<"lists">>, <<"_">>}],
                      Pins, 1000, <<"time">>}),
     check("a wildcard on a hot module inside a set is refused", true),
+    {<<"counters_started">>, PrefixId, PrefixMatched, _} =
+        ask(Target, {<<"start_counter_set">>, [{<<"pg_e2e_*">>, <<"_">>}], Pins, 60000, <<"time">>}),
+    check("a counters probe over a module prefix matches the functions of every module",
+          PrefixMatched >= Matched),
+    {<<"counters">>, PrefixId, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, PrefixId}),
+    {<<"error">>, <<"unknown_function">>, _} =
+        ask(Target, {<<"start_counter_set">>, [{<<"pg_e2e_*">>, <<"work">>}], Pins, 1000, <<"time">>}),
+    check("a module prefix takes only every function", true),
     check("a refused set leaves no session behind", length(sessions(Target)) =< 2),
     ok.
 
@@ -308,6 +316,23 @@ scenario_calltrace(Target, PinId) ->
         ask(Target, {<<"start_calltrace">>, [{<<"boot-1">>, 99999}], Patterns, 500, 500, 0}),
     {<<"error">>, <<"bad_request">>, _} =
         ask(Target, {<<"start_calltrace">>, [Pin, Pin, Pin, Pin, Pin], Patterns, 500, 500, 0}),
+    %% A trailing * is a prefix over the loaded modules: it arms the modules
+    %% that match, refuses a bare * and a prefix nothing matches, and never
+    %% makes an atom of the text it was given.
+    {<<"calltrace_started">>, IdP, 1, MatchedP, _, _, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], [{<<"pg_e2e_w*">>, <<"_">>}], 500, 500, 0}),
+    check("a module prefix arms the one module it matches", MatchedP >= 1 andalso MatchedP < Matched),
+    {<<"calltrace">>, IdP, _, _, _, _, _, _} = ask(Target, {<<"stop_calltrace">>, IdP}),
+    {<<"error">>, <<"pattern_too_broad">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], [{<<"*">>, <<"_">>}], 500, 500, 0}),
+    check("a bare * is refused as too broad", true),
+    {<<"error">>, <<"unknown_module">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], [{<<"zz_pg_no_such_prefix_*">>, <<"_">>}], 500, 500, 0}),
+    check("a prefix that no loaded module starts with is refused", true),
+    check("a refused prefix made no atom", not atom_exists(Target, <<"zz_pg_no_such_prefix_">>)),
+    {<<"error">>, <<"pattern_too_broad">>, _} =
+        ask(Target, {<<"start_calltrace">>, [Pin], [{<<"lis*">>, <<"_">>}], 500, 500, 0}),
+    check("a prefix that reaches a hot module is refused by the deny list", true),
     AgentText = pid_text(Target, erpc:call(Target, erlang, whereis, [pickglass_agent])),
     {<<"pinned">>, <<"boot-1">>, AgentPin, AgentText} = ask(Target, {<<"pin">>, AgentText}),
     {<<"error">>, <<"agent_process">>, _} =

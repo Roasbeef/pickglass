@@ -312,7 +312,12 @@ for `time_and_memory` (not a list of zeros) and otherwise `{<<"words">>,
 [{Module, Function, Arity, Words}]}`, the words allocated while each called
 function ran in the traced processes, largest first, at most 200. Read memory
 before stopping the probe, since a stop removes it. The 5,000-function cap and
-the deny list of hot modules apply to the whole set. A repeated pattern, or one a
+the deny list of hot modules apply to the whole set. A module name ending in `*` is a prefix: the agent lists the loaded modules whose
+names start with it (`code:all_loaded()`, compared as bytes, no atom made) and
+arms each with `Function` `_`; any other function is `unknown_function`, a bare `*`
+and a prefix over 1,000 modules are `pattern_too_broad`, and a prefix no loaded
+module starts with is `unknown_module`. The expanded set goes through the deny
+list and the function cap as one. A repeated pattern, or one a
 wildcard on the same module covers, is dropped before arming. Errors:
 `unknown_module`, `unknown_function` (names the node has never seen, never
 turned into atoms), `no_match` (any one pattern matching nothing refuses the
@@ -322,7 +327,7 @@ set), `pattern_too_broad`, `too_many_functions`, `memory_unavailable`,
 **Call tree probe.** `{<<"start_calltrace">>, Tokens, Patterns, DurationMs,
 MaxEvents, Timeline}` takes 1 to 4 pin tokens, 1 to 8 `{Module, Function}`
 patterns resolved and checked exactly as a counters probe's are (existing
-atoms only, the hot-module deny list, the 5,000-function cap, a pattern that
+atoms only, a trailing `*` prefix over loaded modules, the hot-module deny list, the 5,000-function cap, a pattern that
 matches nothing refuses the set), `DurationMs` 100 to 10,000, `MaxEvents` 1 to
 200,000 and `Timeline` 0 to 2,000, all clamped, and gives
 `{<<"calltrace_started">>, ProbeId, Targets, MatchedFunctions, DurationMs,

@@ -56,6 +56,7 @@ import pickglass_agent/internal/ffi_vm
 import pickglass_agent/internal/seq
 import pickglass_agent/janitor
 import pickglass_agent/measure
+import pickglass_agent/modules
 import pickglass_agent/owner
 import pickglass_agent/reply.{type Failure, Failure}
 import pickglass_agent/request.{type Envelope, type Token, Envelope}
@@ -1179,6 +1180,8 @@ fn check_probe_room(state: State) -> Result(Nil, Failure) {
 
 // Every name in the set resolves to an atom the node already has, or the
 // whole request is refused: an unknown name is never turned into a new atom.
+// A module name ending in `*` is a prefix and stands for every loaded module
+// that starts with it, each paired with the pattern's function.
 fn resolve_patterns(
   patterns: List(request.Pattern),
   acc: List(counters.Pattern),
@@ -1186,14 +1189,63 @@ fn resolve_patterns(
   case patterns {
     [] -> Ok(seq.reverse(acc))
     [pattern, ..rest] -> {
-      use module <- fallible.then(resolve_name(pattern.module, "unknown_module"))
+      use modules <- fallible.then(resolve_modules(pattern))
       use function <- fallible.then(resolve_name(
         pattern.function,
         "unknown_function",
       ))
 
-      resolve_patterns(rest, [counters.Pattern(module, function), ..acc])
+      resolve_patterns(
+        rest,
+        seq.fold(modules, acc, fn(acc, module) {
+          [counters.Pattern(module, function), ..acc]
+        }),
+      )
     }
+  }
+}
+
+// The modules a pattern names: one atom for an ordinary name and every
+// matching loaded module for a prefix. A prefix takes every function of its
+// modules, because most of the modules it matches would not have a function
+// of any other name and the probe would be refused as matching nothing.
+fn resolve_modules(pattern: request.Pattern) -> Result(List(Atom), Failure) {
+  case modules.prefix_of(pattern.module) {
+    Error(Nil) -> {
+      use module <- fallible.then(resolve_name(pattern.module, "unknown_module"))
+
+      Ok([module])
+    }
+    Ok(prefix) ->
+      case pattern.function {
+        "_" ->
+          case modules.expand(prefix) {
+            Ok(found) -> Ok(found)
+            Error(refusal) -> Error(prefix_failure(refusal))
+          }
+        _ ->
+          Error(Failure(
+            "unknown_function",
+            "a module prefix covers every function, so its function is _",
+          ))
+      }
+  }
+}
+
+fn prefix_failure(refusal: modules.Refusal) -> Failure {
+  case refusal {
+    modules.BareWildcard ->
+      Failure(
+        "pattern_too_broad",
+        "a * with no module name before it matches every module",
+      )
+    modules.NoModule ->
+      Failure("unknown_module", "no loaded module starts with that prefix")
+    modules.TooManyModules ->
+      Failure(
+        "pattern_too_broad",
+        "the prefix matches more modules than one probe may trace",
+      )
   }
 }
 
