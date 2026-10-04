@@ -44,6 +44,13 @@ pub fn targets_decode_test() {
     ))
 }
 
+pub fn process_detail_takes_a_token_test() {
+  assert decoded_request(envelope(#("process_detail", #("boot-1", 4))))
+    == Ok(request.ProcessDetail(request.Token("boot-1", 4)))
+  assert decoded_request(envelope(#("process_detail", "<0.1.0>"))) |> is_error
+  assert decoded_request(envelope(#("process_detail"))) |> is_error
+}
+
 // Anything that is not a well-formed envelope is ignored, and a bad request
 // inside a good envelope is refused with a reason.
 pub fn malformed_messages_are_classified_test() {

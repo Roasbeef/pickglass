@@ -25,6 +25,11 @@ pub type Name {
   ListToPid
   Badrpc
   Utf8
+  Maps
+  Get
+  Size
+  Instrument
+  Carriers
 }
 
 @external(erlang, "erlang", "node")

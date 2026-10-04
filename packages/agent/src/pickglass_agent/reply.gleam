@@ -14,6 +14,7 @@
 
 import pickglass_agent/census
 import pickglass_agent/counters
+import pickglass_agent/detail
 import pickglass_agent/internal/ffi_proc
 import pickglass_agent/internal/ffi_term.{type Pid, type Reference, type Term}
 import pickglass_agent/internal/seq
@@ -203,4 +204,51 @@ fn counter_row(row: counters.Row) -> Term {
 /// The answer to `detach`, sent after every session is destroyed.
 pub fn detached(reason: String) -> Term {
   ffi_term.coerce(#("detached", reason))
+}
+
+/// The answer to `process_detail`: sizes, activity, collection settings,
+/// relations and owner. Sizes are bytes; the function texts are
+/// `module:function/arity` or empty.
+pub fn process_detail(found: detail.Detail) -> Term {
+  let heap = found.heap
+  let gc = found.gc
+  let relations = found.relations
+
+  ffi_term.coerce(#(
+    "process_detail",
+    ffi_term.pid_text(found.pid),
+    #(
+      heap.memory_bytes,
+      heap.total_heap_bytes,
+      heap.heap_bytes,
+      heap.stack_bytes,
+    ),
+    #(
+      found.queue_length,
+      found.reductions,
+      ffi_term.atom_name(found.status),
+      census.function_text(found.current_function),
+      census.function_text(found.initial_call),
+      census.name_text(found.registered_name),
+    ),
+    #(
+      gc.minor_gcs,
+      gc.fullsweep_after,
+      gc.min_heap_bytes,
+      gc.max_heap_bytes,
+      heap.heap_block_bytes,
+      heap.old_heap_bytes,
+      heap.old_heap_block_bytes,
+      heap.mbuf_bytes,
+      heap.bin_vheap_bytes,
+    ),
+    #(
+      relations.links,
+      relations.monitors,
+      relations.monitored_by,
+      relations.parent,
+    ),
+    owner(found.owner),
+    found.capabilities,
+  ))
 }

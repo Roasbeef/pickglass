@@ -54,6 +54,14 @@ scenario_link_killed(Target, Work) ->
           lists:any(fun({{<<"owner">>, [{<<"tool">>, <<"pickglass">>}], <<"agent">>}, _, _, _, _, _}) -> true;
                        (_) -> false end, Aggs)),
     {<<"pinned">>, <<"boot-1">>, PinId, _} = ask(Target, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"process_detail">>, DetailPid, {DMem, _, _, _}, {_, _, _, _, _, _},
+     {_, _, _, _, _, _, _, _, _}, {_, _, _, _}, _Owner, []} =
+        ask(Target, {<<"process_detail">>, {<<"boot-1">>, PinId}}),
+    check("process detail reads the pinned process",
+          DMem > 0 andalso DetailPid =:= pid_text(Target, Work)),
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask(Target, {<<"process_detail">>, {<<"boot-1">>, PinId + 100}}),
+    check("process detail refuses a pin that does not exist", true),
     {<<"scheduler">>, <<"collecting">>, _} = ask(Target, {<<"scheduler">>, <<"on">>}),
     check("scheduler wall time is on", is_list(statistics_on(Target))),
     {<<"counters_started">>, ProbeId, Matched, _} =

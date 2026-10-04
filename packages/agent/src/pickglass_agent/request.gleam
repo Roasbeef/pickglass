@@ -21,6 +21,7 @@
 //// | scheduler accounting | `{<<"scheduler">>, <<"on" \| "off" \| "read">>}` |
 //// | start a counters probe | `{<<"start_counters">>, Module, Function, Targets, DeadlineMs}` |
 //// | read or stop a probe | `{<<"read_counters">>, Id}`, `{<<"stop_counters">>, Id}` |
+//// | one process in detail | `{<<"process_detail">>, Token}` |
 //// | detach | `{<<"detach">>}` |
 ////
 //// `Targets` is `{<<"all">>}` or `{<<"pins">>, [{BootId, PinId}]}`. Numeric
@@ -94,6 +95,7 @@ pub type Request {
   )
   ReadCounters(probe_id: Int)
   StopCounters(probe_id: Int)
+  ProcessDetail(token: Token)
   Detach
 }
 
@@ -181,6 +183,7 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "start_counters", 5 -> decode_start_counters(term)
     "read_counters", 2 -> decode_probe(term, ReadCounters)
     "stop_counters", 2 -> decode_probe(term, StopCounters)
+    "process_detail", 2 -> decode_token_request(term, ProcessDetail)
     _, _ -> Error("unknown request or wrong number of fields")
   }
 }
@@ -227,6 +230,15 @@ fn decode_start_counters(term: Term) -> Result(Request, String) {
     targets,
     clamp(deadline, min_deadline_ms, max_deadline_ms),
   ))
+}
+
+fn decode_token_request(
+  term: Term,
+  build: fn(Token) -> Request,
+) -> Result(Request, String) {
+  use token <- fallible.then(decode_token(ffi_term.element(2, term)))
+
+  Ok(build(token))
 }
 
 fn decode_probe(

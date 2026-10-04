@@ -39,6 +39,7 @@
 
 import pickglass_agent/census
 import pickglass_agent/counters.{type Probe}
+import pickglass_agent/detail
 import pickglass_agent/internal/fallible
 import pickglass_agent/internal/ffi_gen_server.{type Next, Noreply, Normal, Stop}
 import pickglass_agent/internal/ffi_proc
@@ -65,14 +66,22 @@ const max_running_probes = 2
 /// The most finished probes kept for reading.
 const max_finished_probes = 8
 
-/// The most census workers at once.
-const max_workers = 2
+/// The most workers at once, census and read-only probes together.
+const max_workers = 4
 
 /// The heap a census worker may grow to, in words, before the VM kills it.
 const worker_heap_words = 1_000_000
 
-/// The longest a census may run, in milliseconds.
+/// The longest a census may walk, in milliseconds.
 const census_deadline_ms = 2000
+
+/// How long past its own deadline a worker may take to reply before the
+/// agent kills it, in milliseconds. A worker stuck waiting on a process that
+/// does not answer signals never reaches its own check.
+const worker_grace_ms = 1000
+
+/// The longest a single-process read may take, in milliseconds.
+const read_deadline_ms = 2000
 
 /// How the agent is configured at start.
 pub type Config {
@@ -93,9 +102,19 @@ pub type Pin {
   Pin(id: Int, pid: Pid, text: String, monitor: Reference)
 }
 
-/// A census running in a worker process.
+/// A read-only request running in a worker process, so that a slow answer
+/// never delays the agent's handling of a lost viewer. `kind` names the
+/// request in the refusal the agent sends when the worker dies or overruns
+/// `deadline_at_ms`.
 pub type Worker {
-  Worker(pid: Pid, monitor: Reference, reply_to: Pid, request: Reference)
+  Worker(
+    pid: Pid,
+    monitor: Reference,
+    reply_to: Pid,
+    request: Reference,
+    kind: String,
+    deadline_at_ms: Int,
+  )
 }
 
 /// Whether the agent holds the `scheduler_wall_time` flag.
@@ -313,6 +332,8 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
     request.MemoryReport -> answer(state, reply_to, reference, memory())
     request.Census(max_scanned, top_k) ->
       census_request(state, reply_to, reference, max_scanned, top_k)
+    request.ProcessDetail(token) ->
+      process_detail(state, reply_to, reference, token)
     request.Pin(text) -> pin(state, reply_to, reference, text)
     request.Unpin(token) -> unpin(state, reply_to, reference, token)
     request.Scheduler(action) -> scheduler(state, reply_to, reference, action)
@@ -378,14 +399,32 @@ fn memory() -> Term {
 
 // A census runs in a worker so that a long walk never delays the agent's
 // handling of a lost viewer. The worker replies to the requester itself; the
-// agent only watches it, so that a worker killed by its heap cap still
-// produces an answer.
+// agent only watches it, so that a worker killed by its heap cap or by its
+// deadline still produces an answer.
 fn census_request(
   state: State,
   reply_to: Pid,
   reference: Reference,
   max_scanned: Int,
   top_k: Int,
+) -> Next(State) {
+  let budget = census.Budget(max_scanned, top_k, census_deadline_ms)
+
+  start_worker(state, reply_to, reference, "census", census_deadline_ms, fn() {
+    reply.census(census.run(budget))
+  })
+}
+
+// Spawns a worker that computes one reply body and sends it to the
+// requester. The worker is monitored, capped in heap, and given a deadline
+// the tick enforces, so every way it can fail ends in a reply.
+fn start_worker(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  kind: String,
+  deadline_ms: Int,
+  compute: fn() -> Term,
 ) -> Next(State) {
   case seq.length(state.workers) >= max_workers {
     True ->
@@ -394,19 +433,22 @@ fn census_request(
         reply_to,
         reference,
         "busy",
-        "two censuses are already running",
+        "the agent is already running as many reads as it allows",
       )
     False -> {
-      let budget = census.Budget(max_scanned, top_k, census_deadline_ms)
       let #(pid, monitor) =
-        ffi_proc.spawn_opt(fn() { run_census(budget, reply_to, reference) }, [
-          ffi_proc.Monitor,
-          ffi_proc.heap_limit(worker_heap_words),
-        ])
+        ffi_proc.spawn_opt(
+          fn() {
+            owner.claim_self()
+            reply.send(reply_to, reference, compute())
+          },
+          [ffi_proc.Monitor, ffi_proc.heap_limit(worker_heap_words)],
+        )
+      let deadline_at = ffi_proc.now_ms() + deadline_ms + worker_grace_ms
 
       Noreply(
         State(..state, workers: [
-          Worker(pid, monitor, reply_to, reference),
+          Worker(pid, monitor, reply_to, reference, kind, deadline_at),
           ..state.workers
         ]),
       )
@@ -414,14 +456,47 @@ fn census_request(
   }
 }
 
-fn run_census(
-  budget: census.Budget,
+fn process_detail(
+  state: State,
   reply_to: Pid,
   reference: Reference,
-) -> Nil {
-  owner.claim_self()
+  token: Token,
+) -> Next(State) {
+  case find_pin(state, token) {
+    Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
+    Ok(entry) ->
+      start_worker(
+        state,
+        reply_to,
+        reference,
+        "process_detail",
+        read_deadline_ms,
+        fn() {
+          case detail.read(entry.pid) {
+            Ok(found) -> reply.process_detail(found)
+            Error(Nil) -> reply.failure(target_gone())
+          }
+        },
+      )
+  }
+}
 
-  reply.send(reply_to, reference, reply.census(census.run(budget)))
+fn target_gone() -> Failure {
+  Failure("target_gone", "the process exited or could not be read")
+}
+
+fn refuse_stale_pin(
+  state: State,
+  to: Pid,
+  reference: Reference,
+) -> Next(State) {
+  refuse(
+    state,
+    to,
+    reference,
+    "stale_pin",
+    "that pin does not exist or belongs to an earlier agent",
+  )
 }
 
 fn pin(
@@ -853,9 +928,41 @@ fn on_tick(state: State) -> Next(State) {
       let _ =
         ffi_proc.send_after(tick_ms, ffi_proc.self(), ffi_term.coerce(Tick))
 
-      Noreply(State(..state, probes: expire_probes(state.probes, now)))
+      Noreply(
+        State(
+          ..state,
+          probes: expire_probes(state.probes, now),
+          workers: expire_workers(state.workers, now),
+        ),
+      )
     }
   }
+}
+
+// A worker past its deadline is killed and the requester is told. The monitor
+// is removed first, with its message flushed, so the kill does not also reach
+// `on_worker_down` and produce a second refusal.
+fn expire_workers(workers: List(Worker), now: Int) -> List(Worker) {
+  seq.filter(workers, fn(worker) {
+    case now >= worker.deadline_at_ms {
+      False -> True
+      True -> {
+        let _ = ffi_proc.demonitor(worker.monitor, [ffi_proc.Flush])
+        let _ = ffi_proc.exit_with(worker.pid, ffi_proc.Kill)
+
+        reply.send(
+          worker.reply_to,
+          worker.request,
+          reply.failure(Failure(
+            "deadline",
+            "the " <> worker.kind <> " did not finish in time",
+          )),
+        )
+
+        False
+      }
+    }
+  })
 }
 
 fn expire_probes(probes: List(Probe), now: Int) -> List(Probe) {
@@ -925,8 +1032,8 @@ fn on_worker_down(monitor: Reference, reason: Term, state: State) -> State {
           worker.reply_to,
           worker.request,
           reply.failure(Failure(
-            "census_failed",
-            "the census worker ended before it could answer",
+            worker.kind <> "_failed",
+            "the " <> worker.kind <> " worker ended before it could answer",
           )),
         )
     }
