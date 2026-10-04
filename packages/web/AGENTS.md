@@ -1,0 +1,84 @@
+# pickglass_web
+
+## Purpose
+
+Every pickglass page as a Lustre view, plus a static preview renderer. The
+viewer mounts `app.application` as a server component, feeds it page models
+built from core types, and receives *requests* back. The package performs no
+I/O: it imports `lustre` and `pickglass_core` and nothing else impure. It
+depends on `gleam_erlang` and `gleam_otp` only because Lustre does; no module
+here uses them.
+
+## Key Types
+
+`msg.Msg` is closed and has three families. `Fed(Feed)` carries data in and
+is built by no handler. `Ui(UiEvent)` changes page-local view state
+(`state.UiState`: tab, expanded rows, selection, form drafts). `Ask(Request)`
+names a request such as `RequestPin(Key)`, `PlanProbe(ProbeDraft)` or
+`ConfirmPlan(Key)`; it carries no authority.
+
+`key.Key` is the only name a browser event may carry: 1 to 64 characters from
+a closed alphabet, issued by the viewer for rows, boxes, nodes, plans and
+checkpoints. Pids, module names and function names never travel from the
+browser.
+
+`model` holds the page models (`OverviewModel`, `OwnersModel`,
+`ProcessesModel`, `ProcessDetailModel`, `MemoryModel`, `SupervisionModel`,
+`ProbesModel`, `ProfileModel` with `Stacks`, `TimelineModel`, `CompareModel`,
+`AuditModel`) and the shared `PanelInfo` that every data panel renders as its
+title-bar line (source, method, interval, coverage, truncation). Readings are
+`measure.Measurement`, never `Int`.
+
+`app.Model` holds one `Loadable` per page and the `UiState`. `app.update`
+checks every key a message names against the current data before it records a
+request or changes a selection.
+
+## Relationships
+
+Depends on `gleam_stdlib`, `lustre` (pinned `== 5.7.1`) and `pickglass_core`
+(path dependency). Layout and analysis come from core (`layout/flame`,
+`layout/dag`, `analysis/*`); this package only draws them. The viewer
+(`pickglass`) will depend on it. `build/owners` turns a census into the
+owners model through core's `owner.group_by`.
+
+`chart/*` draws SVG from core layouts: `flame` (flame, icicle, differential),
+`call_graph`, `spark`, `timeline`. `view/*` has one module per page and
+`view/ui` for the shared panel and cell builders. `wire` builds event
+attributes and their total decoders. `priv/pickglass.css` is the whole
+stylesheet; it is a static file the viewer serves.
+
+`dev/` is not shipped: `pickglass_web/fixture` (a Loom-like daemon),
+`fixture/stacks` (a synthetic profile) and `pickglass_web/preview`
+(`gleam run -m pickglass_web/preview -- <out dir>` in this package writes every
+page as standalone HTML linking the stylesheet). Fixtures live in `dev/` so
+nothing in the release can show invented numbers.
+
+## Traffic
+
+Browser to page: `click` handlers send fixed messages; `change` and `input`
+handlers decode `target.value` with `wire.key_decoder`, `code_decoder` or
+`text_decoder`, and a failing decoder drops the event. Page to viewer: the
+`on_request` function given to `app.application`, called only for a request
+that passed `app.update`'s membership check. Viewer to page: `Fed` messages.
+
+## Invariants
+
+- No `unsafe_raw_html`, no `style` attribute, no attribute name, `href`, key
+  or class built from target content; colour is a class from a closed set
+  (`chart/colour`, `heat-*`), geometry is numeric attributes.
+- Every list whose rows carry handlers is keyed by a viewer-issued key.
+- A missing value renders as a word through `fmt.cell` (`measure.render`),
+  never as zero. An overlapping column is marked and never totalled. The
+  `unknown` owner row is always drawn.
+- A handler is attached only when the principal holds the capability the
+  action needs; the viewer still re-checks.
+- Chart element counts are bounded by core's layouts (`max_boxes`, the 80
+  node graph); the views add none.
+- A request is only a request: the page says it is pending and never shows
+  the outcome as done until the viewer feeds new data.
+
+## Deep Docs
+
+- `docs/design/plan.md`, "Views" and "Authority".
+- `docs/design/concept-opus.md` section 7 and `concept-sonnet.md` section 7.
+- `docs/lustre.md` sections 2 to 4 and 7.
