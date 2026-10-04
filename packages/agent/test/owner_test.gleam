@@ -42,3 +42,10 @@ pub fn improper_path_is_unknown_test() {
 // `[1] ++ 2` is the improper list `[1 | 2]`.
 @external(erlang, "erlang", "++")
 fn append(front: List(Int), back: Int) -> Int
+
+// A slash or an empty text would collide with the viewer's path syntax.
+pub fn slash_and_empty_text_are_unknown_test() {
+  assert owner.decode(label([#("a/b", "x")], "r")) == Unknown
+  assert owner.decode(label([#("", "x")], "r")) == Unknown
+  assert owner.decode(label([], "")) == Unknown
+}

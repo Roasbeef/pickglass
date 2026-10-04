@@ -113,11 +113,16 @@ fn decode_pair(term: Term) -> Result(#(String, String), Nil) {
   }
 }
 
-// Text must be a short printable ASCII binary. Anything else could carry
-// control characters into a terminal or a capture file, and no ownership
-// vocabulary in use needs more than identifiers.
+// Text must be a short, non-empty printable ASCII binary without a slash.
+// Anything else could carry control characters into a terminal or a capture
+// file, and the viewer's owner paths use the slash as their separator, so a
+// label containing one could not be told apart from a deeper path.
 fn text(term: Term) -> Result(String, Nil) {
-  case ffi_term.is_binary(term) && ffi_term.byte_size(term) <= max_text_bytes {
+  case
+    ffi_term.is_binary(term)
+    && ffi_term.byte_size(term) >= 1
+    && ffi_term.byte_size(term) <= max_text_bytes
+  {
     False -> Error(Nil)
     True ->
       case is_printable(ffi_term.coerce(term)) {
@@ -130,7 +135,8 @@ fn text(term: Term) -> Result(String, Nil) {
 fn is_printable(bytes: BitArray) -> Bool {
   case bytes {
     <<>> -> True
-    <<byte, rest:bytes>> -> byte >= 32 && byte <= 126 && is_printable(rest)
+    <<byte, rest:bytes>> ->
+      byte >= 32 && byte <= 126 && byte != 47 && is_printable(rest)
     _ -> False
   }
 }
