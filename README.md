@@ -21,6 +21,13 @@ join it once the design lands. `tools/lint` is Loom's house lint, vendored.
 warning-free build, tests, lint and doc-check. `CLAUDE.md` has the ground
 rules and `docs/gleam-style.md` the code style.
 
+## Attaching
+
+`pickglass attach --node NAME@HOST` and `pickglass open --node NAME@HOST` reach
+any Erlang, Elixir or Gleam node on the same machine. `docs/attach.md` explains
+what a distributed node is, how to start yours so pickglass can attach, the
+owner-label convention, and the security notes.
+
 ## Release
 
 `make release` builds a self-contained OTP release into `build/release/pickglass`

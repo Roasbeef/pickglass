@@ -6,9 +6,12 @@ The viewer: the pickglass program. It attaches to a running BEAM node the
 way `observer` does, pushes the dependency-free agent (`pickglass_agent`)
 into it, and talks to the agent. It joins the target as a hidden node with
 `dist_listen` false, so it opens no listening socket, and reads the target's
-cookie from an owner-only file, never from argv or the environment. For Loom
-the target is a `loomd --profile` node, discovered the way
-`scripts/observer.sh` in Loom discovers it.
+cookie from an owner-only file, never from argv or the environment. A target
+is found one of two ways, exclusive of each other: the Loom way (a `loomd
+--profile` node, discovered the way `scripts/observer.sh` in Loom discovers
+it, with `--state-dir` and `--pid`) or by name (`--node NAME@HOST`, any node
+on this machine, with `--cookie-file` or `~/.erlang.cookie`). `docs/attach.md`
+is the operator's guide.
 
 Commands: `pickglass open` attaches, starts the HTTP and WebSocket host on
 `127.0.0.1` and prints a single-use URL; `pickglass view FILE` serves the
@@ -22,7 +25,14 @@ arguments it prints the banner the release smoke test compares.
 
 ## Key Types
 
-Attach: `discover.Target` is a profiled node with its cookie directory.
+Attach: `cli.Selector` says how the target is found (`LoomTarget` or
+`NamedNode`); `endpoint.Endpoint` is a node name split at the `@`, its naming
+mode (chosen from the host: a dot or colon is a long name) and its cookie
+file, and `endpoint.check_loopback` is the single place that scopes targets to
+this machine. `discover.Target` is a node with its OS pid and cookie file.
+`attach.AttachError` is the typed failure of an attach (node not running,
+cookie mismatch, naming-mode mismatch, OTP too old), with `attach.describe`
+for the one-line message.
 `attach.Session` is one attach. `link.Link` is a weft actor that owns
 requests in flight and is the process the agent monitors. `remote.Remote` is
 what everything above the link sees of a target: node, boot id, `ask` and
@@ -120,9 +130,14 @@ messages to the feeder's subject.
 
 ## Invariants
 
-- The cookie of the target is read from `<home>/.erlang.cookie` after a
-  permission check (no group or other bits), set for the target node only,
-  and never printed.
+- The cookie of the target is read from a file after a permission check (no
+  group or other bits), set for the target node only, and never printed. It is
+  never taken from argv (`--cookie`, `--cookie=`, `--setcookie` are refused)
+  or the environment.
+- `--node` and `--state-dir`/`--pid` are mutually exclusive, and the viewer's
+  hidden node uses the target's naming mode. OTP's `connect_node` answers
+  `false` for a down node, a wrong cookie and a wrong mode alike, so
+  `attach.diagnose` asks epmd and retries in the other mode to tell them apart.
 - The viewer's own VM has no distribution cookie: the release launcher
   passes `-nocookie`, and `ffi_dist.start_hidden_node` refuses to start
   distribution in a VM that has neither `-nocookie` nor `-setcookie`, because
