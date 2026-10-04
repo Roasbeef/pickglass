@@ -85,13 +85,14 @@ pub fn the_empty_graph_lays_out_to_nothing_test() {
   assert l.layers == 0
 }
 
-// pprof's scale: 8 + ceil(16 * sqrt(flat / max_flat)).
+// The square-root scale: 11 + ceil(13 * sqrt(flat / max_flat)).
 pub fn font_size_follows_the_square_root_scale_test() {
   assert dag.font_size(100, 100) == 24
-  assert dag.font_size(25, 100) == 16
-  assert dag.font_size(1, 100) == 10
-  assert dag.font_size(0, 100) == 8
-  assert dag.font_size(5, 0) == 8
+  assert dag.font_size(25, 100) == 18
+  assert dag.font_size(1, 100) == 13
+  assert dag.font_size(0, 100) == dag.min_font_size
+  assert dag.font_size(5, 0) == dag.min_font_size
+  assert dag.min_font_size >= 11
 }
 
 pub fn hotter_nodes_get_bigger_fonts_test() {

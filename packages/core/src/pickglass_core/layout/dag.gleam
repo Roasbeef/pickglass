@@ -9,9 +9,12 @@
 ////
 //// The coordinate space is abstract integers. A renderer scales it. Node
 //// boxes are sized from the label (so the text fits) and from the node's
-//// `flat` value through pprof's square-root scale, `8 + ceil(16 *
+//// `flat` value through pprof's square-root scale, `11 + ceil(13 *
 //// sqrt(flat / max_flat))` points of font, which exaggerates differences
-//// between hot and cold nodes without letting one node swallow the page.
+//// between hot and cold nodes without letting one node swallow the page. The
+//// smallest size is 11 where pprof's is 8, because pprof draws at natural
+//// size and a page that scales the picture down to fit would otherwise
+//// leave the coldest labels unreadable.
 ////
 //// ## Flow
 ////
@@ -492,17 +495,25 @@ fn box_sizes(
   let real =
     list.index_map(nodes, fn(node, position) {
       let font = font_size(node.flat, max_flat)
-      let chars = int.max(string.length(label(node.function)), 12)
-      #(position, #(chars * font * 6 / 10 + 8, font * 2 + 8, font))
+      let chars = int.max(string.length(label(node.function)), min_label_chars)
+      #(position, #(chars * font * 6 / 10 + 8, font * 2 + 14, font))
     })
   let dummies =
     list.map(span(list.length(nodes), next_id - 1), fn(id) { #(id, #(2, 0, 0)) })
   dict.from_list(list.append(real, dummies))
 }
 
-/// The font size of pprof's square-root label scale: `8 + ceil(16 *
-/// sqrt(flat / max_flat))`. A node with no flat value gets the smallest
-/// size.
+/// The widest label a node box is sized for at the least, in characters. A
+/// box also carries a second line, "flat (x%) · cum (y%)", and that line is
+/// about this long, so a node with a short name is still wide enough for it.
+pub const min_label_chars: Int = 28
+
+/// The smallest label font size a node gets, in points.
+pub const min_font_size: Int = 11
+
+/// The font size of the square-root label scale: `11 + ceil(13 *
+/// sqrt(flat / max_flat))`, from 11 to 24 points. A node with no flat value
+/// gets the smallest size.
 ///
 /// ## Examples
 ///
@@ -511,16 +522,16 @@ fn box_sizes(
 /// // -> 24
 ///
 /// dag.font_size(25, 100)
-/// // -> 16
+/// // -> 18
 /// ```
 pub fn font_size(flat: Int, max_flat: Int) -> Int {
   case max_flat == 0 {
-    True -> 8
+    True -> min_font_size
     False -> {
       let ratio =
         int.to_float(int.absolute_value(flat)) /. int.to_float(max_flat)
       let root = result.unwrap(float.square_root(ratio), 0.0)
-      8 + float.round(float.ceiling(16.0 *. root))
+      min_font_size + float.round(float.ceiling(13.0 *. root))
     }
   }
 }
