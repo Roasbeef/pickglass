@@ -5,7 +5,7 @@
 //// Several modules build panels, so the one constructor lives here and each
 //// states those facts as arguments instead of assembling the record.
 
-import gleam/option.{Some}
+import gleam/option.{type Option}
 import pickglass_core/measure.{NotApplicable}
 import pickglass_web/model
 
@@ -22,8 +22,11 @@ pub type Facts {
     requested: Int,
     achieved: Int,
     outcome: measure.Outcome,
-    /// How long taking the reading took.
-    elapsed_ms: Int,
+    /// The time between the starts of the two newest collection passes, when
+    /// the panel is refreshed by a repeating pass that has run twice.
+    gap_ms: Option(Int),
+    /// How long taking the reading took, when it was timed.
+    took_ms: Option(Int),
   )
 }
 
@@ -32,7 +35,7 @@ pub type Facts {
 /// ## Examples
 ///
 /// ```gleam
-/// panel.info(Facts("census", "process_info", 2000, "processes", 10, 10, measure.Complete, 4))
+/// panel.info(Facts("census", "process_info", 2000, "processes", 10, 10, measure.Complete, None, Some(4)))
 /// ```
 pub fn info(facts: Facts) -> model.PanelInfo {
   model.PanelInfo(
@@ -42,7 +45,8 @@ pub fn info(facts: Facts) -> model.PanelInfo {
       True -> measure.EveryMs(facts.cadence_ms)
       False -> measure.OneShot
     },
-    achieved_ms: Some(facts.elapsed_ms),
+    achieved_ms: facts.gap_ms,
+    took_ms: facts.took_ms,
     coverage: measure.Coverage(
       scope: facts.scope,
       requested: facts.requested,

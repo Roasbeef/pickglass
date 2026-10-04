@@ -17,14 +17,20 @@
 ////
 //// - `memory` is a memory category's change.
 //// - `os_rss` is the target's resident set change.
-//// - `owner_heap` gives a function that returns the heap capacity change of
-////   an owner row by label, for the owners page's builder.
+//// - `owner_heap_from_aggregates` gives that function from the agent's
+////   per-owner aggregates, which cover every process the walk scanned.
+//// - `owner_heap` gives the same function from the listed rows alone, for a
+////   baseline that has no aggregates (a capture) or a walk that stopped
+////   early.
 
+import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import pickglass/observation.{type Observation}
 import pickglass/os_reader
 import pickglass_core/measure.{type Measurement, Known, Missing, NotApplicable}
+import pickglass_core/owner
 import pickglass_core/wire
 import pickglass_web/model
 
@@ -93,6 +99,128 @@ pub fn census_complete(observation: Observation) -> Bool {
       census.coverage.stop == wire.WalkFinished
       && list.length(census.rows) == census.coverage.scanned
     Error(_) -> False
+  }
+}
+
+/// The heap capacity change of an owner row by label, from the agent's
+/// per-owner aggregates in two observations.
+///
+/// The aggregates are sums over every process the walk scanned, so they stay
+/// complete on a node with more processes than the census lists as rows,
+/// which is where the listed rows alone cannot give a change. They are
+/// usable when both walks finished and both reported their totals. A walk
+/// that stopped at its scan budget or its deadline summed only part of the
+/// node, and `Error(Nil)` says the caller has no such pair; it then uses
+/// `owner_heap`, which answers that the budget was exhausted.
+///
+/// The agent lists the largest owners by memory and counts how many it
+/// tracked. A label that one side lists and the other does not has a change
+/// only if the other side listed every owner, which makes its absence a zero.
+/// Otherwise the owner may have been below the cut, and the answer is the
+/// budget word and not a number. When some owners are unlisted on a side, an
+/// owner's figure is the sum of its listed roles, so it omits roles smaller
+/// than the smallest listed one.
+///
+/// ## Examples
+///
+/// ```gleam
+/// deltas.owner_heap_from_aggregates(now, before, 8)
+/// // -> Ok(fn(label) { Known(-4096) })
+/// ```
+pub fn owner_heap_from_aggregates(
+  current: Observation,
+  baseline: Observation,
+  word_size: Int,
+) -> Result(fn(String) -> Measurement, Nil) {
+  use now <- result.try(aggregates_of(current, word_size))
+  use before <- result.try(aggregates_of(baseline, word_size))
+
+  Ok(fn(label) {
+    case side_value(now, label), side_value(before, label) {
+      Ok(after), Ok(earlier) -> Known(after - earlier)
+      _, _ -> Missing(measure.BudgetExhausted)
+    }
+  })
+}
+
+// One observation's per-owner heap capacity in bytes, and whether it lists
+// every owner the walk tracked.
+type Aggregates {
+  Aggregates(heaps: Dict(String, Int), owners: Listing)
+}
+
+type Listing {
+  EveryOwner
+  TopOwnersOnly
+}
+
+fn aggregates_of(
+  observation: Observation,
+  word_size: Int,
+) -> Result(Aggregates, Nil) {
+  use census <- result.try(result.replace_error(observation.census, Nil))
+  use totals <- result.try(result.replace_error(observation.totals, Nil))
+  use owners <- result.try(result.replace_error(observation.owner_heaps, Nil))
+
+  case census.coverage.stop {
+    wire.WalkFinished ->
+      Ok(
+        Aggregates(
+          heaps: list.fold(owners, dict.new(), fn(heaps, entry) {
+            add_heap(heaps, entry, word_size)
+          }),
+          owners: case totals.owners_listed >= totals.owners_tracked {
+            True -> EveryOwner
+            False -> TopOwnersOnly
+          },
+        ),
+      )
+    wire.ScanBudgetReached | wire.DeadlineReached -> Error(Nil)
+  }
+}
+
+// An owner's heap is added under the labels the owners page uses: the owner
+// by its first path segment, the role under it as `owner / role`, and the
+// unlabelled processes as `unknown`.
+fn add_heap(
+  heaps: Dict(String, Int),
+  entry: wire.OwnerHeapTotal,
+  word_size: Int,
+) -> Dict(String, Int) {
+  let bytes = entry.total_heap_words * word_size
+
+  case entry.total.owner {
+    wire.Unlabelled -> add_to(heaps, "unknown", bytes)
+    wire.Labelled(path:, role:) -> {
+      let label = owner.path_to_string(list.take(path, 1))
+
+      heaps
+      |> add_to(label, bytes)
+      |> add_to(label <> " / " <> role, bytes)
+    }
+  }
+}
+
+fn add_to(
+  heaps: Dict(String, Int),
+  label: String,
+  bytes: Int,
+) -> Dict(String, Int) {
+  dict.upsert(heaps, label, fn(existing) {
+    case existing {
+      Some(sum) -> sum + bytes
+      None -> bytes
+    }
+  })
+}
+
+// An owner's heap on one side. An owner the side does not list was absent
+// when that side listed every owner, and is unknown otherwise.
+fn side_value(side: Aggregates, label: String) -> Result(Int, Nil) {
+  case dict.get(side.heaps, label), side.owners {
+    Ok(bytes), _ -> Ok(bytes)
+    Error(Nil), EveryOwner -> Ok(0)
+    Error(Nil), TopOwnersOnly -> Error(Nil)
   }
 }
 

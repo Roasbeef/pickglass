@@ -37,7 +37,7 @@ import pickglass_web/model.{type PanelInfo}
 ///
 /// ```gleam
 /// ui.meta_parts(info)
-/// // -> ["census", "process_info bundle v1", "every 10.0 s (actual 10.02 s)",
+/// // -> ["census", "process_info bundle v1", "every 10.0 s · took 4 ms",
 /// //     "4,812 of 4,812 processes", "complete"]
 /// ```
 pub fn meta_parts(info: PanelInfo) -> List(String) {
@@ -56,9 +56,20 @@ fn interval_text(info: PanelInfo) -> String {
     measure.EveryMs(interval_ms:) -> "every " <> fmt.duration_ms(interval_ms)
   }
 
-  case info.achieved_ms {
-    Some(actual) -> asked <> " (actual " <> fmt.duration_ms(actual) <> ")"
-    None -> asked
+  // The achieved interval is stated only when it fell behind the request;
+  // a pass that kept its cadence has nothing to add to "every 2.00 s".
+  let behind = case cadence_missed(info.cadence, info.achieved_ms) {
+    True ->
+      case info.achieved_ms {
+        Some(actual) -> " (achieved " <> fmt.duration_ms(actual) <> ")"
+        None -> ""
+      }
+    False -> ""
+  }
+
+  case info.took_ms {
+    Some(took) -> asked <> behind <> " · took " <> fmt.duration_ms(took)
+    None -> asked <> behind
   }
 }
 

@@ -128,6 +128,8 @@ a:hover { text-decoration: underline; }
   vertical-align: -1px;
 }
 .node { font-family: var(--font-mono); font-size: 12.5px; }
+.strip .node { min-width: 0; max-width: 38ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (min-width: 861px) { .strip { flex-wrap: nowrap; } }
 .incarnation { color: var(--ink-3); font-family: var(--font-mono); font-size: 12px; }
 .spacer { flex: 1; }
 
@@ -463,6 +465,13 @@ marker path { fill: var(--edge); }
 
 .track-label { font: 12px var(--font-ui); fill: var(--ink-2); }
 .step { fill: var(--accent); opacity: 0.85; }
+.step-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; }
+.step-hit { fill: transparent; }
+.step-dot { fill: var(--accent); opacity: 0.0; }
+.reading:hover .step-hit { fill: var(--accent-soft); }
+.reading:hover .step-dot, .reading.sel .step-dot { opacity: 1; }
+.reading.sel .step-hit { fill: var(--accent-soft); stroke: var(--ink); stroke-width: 1; }
+.track-base { stroke: var(--rule-2); stroke-width: 1; }
 .reading { cursor: pointer; }
 .reading:hover .step, .reading:hover .span-bar { opacity: 1; stroke: var(--accent); }
 .reading.sel .step, .reading.sel .span-bar { stroke: var(--ink); stroke-width: 2; opacity: 1; }
@@ -507,6 +516,8 @@ marker path { fill: var(--edge); }
 .compare-names .badge { font-size: 12px; padding: 1px 9px; }
 .match .field-block td { background: var(--bad-soft); }
 .match .field-expected td { background: var(--warn-soft); }
+.match .field-unrecorded td { color: var(--ink-3); font-style: italic; }
+.match .field-unrecorded .badge { color: var(--warn); }
 .verdict-summary { margin-top: 10px; font-size: 12.5px; color: var(--ink-2); }
 .legend-inline { margin-top: 8px; }
 .audit td { white-space: nowrap; }

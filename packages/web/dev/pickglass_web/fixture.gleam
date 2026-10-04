@@ -73,6 +73,7 @@ fn info(
     method:,
     cadence: measure.EveryMs(interval_ms: 10_000),
     achieved_ms: Some(10_020),
+    took_ms: Some(12),
     coverage: measure.Coverage(
       scope:,
       requested:,
@@ -725,7 +726,7 @@ pub fn process_detail() -> model.ProcessDetailModel {
     info: info("process_info", "selected counters, one read", 1, 1, "process"),
     key: key.indexed("proc", 1),
     pid_text: "<0.4411.0>",
-    birth: "18,204",
+    birth: "initial call erlang:apply/2, spawned by <0.49.0>",
     liveness: model.Alive,
     pin: model.Pinned(pin: key.make("pin.p-17")),
     attribution:,
@@ -785,7 +786,7 @@ pub fn process_detail() -> model.ProcessDetailModel {
 }
 
 fn counter(label: String, u: unit.Unit, value: Measurement) -> model.Counter {
-  model.Counter(label:, unit: u, value:)
+  model.Counter(label:, unit: u, value:, inapplicable: "")
 }
 
 fn scale_mib(points: List(Measurement)) -> List(Measurement) {
@@ -809,7 +810,14 @@ fn category(
   additivity: measure.Additivity,
   note: String,
 ) -> model.CategoryRow {
-  model.CategoryRow(label:, unit: unit.Bytes, value:, additivity:, note:)
+  model.CategoryRow(
+    label:,
+    unit: unit.Bytes,
+    value:,
+    used: NotApplicable,
+    additivity:,
+    note:,
+  )
 }
 
 /// The memory page's data.
@@ -989,31 +997,31 @@ pub fn supervision() -> model.SupervisionModel {
             node(
               4,
               "keeper",
-              model.Worker,
+              model.Leaf,
               Some("session s-12 / restart_keeper"),
               [],
             ),
             node(
               5,
               "strand main",
-              model.Worker,
+              model.Leaf,
               Some("session s-12 / worker"),
               [],
             ),
-            node(6, "advisor", model.Worker, Some("session s-12 / advisor"), []),
+            node(6, "advisor", model.Leaf, Some("session s-12 / advisor"), []),
           ]),
           node(7, "strand_sup s-07", model.Supervisor, Some("session s-07"), [
             node(
               8,
               "keeper",
-              model.Worker,
+              model.Leaf,
               Some("session s-07 / restart_keeper"),
               [],
             ),
             node(
               9,
               "strand main",
-              model.Worker,
+              model.Leaf,
               Some("session s-07 / worker"),
               [],
             ),
@@ -1023,12 +1031,12 @@ pub fn supervision() -> model.SupervisionModel {
           node(
             11,
             "conversation_store",
-            model.Worker,
+            model.Leaf,
             Some("daemon core / conversation_store"),
             [],
           ),
         ]),
-        node(12, "telemetry", model.Worker, Some("daemon core / telemetry"), []),
+        node(12, "telemetry", model.Leaf, Some("daemon core / telemetry"), []),
       ]),
       node(13, "<0.901.0>", model.UnknownKind, None, []),
     ],
@@ -1206,6 +1214,7 @@ pub fn profile() -> Result(model.ProfileModel, String) {
           method: "sampled at reduction safe points, 50 Hz requested",
           cadence: measure.EveryMs(interval_ms: 20),
           achieved_ms: Some(20),
+          took_ms: None,
           coverage: measure.Coverage(
             scope: "samples over 2 targets",
             requested: 12_000,

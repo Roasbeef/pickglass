@@ -37,6 +37,7 @@ import gleam/result
 import gleam/string
 import pickglass/audit
 import pickglass/deltas
+import pickglass/gate
 import pickglass/marks.{type Mark}
 import pickglass/observation.{type Observation}
 import pickglass/panel
@@ -47,7 +48,7 @@ import pickglass/timeline_build
 import pickglass_core/analysis/transform
 import pickglass_core/capture
 import pickglass_core/identity
-import pickglass_core/measure.{Known, Missing, NotApplicable}
+import pickglass_core/measure.{type Measurement, Known, Missing, NotApplicable}
 import pickglass_core/owner
 import pickglass_core/policy
 import pickglass_core/profile
@@ -55,6 +56,7 @@ import pickglass_core/unit
 import pickglass_core/wire
 import pickglass_web/build/profile as profile_page
 import pickglass_web/census/owners as owners_builder
+import pickglass_web/fmt
 import pickglass_web/key.{type Key}
 import pickglass_web/model
 import pickglass_web/msg
@@ -234,7 +236,7 @@ fn info(
   requested: Int,
   achieved: Int,
   outcome: measure.Outcome,
-  elapsed_ms: Int,
+  took_ms: Option(Int),
 ) -> model.PanelInfo {
   panel.info(panel.Facts(
     source:,
@@ -244,8 +246,19 @@ fn info(
     requested:,
     achieved:,
     outcome:,
-    elapsed_ms:,
+    gap_ms: pass_gap(inputs.observations),
+    took_ms:,
   ))
+}
+
+// The time between the starts of the two newest passes: the interval the
+// collector actually kept, as against the one it was asked for. With fewer
+// than two passes there is no interval to report.
+fn pass_gap(observations: List(Observation)) -> Option(Int) {
+  case observations {
+    [newest, earlier, ..] -> Some(newest.at_ms - earlier.at_ms)
+    [_] | [] -> None
+  }
 }
 
 fn census_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
@@ -256,7 +269,7 @@ fn census_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
       info(
         inputs,
         "census",
-        "process_info bundle v1, label read",
+        "process_info bundle v1, label read; includes the agent's own reader",
         "processes",
         coverage.total,
         coverage.scanned,
@@ -267,7 +280,7 @@ fn census_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
           wire.DeadlineReached ->
             measure.Partial(measure.Truncated(measure.DeadlineHit))
         },
-        coverage.elapsed_ms,
+        Some(coverage.elapsed_ms),
       )
     }
     Error(reason) ->
@@ -279,7 +292,7 @@ fn census_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
         1,
         0,
         measure.Errored(reason),
-        newest.elapsed_ms,
+        Some(newest.elapsed_ms),
       )
   }
 }
@@ -295,10 +308,9 @@ fn strip(inputs: Inputs) -> model.StripModel {
       os,
       model.Live,
       model.AttachedFullTrust,
-      "Attached over Erlang distribution. This connection holds full "
-        <> "code-execution authority on the target; pickglass issues only "
-        <> "the commands its gate admits, but the authority is not reduced "
-        <> "by that.",
+      "Attached over Erlang distribution: full code-execution authority on "
+        <> "the target. The gate limits what pickglass sends, not the "
+        <> "connection.",
     )
     seam.Viewing(name, incarnation, os) -> #(
       "(capture)",
@@ -354,15 +366,17 @@ fn uptime_of(inputs: Inputs) -> measure.Measurement {
   }
 }
 
-// The duty cycle of the collector: how long the newest pass took against the
-// cadence, in parts per ten thousand. A capture, or a viewer with no pass
+// The wall time of the newest pass against the cadence, in parts per ten
+// thousand. It is the viewer's own clock around the whole pass, so it is an
+// upper bound on how much of the cadence collecting occupies and not a
+// measure of target CPU. A capture, or a viewer with no pass
 // yet, has none.
 fn observer(inputs: Inputs) -> model.ObserverEffect {
   case inputs.observations, inputs.page.mode, inputs.cadence_ms > 0 {
     [newest, ..], seam.Live(..), True ->
       model.ObserverEffect(
         duty: Known(newest.elapsed_ms * 10_000 / inputs.cadence_ms),
-        note: "the newest collection pass against its cadence",
+        note: "wall time of the newest collection pass in the viewer, as a share of its cadence; target CPU is not measured",
       )
     _, _, _ ->
       model.ObserverEffect(
@@ -409,7 +423,11 @@ fn overview(inputs: Inputs, newest: Observation) -> model.OverviewModel {
   model.OverviewModel(
     layers: model.Panel(
       info: memory_info(inputs, newest),
-      body: layers_of(newest, baseline_observation(inputs)),
+      body: layers_of(
+        newest,
+        baseline_observation(inputs),
+        carrier_total(inputs),
+      ),
     ),
     checkpoint: option.map(chosen_mark(inputs), fn(chosen) { chosen.0 }),
     checkpoints: checkpoint_refs(inputs),
@@ -507,7 +525,7 @@ fn os_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
     },
     achieved,
     outcome,
-    newest.elapsed_ms,
+    None,
   )
 }
 
@@ -547,7 +565,7 @@ fn memory_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
       Error(_) -> 0
     },
     outcome,
-    newest.elapsed_ms,
+    None,
   )
 }
 
@@ -566,7 +584,7 @@ fn scheduler_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
       Ok(_) -> measure.Complete
       Error(reason) -> measure.Errored(reason)
     },
-    newest.elapsed_ms,
+    None,
   )
 }
 
@@ -577,34 +595,43 @@ fn missing_for(reason: String) -> measure.MissingReason {
   }
 }
 
-// The erlang:memory total first, then each category under it, then the OS's
-// account of the target. A failed memory reading is one row that says so. A
-// change is shown only against a baseline that has the same reading.
+// The layers of the node's memory, outermost last. The erlang:memory total
+// comes first with its categories under it, nested as they are: `system`
+// holds atoms, binaries, code and ETS, and `processes` holds the part of
+// them in use. Then the allocators' carriers, then the OS's resident set,
+// with the two differences between neighbouring layers as derived rows. The
+// first difference is capacity the allocators hold and the VM does not
+// count as in use; the second is what the OS charges the target for outside
+// the allocators, or the reverse where carriers are reserved and not
+// resident. A change is shown only against a baseline that has the same
+// reading, and the carriers are read on some passes only, so their row and
+// the two differences have no change.
 fn layers_of(
   newest: Observation,
   baseline: Option(Observation),
+  carriers: Measurement,
 ) -> List(model.LayerRow) {
-  let vm = case newest.memory {
-    Error(reason) -> [
-      model.LayerRow(
-        label: "erlang:memory total",
-        depth: 0,
-        value: Missing(missing_for(reason)),
-        delta: NotApplicable,
-        derivation: model.Measured,
-      ),
-    ]
-    Ok(memory) ->
+  let #(vm, vm_total) = case newest.memory {
+    Error(reason) -> #(
+      [
+        model.LayerRow(
+          label: "erlang:memory total",
+          depth: 0,
+          value: Missing(missing_for(reason)),
+          delta: NotApplicable,
+          derivation: model.Measured,
+        ),
+      ],
+      Missing(missing_for(reason)),
+    )
+    Ok(memory) -> #(
       list.map(memory.categories, fn(pair) {
         model.LayerRow(
           label: case pair.0 {
             "total" -> "erlang:memory total"
             other -> other
           },
-          depth: case pair.0 {
-            "total" -> 0
-            _ -> 1
-          },
+          depth: depth_of(pair.0),
           value: Known(pair.1),
           delta: case baseline {
             Some(earlier) -> deltas.memory(newest, earlier, pair.0)
@@ -612,26 +639,103 @@ fn layers_of(
           },
           derivation: model.Measured,
         )
-      })
-  }
-
-  list.append(vm, [
-    model.LayerRow(
-      label: "OS resident set (target)",
-      depth: 0,
-      value: deltas.target_rss(newest),
-      delta: case baseline {
-        Some(earlier) -> deltas.os_rss(newest, earlier)
-        None -> NotApplicable
+      }),
+      case list.key_find(memory.categories, "total") {
+        Ok(total) -> Known(total)
+        Error(Nil) -> Missing(measure.UnsupportedOnRuntime)
       },
-      derivation: model.Derived("the OS's account, not the VM's"),
-    ),
+    )
+  }
+  let rss = deltas.target_rss(newest)
+
+  list.flatten([
+    vm,
+    [
+      model.LayerRow(
+        label: "allocator carriers",
+        depth: 0,
+        value: carriers,
+        delta: NotApplicable,
+        derivation: model.Derived(
+          "the sum of every allocator's carrier size in the newest node read",
+        ),
+      ),
+      model.LayerRow(
+        label: "carriers beyond erlang:memory",
+        depth: 1,
+        value: gap(carriers, vm_total),
+        delta: NotApplicable,
+        derivation: model.Derived(
+          "carriers minus the erlang:memory total: capacity the allocators hold that the VM does not count as in use, and allocator overhead; two readings taken at different moments",
+        ),
+      ),
+      model.LayerRow(
+        label: "OS resident set (target)",
+        depth: 0,
+        value: rss,
+        delta: case baseline {
+          Some(earlier) -> deltas.os_rss(newest, earlier)
+          None -> NotApplicable
+        },
+        derivation: model.Derived("the OS's account, not the VM's"),
+      ),
+      model.LayerRow(
+        label: "resident set beyond carriers",
+        depth: 1,
+        value: gap(rss, carriers),
+        delta: NotApplicable,
+        derivation: model.Derived(
+          "resident set minus carriers: memory the OS charges the target outside the allocators, such as the emulator's own and shared libraries. It can be negative, because carriers count reserved address space and the resident set counts pages touched",
+        ),
+      ),
+    ],
   ])
 }
 
+// How far a memory category nests under the total. `system` and `processes`
+// are the two halves of the total; the rest are parts of one of them.
+fn depth_of(category: String) -> Int {
+  case category {
+    "total" -> 0
+    "processes" | "system" -> 1
+    _ -> 2
+  }
+}
+
+// The upper layer minus the lower, or the word for whichever side is not a
+// number. A difference with an unknown end is not zero.
+fn gap(upper: Measurement, lower: Measurement) -> Measurement {
+  case upper, lower {
+    Known(a), Known(b) -> Known(a - b)
+    Missing(reason), _ | _, Missing(reason) -> Missing(reason)
+    _, _ -> NotApplicable
+  }
+}
+
+// The carriers of the newest node read that has them, as one reading. A
+// pass that has not read the node yet, or a runtime that cannot report
+// carriers, gives the word for why and not a sum of nothing.
+fn carrier_total(inputs: Inputs) -> Measurement {
+  let read =
+    list.find_map(inputs.observations, fn(observation) {
+      case observation.system {
+        Ok(snapshot) -> Ok(snapshot.carriers)
+        Error(_) -> Error(Nil)
+      }
+    })
+
+  case read {
+    Ok(wire.CarriersRead(rows:)) ->
+      Known(list.fold(rows, 0, fn(sum, row) { sum + row.total_bytes }))
+    Ok(wire.CarriersUnavailable(_)) -> Missing(measure.UnsupportedOnRuntime)
+    Error(Nil) -> Missing(measure.NotCollected)
+  }
+}
+
 // Scheduler utilisation between consecutive passes, oldest first: the change
-// in active time over the change in total time, in parts per ten thousand.
-// A pair where wall time was not collected, or did not advance, has no point.
+// in active time over the change in total time, in parts per million, because
+// an idle node is below the 0.01% a smaller scale resolves. A pair where wall
+// time was not collected, or did not advance, has no point.
 fn utilisation(observations: List(Observation)) -> model.Sparkline {
   let ordered = list.reverse(list.take(observations, spark_points + 1))
   let points =
@@ -646,7 +750,7 @@ fn utilisation(observations: List(Observation)) -> model.Sparkline {
             - total_of(first, fn(r) { r.total })
 
           case total > 0 && active >= 0 {
-            True -> Known(active * 10_000 / total)
+            True -> Known(active * 1_000_000 / total)
             False -> Missing(measure.CounterDisabled)
           }
         }
@@ -660,7 +764,7 @@ fn utilisation(observations: List(Observation)) -> model.Sparkline {
 
   model.Sparkline(
     label: "utilisation",
-    unit: unit.Ratio(per: 10_000),
+    unit: unit.Ratio(per: 1_000_000),
     points:,
     summary: case known {
       [] -> Missing(measure.CounterDisabled)
@@ -699,7 +803,7 @@ pub fn rows_of(newest: Observation, word_size: Int) -> List(model.ProcRow) {
           heap_cap: Known(row.total_heap_words * word_size),
           mailbox: Known(row.queue_length),
           reductions: Missing(measure.NotInBothPasses),
-          binary_refs: Missing(measure.UnsupportedOnRuntime),
+          binary_refs: Missing(measure.NotCollected),
           current: case row.current_function {
             "" -> None
             function -> Some(function)
@@ -900,7 +1004,10 @@ fn with_changes(
     rows,
     checkpoint_refs(inputs),
     option.map(chosen_mark(inputs), fn(pair) { pair.0 }),
-    deltas.owner_heap(current, baseline_page, completeness),
+    case deltas.owner_heap_from_aggregates(newest, earlier, word_size) {
+      Ok(from_aggregates) -> from_aggregates
+      Error(Nil) -> deltas.owner_heap(current, baseline_page, completeness)
+    },
   )
 }
 
@@ -946,6 +1053,7 @@ fn memory(inputs: Inputs, newest: Observation) -> model.MemoryModel {
           label: pair.0,
           unit: unit.Bytes,
           value: Known(pair.1),
+          used: NotApplicable,
           additivity: case pair.0 {
             "processes" | "system" -> measure.Additive
             _ ->
@@ -962,6 +1070,7 @@ fn memory(inputs: Inputs, newest: Observation) -> model.MemoryModel {
       label: "OS resident set (target)",
       unit: unit.Bytes,
       value: deltas.target_rss(newest),
+      used: NotApplicable,
       additivity: measure.Overlapping(
         "the OS's account of the whole process: the VM's allocations, loaded code and shared libraries",
       ),
@@ -977,7 +1086,7 @@ fn memory(inputs: Inputs, newest: Observation) -> model.MemoryModel {
         1,
         0,
         measure.Refused("the agent does not collect this yet"),
-        0,
+        None,
       ),
       body: [],
     )
@@ -1010,7 +1119,7 @@ fn allocators_panel(
 
   case read {
     Error(Nil) -> unread
-    Ok(#(observation, wire.CarriersUnavailable(reason:))) ->
+    Ok(#(_, wire.CarriersUnavailable(reason:))) ->
       model.Panel(
         info: info(
           inputs,
@@ -1020,11 +1129,11 @@ fn allocators_panel(
           1,
           0,
           measure.Refused(reason),
-          observation.elapsed_ms,
+          None,
         ),
         body: [],
       )
-    Ok(#(observation, wire.CarriersRead(rows:))) ->
+    Ok(#(_, wire.CarriersRead(rows:))) ->
       model.Panel(
         info: info(
           inputs,
@@ -1034,7 +1143,7 @@ fn allocators_panel(
           list.length(rows),
           list.length(rows),
           measure.Complete,
-          observation.elapsed_ms,
+          None,
         ),
         body: list.map(rows, carrier_row),
       )
@@ -1050,16 +1159,15 @@ fn carrier_row(row: wire.CarrierRow) -> model.CategoryRow {
     },
     unit: unit.Bytes,
     value: Known(row.total_bytes),
+    used: Known(row.used_bytes),
     additivity: measure.Overlapping(
       "the used part is inside the total, and allocators share the VM's memory",
     ),
-    note: int.to_string(row.carriers)
-      <> " carriers, "
-      <> int.to_string(row.used_bytes)
-      <> " bytes used"
+    note: fmt.count(row.carriers)
+      <> " carriers"
       <> case row.unscanned_bytes {
       0 -> ""
-      bytes -> ", " <> int.to_string(bytes) <> " bytes not scanned"
+      bytes -> ", " <> fmt.bytes(bytes) <> " not scanned"
     },
   )
 }
@@ -1113,7 +1221,7 @@ fn probes(inputs: Inputs, newest: Observation) -> model.ProbesModel {
       1,
       1,
       measure.Complete,
-      0,
+      None,
     ),
     targets: list.map(live_pins, fn(pin) {
       #(pin_key(pin.token), pin.pid_text <> label_for(rows, pin.pid_text))
@@ -1197,7 +1305,7 @@ fn audit_model(inputs: Inputs) -> model.AuditModel {
       list.length(inputs.entries),
       list.length(inputs.entries),
       measure.Complete,
-      0,
+      None,
     ),
     entries: list.map(inputs.entries, fn(entry) { policy_entry(entry, now) }),
   )
@@ -1279,7 +1387,7 @@ pub fn profile_model(
         Error(Nil) -> Ok(None)
         Ok(column) ->
           profile_page.build(
-            profile_header(inputs, probe, found),
+            profile_header(probe, found),
             found,
             column,
             chain,
@@ -1301,7 +1409,6 @@ fn column_of(found: profile.Profile) -> Result(profile.Column, Nil) {
 }
 
 fn profile_header(
-  inputs: Inputs,
   probe: ProbeRecord,
   found: profile.Profile,
 ) -> model.ProfileHeader {
@@ -1325,22 +1432,36 @@ fn profile_header(
     profile.AllocationCounts -> #("allocation counts", "allocator statistics")
   }
 
-  // Counters cover functions the agent matched; sampled stacks cover the
-  // samples taken, which is the profile's own total.
-  let #(coverage_scope, requested, achieved) = case profile.source(found) {
-    profile.SampledStacks(..) -> {
-      let samples = case profile.columns(found) {
+  // The kind of probe decides what the coverage counts, never the source
+  // of the profile it produced. A stack probe is asked for a rate over a
+  // duration on its targets, and it covers the samples it took against
+  // that; the profile's own total is what it took. A counters probe covers
+  // the functions it matched, and a function nobody called is a function
+  // that was matched and not called.
+  let #(coverage_scope, requested, achieved) = case probe.kind {
+    policy.Sampling -> {
+      let seconds = int.max(1, probe.duration_ms / 1000)
+      let taken = case profile.columns(found) {
         [first, ..] -> profile.total(found, first)
         [] -> 0
       }
 
-      #("samples", samples, samples)
+      #(
+        "samples",
+        gate.sampling_hz * seconds * int.max(1, probe.matched),
+        taken,
+      )
     }
-    profile.TracedCounters | profile.TracedCalls | profile.AllocationCounts -> #(
-      "functions",
+    policy.Counters | policy.CallTree | policy.SchedulingGc -> #(
+      "functions with calls",
       probe.matched,
       list.length(profile.samples(found)),
     )
+  }
+  let took = case probe.state {
+    probe_book.Finished(cost: capture.ProbeCost(wall_ms: Known(ms), ..), ..) ->
+      Some(ms)
+    probe_book.Finished(..) | probe_book.Running -> None
   }
 
   model.ProfileHeader(
@@ -1348,26 +1469,27 @@ fn profile_header(
       <> probe.id
       <> case probe.modules {
       [] -> ""
+      ["*"] -> " · all modules"
       modules -> " · " <> string.join(modules, ", ")
     },
     source: profile.source(found),
-    info: info(
-      inputs,
-      source,
-      method,
-      coverage_scope,
-      requested,
-      achieved,
-      case probe.state {
+    // A probe runs once. Its panel has no cadence to keep or miss: the
+    // collection cadence belongs to the census, and a probe's own wall time
+    // is a duration, not an interval.
+    info: panel.info(panel.Facts(
+      source:,
+      method:,
+      cadence_ms: 0,
+      scope: coverage_scope,
+      requested:,
+      achieved:,
+      outcome: case probe.state {
         probe_book.Finished(outcome:, ..) -> outcome
         probe_book.Running -> measure.Complete
       },
-      case probe.state {
-        probe_book.Finished(cost: capture.ProbeCost(wall_ms: Known(ms), ..), ..) ->
-          ms
-        _ -> 0
-      },
-    ),
+      gap_ms: None,
+      took_ms: took,
+    )),
     caveats: notes,
   )
 }
@@ -1428,7 +1550,7 @@ fn compare_feed(inputs: Inputs) -> List(msg.Feed) {
         list.length(state.offers),
         list.length(state.offers),
         measure.Complete,
-        0,
+        None,
       ),
       offers: list.map(state.offers, fn(name) {
         model.CaptureOffer(key: capture_key(name), name:, chosen: chosen(name))
@@ -1456,7 +1578,7 @@ fn supervision_feed(inputs: Inputs) -> List(msg.Feed) {
           snapshot.coverage.total,
           snapshot.coverage.scanned,
           supervision_build.outcome(snapshot.coverage),
-          snapshot.coverage.elapsed_ms,
+          Some(snapshot.coverage.elapsed_ms),
         ),
         snapshot,
       )),
@@ -1483,7 +1605,7 @@ fn detail_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
       {
         Error(Nil) -> []
         Ok(row) -> [
-          msg.FedProcessDetail(process_detail(inputs, newest, row, word_size)),
+          msg.FedProcessDetail(process_detail(inputs, row, word_size)),
         ]
       }
   }
@@ -1491,7 +1613,6 @@ fn detail_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
 
 fn process_detail(
   inputs: Inputs,
-  newest: Observation,
   row: model.ProcRow,
   word_size: Int,
 ) -> model.ProcessDetailModel {
@@ -1504,6 +1625,19 @@ fn process_detail(
     Some(Error(_)) | None -> None
   }
 
+  // The history covers the newest passes the sparklines draw. The census
+  // lists only its top rows, so a process is in some of those passes and not
+  // in others, and the panel says how many.
+  let window = list.take(inputs.observations, spark_points)
+  let listed =
+    list.filter(window, fn(observation) {
+      case observation.census {
+        Ok(census) ->
+          list.any(census.rows, fn(found) { found.pid_text == row.pid_text })
+        Error(_) -> False
+      }
+    })
+
   model.ProcessDetailModel(
     info: info(
       inputs,
@@ -1512,11 +1646,11 @@ fn process_detail(
         Some(_) -> "census row and process_info detail of a pinned process"
         None -> "census row; pin the process to read its detail"
       },
-      "readings",
-      1,
-      1,
+      "passes",
+      list.length(window),
+      list.length(listed),
       measure.Complete,
-      newest.elapsed_ms,
+      None,
     ),
     key: row.key,
     pid_text: row.pid_text,
@@ -1571,7 +1705,7 @@ fn counter(
   u: unit.Unit,
   value: measure.Measurement,
 ) -> model.Counter {
-  model.Counter(label:, unit: u, value:)
+  model.Counter(label:, unit: u, value:, inapplicable: "")
 }
 
 fn census_counters(row: model.ProcRow) -> List(model.Counter) {
@@ -1606,10 +1740,18 @@ fn gc_counters(detail: Option(wire.ProcessDetail)) -> List(model.Counter) {
         counter("minor collections", unit.Count, Known(gc.minor_gcs)),
         counter("fullsweep after", unit.Count, Known(gc.fullsweep_after)),
         counter("min heap", unit.Bytes, Known(gc.min_heap_bytes)),
-        counter("max heap", unit.Bytes, case gc.max_heap_bytes {
-          0 -> NotApplicable
-          bytes -> Known(bytes)
-        }),
+        case gc.max_heap_bytes {
+          // A zero is the VM's "no limit", which is a setting and not a
+          // missing reading.
+          0 ->
+            model.Counter(
+              label: "max heap",
+              unit: unit.Bytes,
+              value: NotApplicable,
+              inapplicable: "no limit",
+            )
+          bytes -> counter("max heap", unit.Bytes, Known(bytes))
+        },
         counter("heap block", unit.Bytes, Known(gc.heap_block_bytes)),
         counter("old heap", unit.Bytes, Known(gc.old_heap_bytes)),
         counter("old heap block", unit.Bytes, Known(gc.old_heap_block_bytes)),

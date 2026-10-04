@@ -39,15 +39,19 @@ import pickglass_web/state.{type UiState}
 import pickglass_web/view/ui
 import pickglass_web/wire
 
-/// How a probe's estimate is worded. A counters probe has no events, so its
-/// estimate counts calls the VM will tally and bounds the one snapshot; a
-/// tracing probe has events the collector must receive.
+/// How a plan's estimate is worded. Each kind of plan counts something
+/// different: a counters probe tallies calls inside the VM and sends no
+/// event, a stack probe takes samples, a tracing probe sends events to a
+/// collector, and a collection or a self-measure is one action. Calling every
+/// one of them "events" would put a number beside the wrong noun.
 ///
 /// ## Examples
 ///
 /// ```gleam
 /// cost_text(policy.Counting, estimate, 30_000)
-/// // -> "about 4,000 to 22,000 calls counted ..."
+/// // -> "0 to 22,000 calls counted, no events sent · snapshot at most ..."
+/// cost_text(policy.ForcedGc, estimate, 0)
+/// // -> "one collection · about 50 ms · the process is stopped meanwhile"
 /// ```
 pub fn cost_text(
   level: policy.Perturbation,
@@ -68,7 +72,22 @@ pub fn cost_text(
       <> " calls counted, no events sent · snapshot at most "
       <> fmt.bytes(estimate.bytes_high)
       <> tail
-    policy.Passive | policy.Polling | policy.Tracing | policy.ForcedGc ->
+    policy.ForcedGc ->
+      "one collection · about "
+      <> fmt.duration_ms(estimate.wall_ms)
+      <> " · the process is stopped meanwhile"
+    policy.Polling ->
+      case estimate.events_high > 1 {
+        True ->
+          "up to "
+          <> fmt.count(estimate.events_high)
+          <> " samples · at most "
+          <> fmt.bytes(estimate.bytes_high)
+          <> tail
+        False ->
+          "one request · waits at most " <> fmt.duration_ms(estimate.wall_ms)
+      }
+    policy.Passive | policy.Tracing ->
       span <> " events · at most " <> fmt.bytes(estimate.bytes_high) <> tail
   }
 }
@@ -345,8 +364,7 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
             <> " target(s) revalidated · modules "
             <> list.fold(scope.modules, "", join_words)
             <> " · "
-            <> fmt.cell(card.matched, unit.Count)
-            <> " functions matched by the agent",
+            <> matched_text(card.matched),
           ),
         ]),
         html.dt([], [element.text("Action")]),
@@ -388,6 +406,18 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
       ]),
     ],
   )
+}
+
+// What the scope says about matched functions. The agent matches them when
+// the probe starts, so a plan has no count to show, and a bare "n/a" beside
+// a noun reads as a failed reading.
+fn matched_text(matched: measure.Measurement) -> String {
+  case matched {
+    measure.Known(count) ->
+      fmt.count(count) <> " functions matched by the agent"
+    measure.Missing(_) | measure.NotApplicable ->
+      "functions are matched when the probe starts"
+  }
 }
 
 fn join_words(acc: String, word: String) -> String {

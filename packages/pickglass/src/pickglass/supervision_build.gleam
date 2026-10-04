@@ -15,10 +15,14 @@
 //// thousands of processes would otherwise be thousands of elements.
 ////
 //// A node's kind is read from its initial call, which is a hint and nothing
-//// stronger: a supervisor's initial call names a supervisor module (or its
-//// registered name ends in `_sup`, which is how OTP's own are named), a
-//// process with no children is a worker, and a process with children whose
-//// initial call is not recognised is `UnknownKind`.
+//// stronger: a supervisor's initial call names a supervisor module, or its
+//// registered name ends in `_sup`, which is how OTP's own are named. A
+//// process with no children and no such hint is a `Leaf`, and the page does
+//// not call it a worker because a supervisor with nothing to supervise looks
+//// the same. A process with children and no hint is `UnknownKind`. The
+//// initial call the agent reads is what `process_info` reports, which for an
+//// OTP process is `proc_lib:init_p/5`; the module in the process dictionary's
+//// `$initial_call` is the stronger evidence and is not read yet.
 
 import gleam/dict.{type Dict}
 import gleam/int
@@ -150,7 +154,7 @@ fn kind_of(edge: wire.SpawnEdge, below: List(wire.SpawnEdge)) -> model.SupKind {
 
   case supervisor, below {
     True, _ -> model.Supervisor
-    False, [] -> model.Worker
+    False, [] -> model.Leaf
     False, [_, ..] -> model.UnknownKind
   }
 }

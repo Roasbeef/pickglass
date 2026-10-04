@@ -25,6 +25,7 @@ import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/element/keyed
+import pickglass_core/measure
 import pickglass_core/owner
 import pickglass_core/unit
 import pickglass_web/fmt
@@ -41,21 +42,50 @@ const binary_why: String =
 
 /// Draw the processes page.
 pub fn view(data: ProcessesModel, links: Links) -> Element(Msg) {
+  let binaries = binaries_of(data.rows)
+
   ui.panel(title: "Processes", info: data.info, controls: [pager(data)], body: [
     html.table([attribute.class("tbl processes")], [
-      head(data.sort, data.rate_ms),
+      head(data.sort, data.rate_ms, binaries),
       keyed.tbody(
         [],
         list.map(data.rows, fn(process) {
-          #(key.to_string(process.key), row(process, links))
+          #(key.to_string(process.key), row(process, links, binaries))
         }),
       ),
     ]),
     ui.note(
       "Rows are one window of a sorted index held by the viewer. "
-      <> "Reductions are a work counter, not CPU time.",
+      <> "Reductions are a work counter, not CPU time."
+      <> case binaries {
+        Counted -> ""
+        NotRead(word:) -> " Binary references: " <> word <> " for every row."
+      },
     ),
   ])
+}
+
+// Whether the binary reference column carries figures. When every row in the
+// window has the same absent reading, a column of identical words is one
+// fact repeated, so the column is left out and the fact is said once.
+type Binaries {
+  Counted
+  NotRead(word: String)
+}
+
+fn binaries_of(rows: List(ProcRow)) -> Binaries {
+  case rows {
+    [] -> Counted
+    [first, ..rest] ->
+      case first.binary_refs {
+        measure.Known(_) | measure.NotApplicable -> Counted
+        measure.Missing(_) as absent ->
+          case list.all(rest, fn(other) { other.binary_refs == absent }) {
+            True -> NotRead(word: measure.render(absent, unit.Count))
+            False -> Counted
+          }
+      }
+  }
 }
 
 fn pager(data: ProcessesModel) -> Element(Msg) {
@@ -113,7 +143,11 @@ fn rate_label(rate_ms: Option(Int)) -> String {
   }
 }
 
-fn head(sort: SortColumn, rate_ms: Option(Int)) -> Element(Msg) {
+fn head(
+  sort: SortColumn,
+  rate_ms: Option(Int),
+  binaries: Binaries,
+) -> Element(Msg) {
   html.thead([], [
     html.tr([], [
       ui.th("pid", None),
@@ -122,9 +156,13 @@ fn head(sort: SortColumn, rate_ms: Option(Int)) -> Element(Msg) {
       ui.th_num("heap capacity", None),
       sortable("mailbox", model.ByMailbox, sort),
       sortable(rate_label(rate_ms), model.ByReductions, sort),
-      ui.th_num("binary refs ≈", Some(binary_why)),
-      ui.th("current function", None),
-      ui.th("", None),
+      ..list.append(
+        case binaries {
+          Counted -> [ui.th_num("binary refs ≈", Some(binary_why))]
+          NotRead(_) -> []
+        },
+        [ui.th("current function", None), ui.th("", None)],
+      )
     ]),
   ])
 }
@@ -161,7 +199,7 @@ fn sort_state(
   }
 }
 
-fn row(process: ProcRow, links: Links) -> Element(Msg) {
+fn row(process: ProcRow, links: Links, binaries: Binaries) -> Element(Msg) {
   html.tr([], [
     html.td([], [
       html.a(
@@ -182,18 +220,25 @@ fn row(process: ProcRow, links: Links) -> Element(Msg) {
     ui.num(process.heap_cap, unit.Bytes),
     ui.num(process.mailbox, unit.Count),
     ui.num(process.reductions, unit.Reductions),
-    ui.overlap(process.binary_refs, unit.Count, binary_why),
-    html.td([attribute.class("mono current")], [current(process)]),
-    html.td([attribute.class("row-actions")], [
-      html.button(
-        [
-          attribute.class("btn btn-small"),
-          attribute.type_("button"),
-          wire.click(msg.Ask(msg.RequestPin(process.key))),
-        ],
-        [element.text("Pin")],
-      ),
-    ]),
+    ..list.append(
+      case binaries {
+        Counted -> [ui.overlap(process.binary_refs, unit.Count, binary_why)]
+        NotRead(_) -> []
+      },
+      [
+        html.td([attribute.class("mono current")], [current(process)]),
+        html.td([attribute.class("row-actions")], [
+          html.button(
+            [
+              attribute.class("btn btn-small"),
+              attribute.type_("button"),
+              wire.click(msg.Ask(msg.RequestPin(process.key))),
+            ],
+            [element.text("Pin")],
+          ),
+        ]),
+      ],
+    )
   ])
 }
 

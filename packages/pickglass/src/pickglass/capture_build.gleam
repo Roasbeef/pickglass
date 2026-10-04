@@ -195,9 +195,9 @@ fn provenance_of(
       flags: [],
     ),
     build: provenance.Build(
-      application: "unknown",
+      application: provenance.unstated,
       version: "unknown",
-      revision: "unknown",
+      revision: provenance.unstated,
       compiler: "unknown",
     ),
     workload: provenance.Workload(

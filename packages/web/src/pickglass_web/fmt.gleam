@@ -160,21 +160,30 @@ pub fn duration_ms(ms: Int) -> String {
   }
 }
 
-/// Write parts per `per` as a percentage with one decimal.
+/// Write parts per `per` as a percentage with one decimal. A reading above
+/// zero that is below the first decimal is `<0.1%`: rounding it to `0.0%`
+/// would say the counter read nothing beside bars that show it did.
 ///
 /// ## Examples
 ///
 /// ```gleam
 /// fmt.ratio(30, 10_000)
 /// // -> "0.3%"
+///
+/// fmt.ratio(3, 10_000)
+/// // -> "<0.1%"
 /// ```
 pub fn ratio(value: Int, per: Int) -> String {
   let tenths = value * 1000 / per
 
-  int.to_string(tenths / 10)
-  <> "."
-  <> int.to_string(int.absolute_value(tenths) % 10)
-  <> "%"
+  case tenths == 0 && value > 0 {
+    True -> "<0.1%"
+    False ->
+      int.to_string(tenths / 10)
+      <> "."
+      <> int.to_string(int.absolute_value(tenths) % 10)
+      <> "%"
+  }
 }
 
 /// Write a fraction given as `part` of `whole` as a percentage with one

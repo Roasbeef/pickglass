@@ -27,6 +27,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import pickglass/gate
 import pickglass/remote.{type Failure, type Remote}
 import pickglass_core/identity.{type PinToken}
 import pickglass_core/policy.{type Authorized, type Command}
@@ -176,10 +177,6 @@ fn counters_started(remote: Remote, request: wire.Request) -> Outcome {
   }
 }
 
-/// The rate a stack probe asks for, in samples per second. The agent cuts it
-/// to what the number of targets allows.
-pub const sampling_hz = 50
-
 fn stacks_started(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
   let seconds = int.max(1, spec.duration_ms / 1000)
 
@@ -188,14 +185,14 @@ fn stacks_started(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
   let samples =
     int.min(
       200_000,
-      2 * sampling_hz * seconds * int.max(1, list.length(spec.targets)),
+      2 * gate.sampling_hz * seconds * int.max(1, list.length(spec.targets)),
     )
 
   case
     remote.ask(
       wire.Extended(wire.AskStartStacks(
         spec.targets,
-        sampling_hz,
+        gate.sampling_hz,
         spec.duration_ms,
         samples,
       )),

@@ -44,7 +44,7 @@ pub fn every_data_panel_has_the_title_bar_line_test() {
   let html = support.html_of(page.Owners)
 
   string.contains(html, "meta-source") |> should.be_true
-  string.contains(html, "every 10.0 s (actual 10.0 s)") |> should.be_true
+  string.contains(html, "every 10.0 s · took 12 ms") |> should.be_true
   string.contains(html, "14 of 3,412 processes") |> should.be_true
   string.contains(html, "truncated: top_k_limit") |> should.be_true
 }

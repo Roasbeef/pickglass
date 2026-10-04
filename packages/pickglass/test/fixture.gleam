@@ -140,6 +140,7 @@ pub fn observation(seq: Int, at_ms: Int) -> Observation {
     scheduler: Ok(scheduler(seq * 100, seq * 200 + 1000)),
     os: Error(observation_codec.no_os_readings),
     totals: Error(observation.totals_not_recorded),
+    owner_heaps: Error(observation.totals_not_recorded),
     system: Error(observation.system_skipped),
   )
 }

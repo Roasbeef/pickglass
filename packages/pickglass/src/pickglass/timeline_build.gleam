@@ -25,6 +25,7 @@ import pickglass/observation.{type Observation}
 import pickglass/panel
 import pickglass/probe_book.{type ProbeRecord}
 import pickglass_core/measure.{type Measurement, Known, Missing, NotApplicable}
+import pickglass_core/policy
 import pickglass_core/unit
 import pickglass_core/wire
 import pickglass_web/model
@@ -70,7 +71,8 @@ pub fn build(
           requested: list.length(oldest),
           achieved: list.length(list.filter(oldest, observation.answered)),
           outcome: measure.Complete,
-          elapsed_ms: 0,
+          gap_ms: None,
+          took_ms: None,
         )),
         window_ms: last_at + width,
         clock_note: "the viewer's wall clock at the start of each pass",
@@ -157,9 +159,10 @@ fn counter_track(
 }
 
 // Utilisation between a pass and the one before it: the change in active
-// scheduler time over the change in total, in parts per ten thousand. The
-// first pass has no pass before it and so no reading, and a pair where wall
-// time was not collected has none either.
+// scheduler time over the change in total, in parts per million, because a
+// nearly idle node is below the 0.01% a smaller scale resolves. The first
+// pass has no pass before it and so no reading, and a pair where wall time
+// was not collected has none either.
 fn utilisation_track(
   observations: List(Observation),
   times: List(Int),
@@ -179,7 +182,7 @@ fn utilisation_track(
 
   model.CounterTrack(
     label: "scheduler utilisation",
-    unit: unit.Ratio(per: 10_000),
+    unit: unit.Ratio(per: 1_000_000),
     steps: steps_of(times, width, pairs),
   )
 }
@@ -194,7 +197,7 @@ fn utilisation(before: Observation, after: Observation) -> Measurement {
         total_of(second, fn(r) { r.total }) - total_of(first, fn(r) { r.total })
 
       case total > 0 && active >= 0 {
-        True -> Known(active * 10_000 / total)
+        True -> Known(active * 1_000_000 / total)
         False -> Missing(measure.CounterDisabled)
       }
     }
@@ -216,7 +219,7 @@ fn run_queue_track(times: List(Int), width: Int) -> model.Track {
     steps: steps_of(
       times,
       width,
-      list.map(times, fn(_) { Missing(measure.UnsupportedOnRuntime) }),
+      list.map(times, fn(_) { Missing(measure.NotCollected) }),
     ),
   )
 }
@@ -243,12 +246,21 @@ fn probe_track(
           Ok(model.Span(
             at_ms: started - origin,
             length_ms: int.max(1, ended - started),
-            label: "counters probe " <> probe.id,
+            label: kind_text(probe.kind) <> " " <> probe.id,
           ))
         }
       }
     }),
   )
+}
+
+fn kind_text(kind: policy.ProbeKind) -> String {
+  case kind {
+    policy.Counters -> "counters probe"
+    policy.Sampling -> "stack probe"
+    policy.CallTree -> "call tree probe"
+    policy.SchedulingGc -> "scheduling probe"
+  }
 }
 
 // A checkpoint is an instant; it is drawn as a span one cadence wide so it

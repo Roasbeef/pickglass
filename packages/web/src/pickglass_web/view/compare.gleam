@@ -188,7 +188,11 @@ fn field_row(
       "differs, blocks",
       detail,
     )
-    provenance.NotRecorded -> #("field-unrecorded", "not recorded", "")
+    provenance.NotRecorded -> #(
+      "field-unrecorded",
+      "not stated",
+      "a value neither capture states cannot be called the same",
+    )
   }
 
   html.tr([attribute.class(class)], [
@@ -214,7 +218,11 @@ fn field_value(field: Field, p: Provenance) -> String {
       <> int.to_string(p.collection.budgets.top_k)
       <> " · "
       <> fmt.duration_ms(p.collection.budgets.deadline_ms)
-    provenance.WorkloadField -> p.workload.label
+    provenance.WorkloadField ->
+      case p.workload.label {
+        "" -> "not stated"
+        label -> label
+      }
     provenance.Warmup ->
       case p.workload.warmup_ms {
         Some(ms) -> fmt.duration_ms(ms)
@@ -227,7 +235,11 @@ fn field_value(field: Field, p: Provenance) -> String {
           "every " <> fmt.duration_ms(interval_ms)
       }
     provenance.Role -> p.target.role
-    provenance.BuildField -> p.build.application <> " " <> p.build.revision
+    provenance.BuildField ->
+      case p.build.application == provenance.unstated {
+        True -> "not stated"
+        False -> p.build.application <> " " <> p.build.revision
+      }
   }
 }
 
@@ -258,6 +270,11 @@ pub fn verdict_text(comparability: Comparability) -> String {
     provenance.blocking_fields(comparability)
     |> list.map(provenance.field_name)
 
+  let unstated =
+    comparability.fields
+    |> list.filter(fn(entry) { entry.1 == provenance.NotRecorded })
+    |> list.map(fn(entry) { provenance.field_name(entry.0) })
+
   let expected =
     comparability.fields
     |> list.filter(fn(entry) { entry.1 == provenance.DiffersExpected })
@@ -279,13 +296,26 @@ pub fn verdict_text(comparability: Comparability) -> String {
       <> verb(list.length(blocking), " differs.", " differ.")
   }
 
-  case expected {
+  let sentence = case expected {
     [] -> sentence
     _ ->
       sentence
       <> " The "
       <> string.join(expected, ", ")
       <> " difference is expected."
+  }
+
+  // A field neither capture states is not a match. Its absence does not
+  // withhold a direction, since a viewer's own captures state neither, but
+  // the page says that the direction does not show the same work ran.
+  case unstated {
+    [] -> sentence
+    _ ->
+      sentence
+      <> " Not stated by either capture: "
+      <> string.join(unstated, ", ")
+      <> ". A direction here does not show that the same "
+      <> "work ran."
   }
 }
 

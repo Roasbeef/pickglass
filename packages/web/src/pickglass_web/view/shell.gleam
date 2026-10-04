@@ -49,7 +49,9 @@ pub fn view(
 fn self_strip(strip: StripModel, links: Links) -> Element(msg) {
   html.div([attribute.class("strip")], [
     html.span([attribute.class("brand")], [element.text("pickglass")]),
-    html.span([attribute.class("node")], [element.text(strip.node)]),
+    html.span([attribute.class("node"), attribute.title(strip.node)], [
+      element.text(strip.node),
+    ]),
     incarnation(strip),
     source_pill(strip),
     html.span([attribute.class("spacer")], []),
@@ -116,11 +118,11 @@ fn observer_meter(strip: StripModel) -> Element(msg) {
       html.span(
         [
           attribute.class("meter"),
-          attribute.title("observer effect: " <> observer.note),
+          attribute.title(observer.note),
         ],
         [
           html.span([attribute.class("meter-label")], [
-            element.text("observer cost"),
+            element.text("pass time / cadence"),
           ]),
           svg.svg([svg_util.view_box(60, 8), attribute.class("meter-bar")], [
             svg.rect([

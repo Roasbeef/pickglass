@@ -123,6 +123,10 @@ pub fn new(boot: BootId, target: Target) -> Gate {
   Gate(boot:, target:, pins: dict.new(), plans: plans.new())
 }
 
+/// The rate a stack probe asks for, in samples per second. The agent cuts it
+/// to what the number of targets allows.
+pub const sampling_hz = 50
+
 /// The estimate the operator is shown for a command, and the one
 /// `policy.confirm` recomputes to detect a plan whose scope moved. It is the
 /// viewer's own bound: the agent has no estimate request. A counters probe
@@ -136,6 +140,24 @@ pub fn new(boot: BootId, target: Target) -> Gate {
 /// ```
 pub fn estimate_for(command: Command) -> Estimate {
   case command {
+    policy.StartProbe(spec: policy.ProbeSpec(kind: policy.Sampling, ..) as spec) -> {
+      // A stack probe takes one sample per target per tick of its rate, so
+      // its bound is the rate times the duration, and nothing like the
+      // thousand events a second a tracing probe is budgeted for.
+      let seconds = int.max(1, spec.duration_ms / 1000)
+      let samples =
+        int.min(
+          200_000,
+          sampling_hz * seconds * int.max(1, list.length(spec.targets)),
+        )
+
+      policy.Estimate(
+        events_low: 0,
+        events_high: samples,
+        bytes_high: samples * 128,
+        wall_ms: spec.duration_ms,
+      )
+    }
     policy.StartProbe(spec:) -> {
       let seconds = int.max(1, spec.duration_ms / 1000)
       let targets = list.length(spec.targets)

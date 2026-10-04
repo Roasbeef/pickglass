@@ -29,6 +29,7 @@ import gleam/option.{type Option, None, Some}
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
+import pickglass_core/measure
 import pickglass_core/owner
 import pickglass_core/policy.{type Capability}
 import pickglass_web/chart/spark
@@ -79,7 +80,7 @@ fn header(data: ProcessDetailModel, grants: List(Capability)) -> Element(Msg) {
     html.div([attribute.class("detail-title")], [
       html.h2([attribute.class("mono")], [element.text(data.pid_text)]),
       html.span([attribute.class("muted")], [
-        element.text("birth seq " <> data.birth),
+        element.text(data.birth),
       ]),
       life,
       pin,
@@ -262,15 +263,22 @@ fn counter_list(title: String, counters: List(Counter)) -> Element(Msg) {
     html.dl(
       [attribute.class("kv")],
       list.flat_map(counters, fn(counter) {
-        let value_class = case fmt.is_word(counter.value) {
-          fmt.Number -> "num"
-          fmt.Word -> "num word"
+        let value_class = case counter.value, counter.inapplicable {
+          measure.NotApplicable, word if word != "" -> "num"
+          _, _ ->
+            case fmt.is_word(counter.value) {
+              fmt.Number -> "num"
+              fmt.Word -> "num word"
+            }
         }
 
         [
           html.dt([], [element.text(counter.label)]),
           html.dd([attribute.class(value_class)], [
-            element.text(fmt.cell(counter.value, counter.unit)),
+            element.text(case counter.value, counter.inapplicable {
+              measure.NotApplicable, word if word != "" -> word
+              _, _ -> fmt.cell(counter.value, counter.unit)
+            }),
           ]),
         ]
       }),

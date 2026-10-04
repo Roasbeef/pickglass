@@ -58,15 +58,15 @@ pub fn utilisation_is_the_change_between_passes_and_the_first_has_none_test() {
 
   // Active time rises by 200 over a total rise of 400 on scheduler 1 and
   // 100 over 400 on scheduler 2: 300 of 800.
-  assert second.value == Known(3750)
+  assert second.value == Known(375_000)
 }
 
-pub fn the_run_queue_is_a_track_of_words_not_numbers_test() {
+pub fn the_run_queue_is_a_track_of_not_collected_words_test() {
   let assert Ok(page) = timeline_build.build(ring(), [], [], 2000, 6000)
   let assert model.CounterTrack(steps:, ..) = track(page, "run queue")
 
   assert list.all(steps, fn(step) {
-    step.value == Missing(measure.UnsupportedOnRuntime)
+    step.value == Missing(measure.NotCollected)
   })
 }
 

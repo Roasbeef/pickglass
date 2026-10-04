@@ -63,7 +63,7 @@ fn omitted_note(omitted: Int) -> Element(Msg) {
 fn node(item: SupNode, links: Links, depth: Int) -> Element(Msg) {
   let kind = case item.kind {
     model.Supervisor -> ui.badge("sup", "supervisor")
-    model.Worker -> ui.badge("worker", "worker")
+    model.Leaf -> ui.badge("worker", "leaf")
     model.UnknownKind -> ui.badge("muted", "kind unknown")
   }
 

@@ -42,7 +42,6 @@ import pickglass_core/analysis/top
 import pickglass_core/analysis/transform.{type StepReport}
 import pickglass_core/layout/dag
 import pickglass_core/layout/flame
-import pickglass_core/measure
 import pickglass_core/profile
 import pickglass_core/unit.{type Unit}
 import pickglass_web/chart/call_graph
@@ -60,8 +59,9 @@ pub const max_table_rows: Int = 100
 
 /// The total of the profile's column before any step of the chain.
 ///
-/// This is the one number the header's coverage and the chain's root chip
-/// both read. For sampled stacks it is the number of samples collected.
+/// This is the number the chain's root chip reads. For sampled stacks it is
+/// the number of samples collected, which the host also puts in the header's
+/// coverage as the achieved count.
 ///
 /// ## Examples
 ///
@@ -182,13 +182,28 @@ fn header(data: ProfileModel) -> Element(Msg) {
         export_button("Chrome trace", msg.AsChromeTrace),
       ]),
     ]),
-    ui.meta(achieved_from_profile(data)),
+    ui.meta(data.header.info),
     html.ul(
       [attribute.class("caveats")],
       list.map(h.caveats, fn(text) { html.li([], [element.text(text)]) }),
     ),
     export_notes(data.exports),
   ])
+}
+
+// The losses of an export as one sentence. Each loss is already a sentence
+// that ends in a period, so joining them with "; " and adding another period
+// gives ".;" and "..". Each is cut back to its words and the whole ends once.
+fn loss_text(losses: List(String)) -> String {
+  let words =
+    list.map(losses, fn(loss) {
+      case string.ends_with(loss, ".") {
+        True -> string.drop_end(loss, 1)
+        False -> loss
+      }
+    })
+
+  string.join(words, "; ") <> "."
 }
 
 // Each export the operator asked for is either a one-time link, with what
@@ -213,9 +228,7 @@ fn export_notes(notes: List(model.ExportNote)) -> Element(Msg) {
                   [element.text(label <> " (one download)")],
                 ),
                 html.span([attribute.class("muted")], [
-                  element.text(
-                    " does not carry: " <> string.join(losses, "; ") <> ".",
-                  ),
+                  element.text(" does not carry: " <> loss_text(losses)),
                 ]),
               ])
             model.ExportRefused(label:, reason:) ->
@@ -226,23 +239,6 @@ fn export_notes(notes: List(model.ExportNote)) -> Element(Msg) {
           }
         }),
       )
-  }
-}
-
-// For sampled stacks the number of samples collected is the profile's own
-// total, so the coverage segment is written from `root_total` and a host
-// that reports a different count cannot show two figures on one page.
-fn achieved_from_profile(data: ProfileModel) -> model.PanelInfo {
-  let info = data.header.info
-
-  case data.header.source {
-    profile.SampledStacks(..) ->
-      model.PanelInfo(
-        ..info,
-        coverage: measure.Coverage(..info.coverage, achieved: root_total(data)),
-      )
-    profile.TracedCalls | profile.TracedCounters | profile.AllocationCounts ->
-      info
   }
 }
 
@@ -506,7 +502,7 @@ fn tab_bar(data: ProfileModel, ui_state: UiState) -> Element(Msg) {
   html.div(
     [attribute.class("tabs"), attribute.role("tablist")],
     list.map(tabs, fn(tab) {
-      let class = case tab.1 == ui_state.tab {
+      let class = case tab.1 == open_tab(data, ui_state) {
         True -> "tab tab-active"
         False -> "tab"
       }
@@ -524,39 +520,41 @@ fn tab_bar(data: ProfileModel, ui_state: UiState) -> Element(Msg) {
   )
 }
 
-fn tab_body(data: ProfileModel, ui_state: UiState, u: Unit) -> Element(Msg) {
+// The tab that is open. A profile with no stacks lists only Top and Source,
+// but the page starts on the flame tab, so a request for a tab the profile
+// does not list opens Top, the first tab that is listed.
+fn open_tab(data: ProfileModel, ui_state: UiState) -> msg.ProfileTab {
   case data.stacks, ui_state.tab {
+    model.NoStacks(..), msg.FlameTab
+    | model.NoStacks(..), msg.IcicleTab
+    | model.NoStacks(..), msg.GraphTab
+    | model.NoStacks(..), msg.PeekTab
+    -> msg.TopTab
+    _, tab -> tab
+  }
+}
+
+fn tab_body(data: ProfileModel, ui_state: UiState, u: Unit) -> Element(Msg) {
+  case data.stacks, open_tab(data, ui_state) {
     model.HasStacks(layout:, ..), msg.FlameTab ->
       flame_tab(data, layout, flame_chart.RootBelow, ui_state, u)
     model.HasStacks(layout:, ..), msg.IcicleTab ->
       flame_tab(data, layout, flame_chart.RootAbove, ui_state, u)
     model.HasStacks(graph: g, dag: placed, ..), msg.GraphTab ->
       graph_tab(data, g, placed, ui_state, u)
-    model.HasStacks(graph: g, peeks:, dag: placed, ..), msg.PeekTab ->
-      peek_tab(data, g, peeks, placed, ui_state, u)
-    model.NoStacks(source:), msg.PeekTab
-    | model.NoStacks(source:), msg.FlameTab
-    | model.NoStacks(source:), msg.IcicleTab
-    | model.NoStacks(source:), msg.GraphTab
-    -> no_stacks(source)
+    model.HasStacks(graph: g, peeks:, ..), msg.PeekTab ->
+      peek_tab(data, g, peeks, ui_state, u)
     _, msg.SourceTab -> source_tab(data, u)
-    _, msg.TopTab -> top_tab(data, ui_state, u)
-  }
-}
 
-fn no_stacks(source: profile.Source) -> Element(Msg) {
-  html.div([attribute.class("refusal")], [
-    html.h3([], [element.text("No call stacks in this source")]),
-    html.p([], [
-      element.text(
-        "A profile from "
-        <> source_text(source)
-        <> " records totals per function, not stacks, so a flame graph, "
-        <> "icicle or call graph would have nothing to draw. Top and Source "
-        <> "are available.",
-      ),
-    ]),
-  ])
+    // `open_tab` has already turned a stack tab on a profile without stacks
+    // into Top; these arms say the same for the compiler.
+    model.NoStacks(..), msg.FlameTab
+    | model.NoStacks(..), msg.IcicleTab
+    | model.NoStacks(..), msg.GraphTab
+    | model.NoStacks(..), msg.PeekTab
+    | _, msg.TopTab
+    -> top_tab(data, ui_state, u)
+  }
 }
 
 // ------------------------------------------------------------ flame
@@ -740,6 +738,7 @@ fn graph_tab(
   let name_of = fn(id) { profile.name_of(profile_data, id) }
 
   html.div([], [
+    single_path_note(g, u),
     html.div([attribute.class("graph-frame scroll")], [
       call_graph.view(
         layout: placed,
@@ -767,6 +766,27 @@ fn graph_tab(
       <> "2% of the total.",
     ),
   ])
+}
+
+// When every sample took the same path, each box reads 100% and four red
+// boxes look like four hot spots. Said once above the graph, it reads as
+// one stack that was always there.
+fn single_path_note(g: graph.Graph, u: Unit) -> Element(Msg) {
+  let callers = list.map(g.edges, fn(edge) { edge.from })
+  let callees = list.map(g.edges, fn(edge) { edge.to })
+  let one_each =
+    list.unique(callers) == callers && list.unique(callees) == callees
+
+  case g.edges, one_each {
+    [_, ..], True ->
+      ui.note(
+        "One call path: every sample ("
+        <> fmt.known(g.total, u)
+        <> ") passed through all of these functions, so each is at 100% "
+        <> "cumulative.",
+      )
+    _, _ -> element.none()
+  }
 }
 
 // The persistent line for the Graph tab, the counterpart of the flame's: the
@@ -813,25 +833,28 @@ fn peek_tab(
   data: ProfileModel,
   g: graph.Graph,
   peeks: List(peek.Peek),
-  placed: dag.Layout,
   ui_state: UiState,
   u: Unit,
 ) -> Element(Msg) {
   let profile_data = data.profile
   let name_of = fn(id) { profile.name_of(profile_data, id) }
 
-  let chosen =
-    list.find(placed.nodes, fn(node) {
-      Some(call_graph.node_key(node.function)) == ui_state.selected
-    })
-    |> result.try(fn(node) {
-      list.find(peeks, fn(entry) { entry.function == node.function })
-    })
+  // One selection serves every tab: a box in Flame or Icicle, a node in
+  // Graph or a row in Top all name a function, and Peek lists that
+  // function's callers and callees.
+  let chosen = case ui_state.selected {
+    Some(selected) ->
+      function_at(data, selected)
+      |> result.try(fn(id) {
+        list.find(peeks, fn(entry) { entry.function == id })
+      })
+    None -> Error(Nil)
+  }
 
   case chosen {
     Error(Nil) ->
       ui.note(
-        "Select a node in the Graph tab or a row in Top to see its callers and callees.",
+        "Select a box in Flame or Icicle, a node in Graph or a row in Top to see its callers and callees.",
       )
     Ok(entry) ->
       html.div([attribute.class("grid two")], [
@@ -917,6 +940,51 @@ fn top_tab(data: ProfileModel, ui_state: UiState, u: Unit) -> Element(Msg) {
   let table = data.top
   let total = result.unwrap(list.first(list.drop(table.totals, index)), 0)
   let shown = list.take(table.rows, max_table_rows)
+
+  case table.rows {
+    [] -> nothing_measured(data)
+    [_, ..] -> top_table(data, ui_state, u, index, total, shown)
+  }
+}
+
+// The Top tab of a profile with no function in it. The honest sentence says
+// what was asked and that nothing answered: a counters probe that matched
+// functions and saw no call is a result, not a refusal to draw.
+fn nothing_measured(data: ProfileModel) -> Element(Msg) {
+  let info = data.header.info
+  let matched = fmt.count(info.coverage.requested)
+  let span = case info.took_ms {
+    Some(ms) -> " in " <> fmt.duration_ms(ms)
+    None -> ""
+  }
+
+  html.div([attribute.class("refusal")], [
+    html.h3([], [element.text("Nothing was measured")]),
+    html.p([], [
+      element.text(case data.header.source {
+        profile.SampledStacks(..) -> "The probe took no samples" <> span <> "."
+        profile.TracedCounters
+        | profile.TracedCalls
+        | profile.AllocationCounts ->
+          "No calls to the "
+          <> matched
+          <> " matched functions"
+          <> span
+          <> ". A function nobody called has no row."
+      }),
+    ]),
+  ])
+}
+
+fn top_table(
+  data: ProfileModel,
+  ui_state: UiState,
+  u: Unit,
+  index: Int,
+  total: Int,
+  shown: List(top.Row),
+) -> Element(Msg) {
+  let table = data.top
 
   html.div([], [
     html.table([attribute.class("tbl top")], [

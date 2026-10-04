@@ -3,8 +3,11 @@
 import fixture
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import harness
+import lustre/element
 import pickglass/feeds
+import pickglass/gate
 import pickglass/marks
 import pickglass/observation.{Observation}
 import pickglass/os_reader
@@ -19,6 +22,8 @@ import pickglass_core/profile
 import pickglass_core/wire
 import pickglass_web/model
 import pickglass_web/msg
+import pickglass_web/state
+import pickglass_web/view/profile as profile_view
 
 fn page() -> seam.Page {
   seam.Page(
@@ -612,4 +617,393 @@ pub fn there_is_no_rate_from_a_single_pass_test() {
 
   assert page.rate_ms == None
   assert reductions_of(page, "<0.10.0>") == Missing(measure.NotInBothPasses)
+}
+
+// ------------------------------------------------- critique two: owner deltas
+
+// What the agent's owners reply carries for the owners it listed: each
+// owner's heap words over every process the walk scanned. `listed` of
+// `tracked` says how many owners it named.
+fn with_aggregates(
+  observation: observation.Observation,
+  session_words: Int,
+  tracked: Int,
+  listed: Int,
+) -> observation.Observation {
+  let total = fn(owner, words) {
+    wire.OwnerHeapTotal(
+      total: wire.OwnerTotal(
+        owner:,
+        processes: 100,
+        memory: words * 8,
+        queue_length: 0,
+        reductions: 0,
+      ),
+      total_heap_words: words,
+    )
+  }
+  let session = fixture.labelled("session", "s1", "worker")
+
+  Observation(
+    ..observation,
+    totals: Ok(wire.CensusTotals(
+      500,
+      0,
+      0,
+      0,
+      session_words + 700,
+      tracked,
+      listed,
+    )),
+    owner_heaps: Ok(case session_words {
+      0 -> [total(wire.Unlabelled, 700)]
+      _ -> [total(session, session_words), total(wire.Unlabelled, 700)]
+    }),
+  )
+}
+
+// On a node with more processes than the census lists, the rows alone cannot
+// give a change, but the per-owner aggregates cover every scanned process.
+pub fn an_owner_change_comes_from_the_aggregates_on_a_large_node_test() {
+  let before =
+    with_aggregates(top_rows_only(growing(0, 1000, 16_000)), 1000, 2, 2)
+  let after =
+    with_aggregates(top_rows_only(growing(1, 3000, 48_000)), 3000, 2, 2)
+
+  // Words times the node's eight bytes, not the listed rows' capacity.
+  assert session_delta(after, before) == Known({ 3000 - 1000 } * 8)
+}
+
+pub fn an_owner_absent_from_a_complete_listing_was_not_there_test() {
+  let before = with_aggregates(top_rows_only(growing(0, 1000, 16_000)), 0, 1, 1)
+  let after =
+    with_aggregates(top_rows_only(growing(1, 3000, 48_000)), 3000, 2, 2)
+
+  assert session_delta(after, before) == Known(3000 * 8)
+}
+
+// The agent lists its largest owners only. An owner the baseline does not
+// list may have been below its cut.
+pub fn an_owner_absent_from_a_cut_listing_has_no_baseline_test() {
+  let before =
+    with_aggregates(top_rows_only(growing(0, 1000, 16_000)), 0, 400, 100)
+  let after =
+    with_aggregates(top_rows_only(growing(1, 3000, 48_000)), 3000, 2, 2)
+
+  assert session_delta(after, before) == Missing(measure.BudgetExhausted)
+}
+
+// A walk that stopped at its scan budget summed part of the node, so the
+// aggregates are not a basis for a change either.
+pub fn a_walk_that_stopped_early_still_says_budget_exhausted_test() {
+  let stopped = fn(observation: observation.Observation) {
+    let assert Ok(census) = observation.census
+
+    Observation(
+      ..observation,
+      census: Ok(
+        wire.CensusSnapshot(
+          ..census,
+          coverage: wire.CensusCoverage(
+            ..census.coverage,
+            stop: wire.ScanBudgetReached,
+          ),
+        ),
+      ),
+    )
+  }
+  let before =
+    with_aggregates(top_rows_only(growing(0, 1000, 16_000)), 1000, 2, 2)
+  let after =
+    stopped(with_aggregates(top_rows_only(growing(1, 3000, 48_000)), 3000, 2, 2))
+
+  assert session_delta(after, before) == Missing(measure.BudgetExhausted)
+}
+
+// ------------------------------------------------- critique two: title bar
+
+fn processes_info(found: List(msg.Feed)) -> model.PanelInfo {
+  let assert Ok(info) =
+    list.find_map(found, fn(feed) {
+      case feed {
+        msg.FedProcesses(data) -> Ok(data.info)
+        _ -> Error(Nil)
+      }
+    })
+
+  info
+}
+
+// The achieved interval is the gap between the starts of the two newest
+// passes, and how long the census took is a separate figure.
+pub fn the_title_bar_separates_the_gap_between_passes_from_the_pass_cost_test() {
+  let info =
+    processes_info(feeds.feeds_for(
+      feeds.Processes,
+      inputs([fixture.observation(1, 5500), fixture.observation(0, 3000)]),
+    ))
+
+  assert info.achieved_ms == Some(2500)
+  assert info.took_ms == Some(3)
+
+  let first =
+    processes_info(feeds.feeds_for(
+      feeds.Processes,
+      inputs([fixture.observation(0, 3000)]),
+    ))
+
+  assert first.achieved_ms == None
+}
+
+pub fn the_banner_is_one_short_sentence_per_fact_test() {
+  let found =
+    feeds.feeds_for(feeds.Overview, inputs([fixture.observation(1, 3000)]))
+  let assert Ok(strip) =
+    list.find_map(found, fn(feed) {
+      case feed {
+        msg.FedStrip(data) -> Ok(data)
+        _ -> Error(Nil)
+      }
+    })
+
+  assert string.length(strip.banner.source_line) < 150
+  assert string.contains(strip.banner.source_line, "full code-execution")
+  assert string.contains(strip.observer.note, "target CPU is not measured")
+}
+
+// ------------------------------------------------- critique two: profile
+
+fn stacks_snapshot(samples: Int) -> wire.StacksSnapshot {
+  wire.StacksSnapshot(
+    probe_id: 3,
+    state: wire.ProbeFinished,
+    stop: wire.SamplingDeadline,
+    meter: wire.SamplerMeter(
+      requested_hz: 50,
+      achieved_millihz: 49_000,
+      rounds: samples,
+      samples:,
+      elapsed_ms: 10_000,
+      depth_limit: 8,
+      at_depth_limit: 0,
+      targets_gone: 0,
+      dropped_samples: 0,
+      distinct_stacks: 1,
+      truncated_samples: 0,
+    ),
+    frames: [
+      wire.StackFrame("loom@runtime", "leaf", 1, wire.NoLocation),
+    ],
+    stacks: [wire.SampledStack(samples, "running", [0])],
+  )
+}
+
+// A stack probe covers samples against the rate it asked for over its
+// duration, and not a count of matched functions.
+pub fn a_stacks_profile_covers_samples_against_the_requested_rate_test() {
+  let probe =
+    probe_book.finish_stacks(
+      probe_book.started(3, policy.Sampling, ["*"], 1000, 10_000, 1),
+      stacks_snapshot(500),
+      12_000,
+    )
+  let assert Ok(data) =
+    profile_of(feeds.feeds_for(
+      feeds.Profile,
+      feeds.Inputs(..inputs([]), probes: [probe]),
+    ))
+  let coverage = data.header.info.coverage
+
+  assert coverage.scope == "samples"
+  assert coverage.requested == 500
+  assert coverage.achieved == 500
+  assert data.header.info.cadence == measure.OneShot
+  assert data.header.info.achieved_ms == None
+  assert string.contains(data.header.title, "all modules")
+}
+
+fn silent_counters(matched: Int) -> probe_book.ProbeRecord {
+  probe_book.finish_counters(
+    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, matched),
+    wire.CountersSnapshot(
+      probe_id: 9,
+      state: wire.ProbeFinished,
+      matched_functions: matched,
+      elapsed_ms: 30_200,
+      functions: matched,
+      with_calls: 0,
+      invalidated: 0,
+      rows: [],
+    ),
+    31_000,
+  )
+}
+
+// A counters probe whose functions were never called is a result: the page
+// opens on Top and says so, and does not tell the operator that call stacks
+// are missing from a source that never had any.
+pub fn a_counters_profile_with_no_calls_says_nothing_was_called_test() {
+  let assert Ok(data) =
+    profile_of(feeds.feeds_for(
+      feeds.Profile,
+      feeds.Inputs(..inputs([]), probes: [silent_counters(144)]),
+    ))
+  let html = element.to_string(profile_view.view(data, state.initial()))
+
+  assert data.header.info.coverage.requested == 144
+  assert data.header.info.coverage.achieved == 0
+  assert string.contains(html, "No calls to the 144 matched functions")
+  assert !string.contains(html, "No call stacks in this source")
+}
+
+// ------------------------------------------------- critique two: plans
+
+pub fn a_stack_probe_plan_is_bounded_by_its_rate_not_by_a_thousand_a_second_test() {
+  let spec =
+    policy.ProbeSpec(
+      kind: policy.Sampling,
+      targets: [fixture.pin_token(1)],
+      modules: [],
+      duration_ms: 10_000,
+    )
+  let estimate = gate.estimate_for(policy.StartProbe(spec))
+
+  assert estimate.events_high == 500
+
+  let tracing =
+    gate.estimate_for(policy.StartProbe(
+      policy.ProbeSpec(..spec, kind: policy.CallTree),
+    ))
+
+  assert tracing.events_high == 10_000
+}
+
+// ------------------------------------------------- critique two: memory
+
+fn carriers_observation() -> observation.Observation {
+  Observation(
+    ..fixture.observation(1, 3000),
+    system: Ok(wire.SystemSnapshot(
+      wire.NodeFacts(
+        uptime_ms: 60_000,
+        creation: 3,
+        emulator_flavor: "jit",
+        emulator_type: "opt",
+        erts_version: "17.0.5",
+        otp_release: "29",
+        schedulers: 8,
+        schedulers_online: 8,
+        dirty_cpu: 8,
+        dirty_cpu_online: 8,
+        dirty_io: 10,
+        word_size: 8,
+      ),
+      wire.CarriersRead([
+        wire.CarrierRow(
+          "ll_alloc",
+          wire.NotInCarrierPool,
+          4,
+          1_500_000,
+          900_000,
+          0,
+        ),
+        wire.CarrierRow(
+          "binary_alloc",
+          wire.NotInCarrierPool,
+          2,
+          500_000,
+          400_000,
+          0,
+        ),
+      ]),
+    )),
+  )
+}
+
+// The question "capacity or native" is two differences: carriers beyond what
+// the VM counts, and the resident set beyond the carriers.
+pub fn the_layers_derive_the_two_gaps_between_the_vm_the_allocators_and_the_os_test() {
+  let page =
+    overview_of(feeds.feeds_for(
+      feeds.Overview,
+      inputs([with_os(carriers_observation())]),
+    ))
+  let vm = 1_001_000
+  let carriers = 2_000_000
+
+  assert row(page, "allocator carriers").value == Known(carriers)
+  assert row(page, "carriers beyond erlang:memory").value
+    == Known(carriers - vm)
+  assert row(page, "resident set beyond carriers").value
+    == Known(900_000 - carriers)
+  assert row(page, "carriers beyond erlang:memory").derivation != model.Measured
+}
+
+// A pass that has not read the node yet has no carriers, and the two gaps
+// then say so in words rather than showing a difference with an unknown end.
+pub fn the_gaps_are_words_until_the_carriers_are_read_test() {
+  let page =
+    overview_of(feeds.feeds_for(
+      feeds.Overview,
+      inputs([with_os(fixture.observation(1, 3000))]),
+    ))
+
+  assert row(page, "allocator carriers").value == Missing(measure.NotCollected)
+  assert row(page, "carriers beyond erlang:memory").value
+    == Missing(measure.NotCollected)
+}
+
+pub fn the_memory_categories_nest_under_the_total_and_system_test() {
+  let page =
+    overview_of(feeds.feeds_for(
+      feeds.Overview,
+      inputs([with_os(fixture.observation(1, 3000))]),
+    ))
+
+  assert row(page, "erlang:memory total").depth == 0
+  assert row(page, "system").depth == 1
+}
+
+// ------------------------------------------------- critique two: detail
+
+pub fn a_zero_max_heap_is_no_limit_not_a_missing_reading_test() {
+  let inputs =
+    feeds.Inputs(
+      ..inputs([with_os(fixture.observation(1, 3000))]),
+      subject: Some(feeds.row_key("<0.10.0>")),
+      pins: [seam.PinCard("pin-x", "<0.10.0>", seam.PinLive, 1)],
+      detail: Some(
+        Ok(
+          wire.ProcessDetail(
+            pid_text: "<0.10.0>",
+            sizes: wire.ProcessSizes(5000, 4096, 2048, 64),
+            activity: wire.ProcessActivity(
+              2,
+              900,
+              "waiting",
+              "m:f/1",
+              "erlang:apply/2",
+              "",
+            ),
+            gc: wire.ProcessGc(7, 65_535, 1864, 0, 4096, 0, 0, 0, 0),
+            relations: wire.ProcessRelations(2, 1, 3, "<0.49.0>"),
+            owner: wire.Unlabelled,
+            capabilities: [],
+          ),
+        ),
+      ),
+    )
+  let assert Ok(data) =
+    list.find_map(feeds.feeds_for(feeds.ProcessDetail, inputs), fn(feed) {
+      case feed {
+        msg.FedProcessDetail(data) -> Ok(data)
+        _ -> Error(Nil)
+      }
+    })
+  let assert Ok(max_heap) =
+    list.find(data.gc, fn(counter) { counter.label == "max heap" })
+
+  assert max_heap.inapplicable == "no limit"
+  assert data.birth == "initial call erlang:apply/2, spawned by <0.49.0>"
+  assert data.info.coverage.scope == "passes"
 }

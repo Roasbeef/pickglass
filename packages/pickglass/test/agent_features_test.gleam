@@ -402,7 +402,7 @@ pub fn a_process_the_census_does_not_list_has_no_detail_page_test() {
 }
 
 fn info() -> model.PanelInfo {
-  panel.info(panel.Facts("x", "y", 0, "z", 1, 1, measure.Complete, 0))
+  panel.info(panel.Facts("x", "y", 0, "z", 1, 1, measure.Complete, None, None))
 }
 
 pub fn the_spawn_tree_has_roots_for_parents_outside_the_walk_test() {
@@ -417,7 +417,7 @@ pub fn the_spawn_tree_has_roots_for_parents_outside_the_walk_test() {
   assert list.map(first.children, fn(node) { node.label })
     == ["<0.2.0>", "<0.3.0>"]
   assert list.map(first.children, fn(node) { node.kind })
-    == [model.Worker, model.Worker]
+    == [model.Leaf, model.Leaf]
   assert page.omitted == 0
   assert page.caveat == supervision_build.caveat
 }
@@ -579,7 +579,8 @@ pub fn the_memory_page_lists_allocator_carriers_or_says_why_not_test() {
 
   assert row.label == "binary_alloc"
   assert row.value == Known(1_000_000)
-  assert string.contains(row.note, "4 carriers, 600000 bytes used")
+  assert row.used == Known(600_000)
+  assert string.contains(row.note, "4 carriers")
 
   let refused =
     panel(wire.CarriersUnavailable("the instrument module is missing"))
@@ -655,5 +656,5 @@ pub fn a_supervisor_is_recognised_by_its_initial_call_or_its_name_test() {
 
   assert root.kind == model.Supervisor
   assert list.map(root.children, fn(node) { node.kind })
-    == [model.Supervisor, model.Worker]
+    == [model.Supervisor, model.Leaf]
 }

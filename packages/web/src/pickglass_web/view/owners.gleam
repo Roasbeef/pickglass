@@ -77,16 +77,22 @@ pub fn view(
         group_row(row, ui_state),
       )
 
-      let children = case set.contains(ui_state.expanded, row.key) {
-        True ->
-          list.map(row.members, fn(member) {
-            #(
-              key.to_string(row.key) <> "/" <> key.to_string(member.key),
-              member_row(member, links),
-            )
-          })
-        False -> []
+      // An open row shows every member. The unknown row shows its largest
+      // few even when closed, because a page that says only "nobody claimed
+      // this memory" leaves the operator a click away from the processes
+      // that hold it.
+      let shown = case set.contains(ui_state.expanded, row.key), row.kind {
+        True, _ -> row.members
+        False, model.UnknownGroup -> largest(row.members, unknown_preview)
+        False, model.OwnerGroup | False, model.RoleGroup -> []
       }
+      let children =
+        list.map(shown, fn(member) {
+          #(
+            key.to_string(row.key) <> "/" <> key.to_string(member.key),
+            member_row(member, links),
+          )
+        })
 
       [heading, ..children]
     })
@@ -106,11 +112,30 @@ pub fn view(
         <> "Δ is the difference of the row's heap capacity between the "
         <> "chosen checkpoint and now, taken over the row's whole group, so "
         <> "it includes processes that started or exited in between and the "
-        <> "rows beneath a group need not add to it.",
+        <> "rows beneath a group need not add to it. The unknown row lists "
+        <> "its five largest processes; open it for the rest.",
       ),
       ui.note(labelled_text(data.labelled)),
     ],
   )
+}
+
+// The most members listed under the unknown row while it is closed.
+const unknown_preview: Int = 5
+
+// The `count` members with the most heap capacity. A member whose capacity
+// was not read has no size to rank by and comes last.
+fn largest(members: List(ProcRow), count: Int) -> List(ProcRow) {
+  members
+  |> list.sort(fn(a, b) { int.compare(heap_of(b), heap_of(a)) })
+  |> list.take(count)
+}
+
+fn heap_of(member: ProcRow) -> Int {
+  case member.heap_cap {
+    measure.Known(value:) -> value
+    measure.Missing(_) | measure.NotApplicable -> -1
+  }
 }
 
 fn labelled_text(counts: #(Int, Int)) -> String {

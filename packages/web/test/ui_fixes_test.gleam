@@ -452,13 +452,38 @@ pub fn fmt_total_scales_and_marks_a_lower_bound_test() {
 
 // ------------------------------------------------------------ timeline
 
-pub fn each_counter_track_prints_its_peak_at_the_right_edge_test() {
+pub fn each_counter_track_prints_its_scale_at_the_right_edge_test() {
   let html = support.html_of(page.Timeline)
 
+  // A ratio is drawn as bars from zero and prints its peak. A level is
+  // drawn as a line between its smallest and largest reading and prints the
+  // range, because bars from zero hide a small rise in a large level.
   support.count(html, "peak-label") |> should.equal(3)
+  support.count(html, "step-line") |> should.equal(2)
   string.contains(html, "peak 7.8%") |> should.be_true
-  string.contains(html, "peak 3") |> should.be_true
-  string.contains(html, "peak 181 MiB") |> should.be_true
+  string.contains(html, ">0-3<") |> should.be_true
+  string.contains(html, "-181 MiB<") |> should.be_true
+}
+
+pub fn a_level_track_prints_its_range_in_one_unit_test() {
+  let steps = fn(values) {
+    list.map(values, fn(value) {
+      model.Step(at_ms: 0, width_ms: 10, value: measure.Known(value))
+    })
+  }
+  let mib = 1_048_576
+
+  timeline_chart.range_text(steps([57 * mib, 58 * mib]), unit.Bytes)
+  |> should.equal("57.0-58.0 MiB")
+  timeline_chart.range_text(steps([57 * mib, 57 * mib]), unit.Bytes)
+  |> should.equal("all 57.0 MiB")
+  timeline_chart.range_text([], unit.Bytes) |> should.equal("no reading")
+}
+
+pub fn a_ratio_below_the_first_decimal_is_not_written_as_zero_test() {
+  fmt.ratio(3, 10_000) |> should.equal("<0.1%")
+  fmt.ratio(0, 10_000) |> should.equal("0.0%")
+  fmt.ratio(30, 10_000) |> should.equal("0.3%")
 }
 
 pub fn a_track_with_no_reading_says_so_instead_of_a_peak_test() {
@@ -549,9 +574,10 @@ pub fn the_detail_page_offers_a_probe_and_a_way_back_to_the_owner_test() {
 
   string.contains(html, "Plan probe…") |> should.be_true
   string.contains(html, "href=\"owners.html\"") |> should.be_true
-  string.contains(html, "birth seq 18,204") |> should.be_true
+  string.contains(html, "initial call erlang:apply/2") |> should.be_true
+  string.contains(html, "birth seq initial call") |> should.be_false
   string.contains(html, "incarnation") |> should.be_true
-  string.contains(html, "observer cost") |> should.be_true
+  string.contains(html, "pass time / cadence") |> should.be_true
 
   let sim =
     support.simulation(on: page.ProcessDetail)

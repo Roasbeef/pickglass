@@ -1012,6 +1012,7 @@ fn observation_at(
         }),
         os: os_at(index, position),
         totals: Error(observation.totals_not_recorded),
+        owner_heaps: Error(observation.totals_not_recorded),
         system: Error(observation.system_skipped),
       ))
     _ -> Error("a pass needs three coverage records")

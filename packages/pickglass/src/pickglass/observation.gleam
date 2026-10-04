@@ -40,6 +40,11 @@ pub type Observation {
     /// Totals over every process the census scanned, listed or not. Not
     /// part of a capture.
     totals: Result(wire.CensusTotals, String),
+    /// The heap capacity of each owner the agent listed, over every process
+    /// the walk scanned and not only the processes listed as rows. An owner
+    /// change between two passes is computed from these when the walks
+    /// finished. Not part of a capture.
+    owner_heaps: Result(List(wire.OwnerHeapTotal), String),
     /// Node facts and allocator carriers. Read on the first pass and every
     /// `system_every` passes after, since the carrier walk is the most
     /// expensive thing the agent does for the viewer; `Error` on the others.
@@ -116,8 +121,16 @@ pub fn collect(
     Ok(wire.OwnersReport(snapshot)) -> Ok(snapshot)
     other -> Error(reason_of(other, "census"))
   }
+
+  // One owners reply feeds three readings of the pass: the census rows, the
+  // totals over every scanned process, and each owner's heap. They stand or
+  // fall together, so a failed reply is the same reason in all three.
   let census = result.map(owners, census_of)
   let totals = result.map(owners, fn(snapshot) { snapshot.totals })
+  let owner_heaps = result.map(owners, fn(snapshot) { snapshot.owners })
+
+  // The node's facts and carriers are the dearest read, so they are taken on
+  // the first pass and every `system_every` passes after.
   let system = case seq % system_every {
     0 ->
       case remote.ask(wire.Extended(wire.AskSystem), ask_deadline_ms) {
@@ -138,13 +151,15 @@ pub fn collect(
     scheduler:,
     os:,
     totals:,
+    owner_heaps:,
     system:,
   )
 }
 
 // The owners reply carries the census's own shape and, beside it, the heap
-// of each owner and the totals; the census view drops the heap, which
-// nothing downstream of the rows uses.
+// of each owner and the totals. The census view drops the heap, and the
+// pass keeps it separately as `owner_heaps`, so the rows stay the census's
+// own shape and a capture does not have to record the heap.
 fn census_of(snapshot: wire.OwnersSnapshot) -> wire.CensusSnapshot {
   wire.CensusSnapshot(
     coverage: snapshot.coverage,

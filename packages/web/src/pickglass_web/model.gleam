@@ -56,8 +56,14 @@ pub type PanelInfo {
     method: String,
     /// The interval that was asked for.
     cadence: Cadence,
-    /// The interval that was achieved, in milliseconds, when known.
+    /// The interval that was achieved, in milliseconds: the time between the
+    /// starts of the two newest collection passes. It is `None` for a panel
+    /// with no repeating pass, and for a view of one pass.
     achieved_ms: Option(Int),
+    /// How long taking this reading took, in milliseconds, when it was
+    /// timed. It is a cost and not an interval: a pass can take 77 ms and
+    /// still run every 2 s.
+    took_ms: Option(Int),
     /// How much of the requested scope the collection covered, and why it
     /// stopped. Truncation is read from its outcome.
     coverage: Coverage,
@@ -143,10 +149,14 @@ pub type CapabilityBanner {
   )
 }
 
-/// The cost pickglass itself imposes on the target, as a duty cycle.
+/// How long the newest collection pass took against the cadence it was asked
+/// to keep. This is the viewer's wall time for the whole pass, including
+/// distribution round trips and the viewer's own work, so it bounds how much
+/// of the cadence the collection occupies and says nothing about the target's
+/// CPU, which is not measured.
 pub type ObserverEffect {
   ObserverEffect(
-    /// Parts per ten thousand of one scheduler spent collecting.
+    /// Parts per ten thousand of the cadence the newest pass took.
     duty: Measurement,
     /// A short statement of what is included.
     note: String,
@@ -491,6 +501,9 @@ pub type Counter {
     unit: Unit,
     /// Its reading.
     value: Measurement,
+    /// What to write when the counter does not apply, such as `no limit` for
+    /// a heap that the VM does not cap. Empty writes the usual `n/a`.
+    inapplicable: String,
   )
 }
 
@@ -546,6 +559,10 @@ pub type CategoryRow {
     unit: Unit,
     /// Its reading.
     value: Measurement,
+    /// What an allocator row has in use out of `value`, which for an
+    /// allocator is the capacity of its carriers. `NotApplicable` for a row
+    /// that has no such split. The page derives the unused part from the two.
+    used: Measurement,
     /// Whether it may be added to the others or overlaps them.
     additivity: Additivity,
     /// What the category is.
@@ -572,8 +589,10 @@ pub type SupKind {
   /// A supervisor.
   Supervisor
 
-  /// A worker.
-  Worker
+  /// A process with no children whose kind was not read. It may be a
+  /// worker, or a supervisor that has nothing to supervise; the agent's
+  /// reading does not say which, so the page does not guess.
+  Leaf
 
   /// A process whose parent could be read but not its kind.
   UnknownKind
