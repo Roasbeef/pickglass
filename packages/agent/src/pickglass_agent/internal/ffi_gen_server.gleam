@@ -8,7 +8,28 @@
 //// that arrives goes through one `handle_info`, and anything it does not
 //// recognise is dropped.
 
+import pickglass_agent/internal/ffi_proc.{type SpawnOption}
 import pickglass_agent/internal/ffi_term.{type Atom, type Term}
+
+/// What a `handle_info` callback tells the gen_server to do next. The
+/// constructors are the tuples `gen_server` expects back: `{noreply, State}`
+/// and `{stop, Reason, State}`. Every module that runs a gen_server shares
+/// this type, so none of them declares its own copy.
+pub type Next(state) {
+  Noreply(state: state)
+  Stop(reason: ExitReason, state: state)
+}
+
+/// The exit reason of an orderly stop.
+pub type ExitReason {
+  Normal
+}
+
+/// An option for `gen_server:start/3`. `spawn_opt` hands the options to the
+/// process the VM creates, which is how a helper gets a heap cap.
+pub type StartOption {
+  SpawnOpt(options: List(SpawnOption))
+}
 
 /// The registration `gen_server:start/4` takes: `{local, Name}`.
 pub type ServerName {
@@ -43,4 +64,26 @@ fn start_server(
 /// ```
 pub fn start(module: Atom, args: Term) -> Term {
   start_server(Local(PickglassAgent), module, args, [])
+}
+
+@external(erlang, "gen_server", "start")
+fn start_anonymous(module: Atom, args: Term, options: List(StartOption)) -> Term
+
+/// Start an unregistered gen_server without linking it to the caller, so a
+/// crash in the helper reaches the caller as a monitor message and never as
+/// an exit signal. Returns `{ok, Pid}` or `{error, Reason}`.
+///
+/// ## Examples
+///
+/// ```gleam
+/// start_unlinked(ffi_term.atom("pickglass_agent@sampler"), args, [
+///   SpawnOpt([ffi_proc.heap_limit(4_000_000)]),
+/// ])
+/// ```
+pub fn start_unlinked(
+  module: Atom,
+  args: Term,
+  options: List(StartOption),
+) -> Term {
+  start_anonymous(module, args, options)
 }

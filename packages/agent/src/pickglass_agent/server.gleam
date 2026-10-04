@@ -40,7 +40,7 @@
 import pickglass_agent/census
 import pickglass_agent/counters.{type Probe}
 import pickglass_agent/internal/fallible
-import pickglass_agent/internal/ffi_gen_server
+import pickglass_agent/internal/ffi_gen_server.{type Next, Noreply, Normal, Stop}
 import pickglass_agent/internal/ffi_proc
 import pickglass_agent/internal/ffi_safe
 import pickglass_agent/internal/ffi_term.{
@@ -49,6 +49,7 @@ import pickglass_agent/internal/ffi_term.{
 import pickglass_agent/internal/ffi_vm
 import pickglass_agent/internal/seq
 import pickglass_agent/janitor
+import pickglass_agent/owner
 import pickglass_agent/reply.{type Failure, Failure}
 import pickglass_agent/request.{type Envelope, type Token, Envelope}
 
@@ -118,18 +119,6 @@ pub type State {
     workers: List(Worker),
     scheduler: Scheduler,
   )
-}
-
-/// What a callback tells the gen_server to do next. The constructors are the
-/// tuples `gen_server` expects from `handle_info`.
-pub type Next {
-  Noreply(state: State)
-  Stop(reason: ExitReason, state: State)
-}
-
-/// The exit reason of an orderly stop.
-pub type ExitReason {
-  Normal
 }
 
 /// The messages the agent sends itself, and the one `nodedown` notice the
@@ -207,6 +196,8 @@ fn decode_config(args: Term) -> Result(Config, Nil) {
 /// The `gen_server` init callback. Watches the viewer's process and node and
 /// arms the first tick.
 pub fn init(config: Config) -> Result(State, Nil) {
+  owner.claim_self()
+
   let now = ffi_proc.now_ms()
   let viewer_node = ffi_proc.node_of(config.viewer)
   let monitor = ffi_proc.monitor(ffi_proc.Process, config.viewer)
@@ -231,7 +222,7 @@ pub fn init(config: Config) -> Result(State, Nil) {
 
 /// The `gen_server` callback for every message. A message that is not one of
 /// the closed set is dropped.
-pub fn handle_info(message: Term, state: State) -> Next {
+pub fn handle_info(message: Term, state: State) -> Next(State) {
   case classify(message) {
     Asked(envelope) ->
       dispatch(envelope, State(..state, last_heard_ms: ffi_proc.now_ms()))
@@ -313,7 +304,7 @@ fn is_nodedown(message: Term) -> Bool {
 
 // ----------------------------------------------------------------- requests
 
-fn dispatch(envelope: Envelope, state: State) -> Next {
+fn dispatch(envelope: Envelope, state: State) -> Next(State) {
   let Envelope(reply_to, reference, request) = envelope
 
   case request {
@@ -340,7 +331,12 @@ fn dispatch(envelope: Envelope, state: State) -> Next {
   }
 }
 
-fn answer(state: State, to: Pid, reference: Reference, body: Term) -> Next {
+fn answer(
+  state: State,
+  to: Pid,
+  reference: Reference,
+  body: Term,
+) -> Next(State) {
   reply.send(to, reference, body)
 
   Noreply(state)
@@ -352,7 +348,7 @@ fn refuse(
   reference: Reference,
   code: String,
   detail: String,
-) -> Next {
+) -> Next(State) {
   answer(state, to, reference, reply.failure(Failure(code, detail)))
 }
 
@@ -390,7 +386,7 @@ fn census_request(
   reference: Reference,
   max_scanned: Int,
   top_k: Int,
-) -> Next {
+) -> Next(State) {
   case seq.length(state.workers) >= max_workers {
     True ->
       refuse(
@@ -423,6 +419,8 @@ fn run_census(
   reply_to: Pid,
   reference: Reference,
 ) -> Nil {
+  owner.claim_self()
+
   reply.send(reply_to, reference, reply.census(census.run(budget)))
 }
 
@@ -431,7 +429,7 @@ fn pin(
   reply_to: Pid,
   reference: Reference,
   text: String,
-) -> Next {
+) -> Next(State) {
   case resolve_pid(text) {
     Error(Nil) ->
       refuse(
@@ -456,7 +454,7 @@ fn add_pin(
   reference: Reference,
   pid: Pid,
   text: String,
-) -> Next {
+) -> Next(State) {
   case seq.length(state.pins) >= max_pins {
     True ->
       refuse(
@@ -552,7 +550,7 @@ fn unpin(
   reply_to: Pid,
   reference: Reference,
   token: Token,
-) -> Next {
+) -> Next(State) {
   case find_pin(state, token) {
     Error(Nil) ->
       refuse(
@@ -583,7 +581,7 @@ fn scheduler(
   reply_to: Pid,
   reference: Reference,
   action: request.SchedulerAction,
-) -> Next {
+) -> Next(State) {
   let next = case action {
     request.SchedulerOn -> switch_scheduler(state, Collecting)
     request.SchedulerOff -> switch_scheduler(state, NotCollecting)
@@ -636,7 +634,7 @@ fn start_counters(
   function_name: String,
   targets: request.Targets,
   deadline_ms: Int,
-) -> Next {
+) -> Next(State) {
   let started = {
     use _ <- fallible.then(check_probe_room(state))
     use module <- fallible.then(resolve_name(module_name, "unknown_module"))
@@ -760,7 +758,7 @@ fn read_counters(
   reply_to: Pid,
   reference: Reference,
   id: Int,
-) -> Next {
+) -> Next(State) {
   case find_probe(state.probes, id) {
     Error(Nil) ->
       refuse(
@@ -780,7 +778,7 @@ fn stop_counters(
   reply_to: Pid,
   reference: Reference,
   id: Int,
-) -> Next {
+) -> Next(State) {
   case find_probe(state.probes, id) {
     Error(Nil) ->
       refuse(
@@ -846,7 +844,7 @@ fn is_running(probe: Probe) -> Bool {
 // probe's own. A probe past its deadline is collected and its session
 // destroyed in this handler, so no probe outlives its deadline by more than a
 // tick. The tick is re-armed last, after everything it may have changed.
-fn on_tick(state: State) -> Next {
+fn on_tick(state: State) -> Next(State) {
   let now = ffi_proc.now_ms()
 
   case now - state.last_heard_ms > state.config.lease_ms {
@@ -894,7 +892,7 @@ fn drop_one_finished(oldest_first: List(Probe)) -> List(Probe) {
   }
 }
 
-fn on_down(monitor: Reference, reason: Term, state: State) -> Next {
+fn on_down(monitor: Reference, reason: Term, state: State) -> Next(State) {
   case monitor == state.viewer_monitor {
     True -> stop(state, ViewerGone)
     False ->
@@ -939,7 +937,7 @@ fn on_worker_down(monitor: Reference, reason: Term, state: State) -> State {
 
 // ----------------------------------------------------------------- teardown
 
-fn detach(state: State, reply_to: Pid, reference: Reference) -> Next {
+fn detach(state: State, reply_to: Pid, reference: Reference) -> Next(State) {
   let stopped = shut_down(state)
 
   reply.send(reply_to, reference, reply.detached(cause_name(Requested)))
@@ -947,7 +945,7 @@ fn detach(state: State, reply_to: Pid, reference: Reference) -> Next {
   Stop(Normal, stopped)
 }
 
-fn stop(state: State, cause: Cause) -> Next {
+fn stop(state: State, cause: Cause) -> Next(State) {
   let _ = cause_name(cause)
 
   Stop(Normal, shut_down(state))

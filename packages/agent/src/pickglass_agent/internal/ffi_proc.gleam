@@ -13,9 +13,10 @@ import pickglass_agent/internal/ffi_term.{
   type Atom, type Pid, type Reference, type Term,
 }
 
-/// The `process_info/2` items the census reads. Every one is a number or a
-/// short atom; items that copy process-owned data (messages, dictionary)
-/// are deliberately absent.
+/// The `process_info/2` items the agent reads. Every one is a number, a short
+/// atom, a bounded list of identifiers or a fixed-size property list; items
+/// that copy process-owned data (messages, dictionary, backtrace) are
+/// deliberately absent.
 pub type Item {
   Memory
   TotalHeapSize
@@ -27,6 +28,14 @@ pub type Item {
   CurrentFunction
   RegisteredName
   Label
+  InitialCall
+  GarbageCollection
+  GarbageCollectionInfo
+  Links
+  Monitors
+  MonitoredBy
+  Parent
+  CurrentStacktrace
 }
 
 /// The kind of thing `monitor/2` watches. The agent only monitors
@@ -60,6 +69,25 @@ pub type TimeUnit {
 /// Options for `demonitor/2`.
 pub type DemonitorOption {
   Flush
+}
+
+@external(erlang, "erlang", "put")
+fn put(key: Atom, value: Term) -> Term
+
+/// Set this process's label, which is what `proc_lib:set_label/1` does: it
+/// writes the `'$process_label'` dictionary entry. Calling the dictionary
+/// directly works on every OTP release and needs no helper process, which a
+/// call through `ffi_safe` would be, labelling the wrong process.
+///
+/// ## Examples
+///
+/// ```gleam
+/// set_label(ffi_term.coerce(#("owner", 1)))
+/// ```
+pub fn set_label(label: Term) -> Nil {
+  let _ = put(ffi_term.atom("$process_label"), label)
+
+  Nil
 }
 
 /// This process.
