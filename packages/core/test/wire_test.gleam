@@ -1118,6 +1118,19 @@ fn added_examples() -> List(Dynamic) {
       heap,
     ]),
     tuple([text("measure"), text("<0.1.0>"), num(1), dynamic.list([])]),
+    encode_ets_tables(wire.EtsSnapshot(
+      wire.EtsCoverage(3, 2, 1, wire.EtsFinished, 4),
+      [],
+      wire.EtsTotals(2, 10, 800),
+    )),
+    tuple([text("binaries"), text("<0.1.0>"), num(1), num(2), dynamic.list([])]),
+    encode_owners_detail(wire.OwnersDetailSnapshot(
+      wire.CensusCoverage(1, 2, wire.WalkFinished, 3),
+      [],
+      [],
+      wire.CensusTotals(1, 2, 3, 4, 5, 6, 7),
+      wire.EtsPass(1, 2, 3, wire.EtsFinished),
+    )),
   ]
 }
 
@@ -1269,6 +1282,9 @@ pub fn property_junk_inside_added_tags_never_crashes_test() {
   list.each(
     [
       "owners",
+      "owners_detail",
+      "ets_tables",
+      "binaries",
       "counter_memory",
       "process_detail",
       "supervision",
@@ -1886,4 +1902,344 @@ pub fn trace_requests_encode_to_the_agent_shape_test() {
     == envelope(tuple([text("read_events"), num(3)]))
   assert encode(wire.AskStopEvents(3))
     == envelope(tuple([text("stop_events"), num(3)]))
+}
+
+// ------------------------------------------------- ets, binaries, detail
+
+fn ets_stop() -> Generator(#(wire.EtsStop, String)) {
+  gen.one_of(#(wire.EtsFinished, "finished"), [#(wire.EtsDeadline, "deadline")])
+}
+
+fn ets_table() -> Generator(wire.EtsTable) {
+  qcheck.map4(
+    gen.tuple3(gen.ident(), gen.text(), gen.ident()),
+    owner_reading(),
+    gen.tuple3(gen.ident(), gen.non_negative(), gen.non_negative()),
+    gen.tuple2(gen.ident(), gen.text()),
+    fn(names, owner, sizes, more) {
+      wire.EtsTable(
+        id_text: names.0,
+        name: names.1,
+        owner_pid_text: names.2,
+        owner: owner,
+        kind: sizes.0,
+        objects: sizes.1,
+        memory_bytes: sizes.2,
+        protection: more.0,
+        heir_pid_text: more.1,
+      )
+    },
+  )
+}
+
+fn ets_snapshot() -> Generator(#(wire.EtsSnapshot, String)) {
+  qcheck.map4(
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    ets_stop(),
+    gen.small_list(ets_table()),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    fn(counts, stop, tables, totals) {
+      #(
+        wire.EtsSnapshot(
+          coverage: wire.EtsCoverage(
+            total: counts.0,
+            counted: counts.1,
+            skipped: counts.2,
+            stop: stop.0,
+            elapsed_ms: counts.0,
+          ),
+          tables: tables,
+          totals: wire.EtsTotals(totals.0, totals.1, totals.2),
+        ),
+        stop.1,
+      )
+    },
+  )
+}
+
+fn ets_stop_text(stop: wire.EtsStop) -> String {
+  case stop {
+    wire.EtsFinished -> "finished"
+    wire.EtsDeadline -> "deadline"
+  }
+}
+
+fn encode_ets_tables(snapshot: wire.EtsSnapshot) -> Dynamic {
+  let coverage = snapshot.coverage
+  let totals = snapshot.totals
+
+  tuple([
+    text("ets_tables"),
+    tuple([
+      num(coverage.total),
+      num(coverage.counted),
+      num(coverage.skipped),
+      text(ets_stop_text(coverage.stop)),
+      num(coverage.elapsed_ms),
+    ]),
+    dynamic.list(
+      list.map(snapshot.tables, fn(table) {
+        tuple([
+          text(table.id_text),
+          text(table.name),
+          text(table.owner_pid_text),
+          encode_owner(table.owner),
+          text(table.kind),
+          num(table.objects),
+          num(table.memory_bytes),
+          text(table.protection),
+          text(table.heir_pid_text),
+        ])
+      }),
+    ),
+    tuple([num(totals.tables), num(totals.objects), num(totals.memory_bytes)]),
+  ])
+}
+
+pub fn property_ets_tables_round_trip_test() {
+  use #(snapshot, _) <- gen.check(ets_snapshot())
+
+  assert wire.decode_envelope(envelope(encode_ets_tables(snapshot)))
+    == Ok(wire.Envelope(dynamic.string("ref"), wire.EtsTablesReport(snapshot)))
+}
+
+fn binary_ref() -> Generator(wire.BinaryRef) {
+  qcheck.map2(
+    gen.ident(),
+    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    fn(address, sizes) { wire.BinaryRef(address, sizes.0, sizes.1) },
+  )
+}
+
+fn binaries_snapshot() -> Generator(wire.BinariesSnapshot) {
+  qcheck.map3(
+    gen.ident(),
+    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    gen.small_list(binary_ref()),
+    fn(pid, totals, binaries) {
+      wire.BinariesSnapshot(pid, totals.0, totals.1, binaries)
+    },
+  )
+}
+
+pub fn property_binaries_round_trip_test() {
+  use snapshot <- gen.check(binaries_snapshot())
+
+  assert wire.decode_envelope(
+      envelope(
+        tuple([
+          text("binaries"),
+          text(snapshot.pid_text),
+          num(snapshot.count),
+          num(snapshot.bytes),
+          dynamic.list(
+            list.map(snapshot.binaries, fn(ref) {
+              tuple([text(ref.address_text), num(ref.bytes), num(ref.refc)])
+            }),
+          ),
+        ]),
+      ),
+    )
+    == Ok(wire.Envelope(dynamic.string("ref"), wire.BinariesReport(snapshot)))
+}
+
+fn owner_detail() -> Generator(wire.OwnerDetail) {
+  qcheck.map2(
+    owner_heap_total(),
+    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    fn(owner, ets) { wire.OwnerDetail(owner, ets.0, ets.1) },
+  )
+}
+
+fn owners_detail_snapshot() -> Generator(#(wire.OwnersDetailSnapshot, String)) {
+  qcheck.map6(
+    census_coverage(),
+    gen.small_list(qcheck.map2(process_row(), gen.text(), wire.DetailedRow)),
+    gen.small_list(owner_detail()),
+    census_totals(),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    ets_stop(),
+    fn(coverage, rows, owners, totals, ets, stop) {
+      #(
+        wire.OwnersDetailSnapshot(
+          coverage:,
+          rows:,
+          owners:,
+          totals:,
+          ets: wire.EtsPass(ets.0, ets.1, ets.2, stop.0),
+        ),
+        stop.1,
+      )
+    },
+  )
+}
+
+fn encode_owners_detail(snapshot: wire.OwnersDetailSnapshot) -> Dynamic {
+  let totals = snapshot.totals
+  let ets = snapshot.ets
+
+  tuple([
+    text("owners_detail"),
+    coverage_term(snapshot.coverage),
+    dynamic.list(
+      list.map(snapshot.rows, fn(detailed) {
+        let assert Ok(fields) =
+          decode.run(encode_row(detailed.row), decode.list(decode.dynamic))
+          as "a row encodes to a tuple"
+
+        tuple(list.append(fields, [text(detailed.initial_call)]))
+      }),
+    ),
+    dynamic.list(
+      list.map(snapshot.owners, fn(entry) {
+        tuple([
+          encode_owner(entry.owner.total.owner),
+          num(entry.owner.total.processes),
+          num(entry.owner.total.memory),
+          num(entry.owner.total.queue_length),
+          num(entry.owner.total.reductions),
+          num(entry.owner.total_heap_words),
+          num(entry.ets_tables),
+          num(entry.ets_bytes),
+        ])
+      }),
+    ),
+    tuple([
+      num(totals.processes),
+      num(totals.memory),
+      num(totals.queue_length),
+      num(totals.reductions),
+      num(totals.total_heap_words),
+      num(totals.owners_tracked),
+      num(totals.owners_listed),
+    ]),
+    tuple([
+      num(ets.tables),
+      num(ets.memory_bytes),
+      num(ets.skipped),
+      text(ets_stop_text(ets.stop)),
+    ]),
+  ])
+}
+
+pub fn property_owners_detail_round_trips_test() {
+  use #(snapshot, _) <- gen.check(owners_detail_snapshot())
+
+  assert wire.decode_envelope(envelope(encode_owners_detail(snapshot)))
+    == Ok(wire.Envelope(
+      dynamic.string("ref"),
+      wire.OwnersDetailReport(snapshot),
+    ))
+}
+
+// The detail reply is the `owners` reply with fields appended, so the older
+// decoder, which reads by position, still reads the prefix it knows.
+pub fn owners_detail_prefix_is_an_owners_reply_test() {
+  let snapshot =
+    wire.OwnersDetailSnapshot(
+      wire.CensusCoverage(1, 2, wire.ScanBudgetReached, 3),
+      [],
+      [],
+      wire.CensusTotals(1, 2, 3, 4, 5, 6, 7),
+      wire.EtsPass(1, 2, 3, wire.EtsDeadline),
+    )
+  let assert Ok(items) =
+    decode.run(encode_owners_detail(snapshot), decode.list(decode.dynamic))
+    as "a tuple"
+  let relabelled = tuple([text("owners"), ..list.drop(items, 1)])
+
+  assert wire.decode_reply(relabelled)
+    == Ok(
+      wire.OwnersReport(wire.OwnersSnapshot(
+        snapshot.coverage,
+        [],
+        [],
+        snapshot.totals,
+      )),
+    )
+}
+
+// A stop reason outside the closed list is an error, in the listing and in the
+// owners detail's ETS pass.
+pub fn unknown_ets_stop_reasons_are_errors_test() {
+  assert is_error(
+    wire.decode_reply(
+      tuple([
+        text("ets_tables"),
+        tuple([num(1), num(1), num(0), text("early"), num(1)]),
+        dynamic.list([]),
+        tuple([num(1), num(1), num(1)]),
+      ]),
+    ),
+  )
+  assert is_error(
+    wire.decode_reply(
+      tuple([
+        text("owners_detail"),
+        tuple([num(1), num(1), text("finished"), num(1)]),
+        dynamic.list([]),
+        dynamic.list([]),
+        tuple([num(0), num(0), num(0), num(0), num(0), num(0), num(0)]),
+        tuple([num(0), num(0), num(0), text("never")]),
+      ]),
+    ),
+  )
+}
+
+// A row of the detail reply without its initial call is an error, not a row
+// with an empty call.
+pub fn detail_rows_need_their_initial_call_test() {
+  let assert Ok(fields) =
+    decode.run(
+      encode_row(ProcessRow(
+        "<0.1.0>",
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        "waiting",
+        "",
+        "",
+        Unlabelled,
+      )),
+      decode.list(decode.dynamic),
+    )
+    as "a tuple"
+
+  assert is_error(
+    wire.decode_reply(
+      tuple([
+        text("owners_detail"),
+        tuple([num(1), num(1), text("finished"), num(1)]),
+        dynamic.list([tuple(fields)]),
+        dynamic.list([]),
+        tuple([num(0), num(0), num(0), num(0), num(0), num(0), num(0)]),
+        tuple([num(0), num(0), num(0), text("finished")]),
+      ]),
+    ),
+  )
+}
+
+pub fn ets_and_binaries_requests_encode_to_the_agent_shape_test() {
+  let reply_to = text("pid")
+  let reference = text("ref")
+  let envelope = fn(body: Dynamic) {
+    tuple([text("pg"), num(1), reply_to, reference, body])
+  }
+  let encode = fn(request) {
+    wire.encode_extended_request(reply_to, reference, request)
+  }
+  let assert Ok(boot) = identity.boot_id("boot-1") as "valid boot id"
+  let assert Ok(token) = identity.pin(boot, 4) as "valid serial"
+
+  assert encode(wire.AskOwnersDetail(100, 10))
+    == envelope(tuple([text("owners_detail"), num(100), num(10)]))
+  assert encode(wire.AskEtsTables(wire.default_ets_top_k))
+    == envelope(tuple([text("ets_tables"), num(100)]))
+  assert encode(wire.AskBinaries(token, 20))
+    == envelope(
+      tuple([text("binaries"), tuple([text("boot-1"), num(4)]), num(20)]),
+    )
 }

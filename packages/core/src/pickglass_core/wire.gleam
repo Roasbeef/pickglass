@@ -49,6 +49,10 @@ import pickglass_core/owner.{type Segment}
 /// The wire version this build understands.
 pub const wire_version = 1
 
+/// The number of ETS tables the viewer asks for unless it has a reason to ask
+/// for another.
+pub const default_ets_top_k = 100
+
 /// A reply with the reference of the request it answers. The reference is an
 /// opaque Erlang reference; the viewer matches it by equality only.
 pub type Envelope {
@@ -66,6 +70,9 @@ pub type Reply {
   CountersStarted(probe_id: Int, matched_functions: Int, deadline_ms: Int)
   CountersReport(CountersSnapshot)
   OwnersReport(OwnersSnapshot)
+  OwnersDetailReport(OwnersDetailSnapshot)
+  EtsTablesReport(EtsSnapshot)
+  BinariesReport(BinariesSnapshot)
   CounterMemoryReport(CounterMemorySnapshot)
   ProcessDetailReport(ProcessDetail)
   SupervisionReport(SupervisionSnapshot)
@@ -276,6 +283,110 @@ pub type OwnersSnapshot {
     rows: List(ProcessRow),
     owners: List(OwnerHeapTotal),
     totals: CensusTotals,
+  )
+}
+
+/// A census row with the process's `proc_lib` initial call. `initial_call` is
+/// `module:function/arity` of the call `proc_lib` recorded, so a supervisor
+/// reads `supervisor:my_sup/1` and a `gen_server` reads `my_server:init/1`, or
+/// `""` for a process `proc_lib` did not start.
+pub type DetailedRow {
+  DetailedRow(row: ProcessRow, initial_call: String)
+}
+
+/// An owner's totals with the ETS tables its processes own: how many and
+/// their memory in bytes. Tables owned by an unlabelled process count under
+/// the unlabelled owner.
+pub type OwnerDetail {
+  OwnerDetail(owner: OwnerHeapTotal, ets_tables: Int, ets_bytes: Int)
+}
+
+/// Why the ETS pass of an owners census ended.
+pub type EtsStop {
+  /// Every table the list named was read or found deleted.
+  EtsFinished
+
+  /// The deadline passed with tables unread, so the ETS figures understate.
+  EtsDeadline
+}
+
+/// What the ETS pass read over every table on the node, whether or not its
+/// owner is listed: how many tables, their memory in bytes, how many were
+/// deleted before they could be read, and why the pass ended. The remainder
+/// row's ETS figures are these minus the listed owners'.
+pub type EtsPass {
+  EtsPass(tables: Int, memory_bytes: Int, skipped: Int, stop: EtsStop)
+}
+
+/// The answer to `owners_detail`: the `owners` census with each row's initial
+/// call, each owner's ETS memory and the totals of the ETS pass.
+pub type OwnersDetailSnapshot {
+  OwnersDetailSnapshot(
+    coverage: CensusCoverage,
+    rows: List(DetailedRow),
+    owners: List(OwnerDetail),
+    totals: CensusTotals,
+    ets: EtsPass,
+  )
+}
+
+/// How much of the node's ETS tables a listing covered. `total` is the number
+/// of tables when the walk began, `counted` how many were read and `skipped`
+/// how many were deleted before they could be.
+pub type EtsCoverage {
+  EtsCoverage(
+    total: Int,
+    counted: Int,
+    skipped: Int,
+    stop: EtsStop,
+    elapsed_ms: Int,
+  )
+}
+
+/// One ETS table, described by its properties and never its contents. `name`
+/// is `""` for a table with no name and `heir_pid_text` is `""` for one with
+/// no heir. `memory_bytes` is bytes; `objects` is the object count.
+pub type EtsTable {
+  EtsTable(
+    id_text: String,
+    name: String,
+    owner_pid_text: String,
+    owner: OwnerReading,
+    kind: String,
+    objects: Int,
+    memory_bytes: Int,
+    protection: String,
+    heir_pid_text: String,
+  )
+}
+
+/// The sums over every table a listing read, listed or not.
+pub type EtsTotals {
+  EtsTotals(tables: Int, objects: Int, memory_bytes: Int)
+}
+
+/// The answer to `ets_tables`: the largest tables by memory, the totals over
+/// all tables read and the coverage.
+pub type EtsSnapshot {
+  EtsSnapshot(coverage: EtsCoverage, tables: List(EtsTable), totals: EtsTotals)
+}
+
+/// One reference-counted binary a process holds. `address_text` is its
+/// address in hexadecimal, which identifies the same binary across processes.
+pub type BinaryRef {
+  BinaryRef(address_text: String, bytes: Int, refc: Int)
+}
+
+/// The answer to `binaries`: how many binary references the process holds,
+/// their total size in bytes, and the largest ones. `count` minus the length
+/// of `binaries` is how many the listing leaves out. A binary referenced twice
+/// is counted twice, and a sub-binary counts the whole binary's size.
+pub type BinariesSnapshot {
+  BinariesSnapshot(
+    pid_text: String,
+    count: Int,
+    bytes: Int,
+    binaries: List(BinaryRef),
   )
 }
 
@@ -796,6 +907,9 @@ fn reply_decoder() -> Decoder(Reply) {
     }
     "counters" -> counters_decoder()
     "owners" -> owners_decoder()
+    "owners_detail" -> owners_detail_decoder()
+    "ets_tables" -> ets_tables_decoder()
+    "binaries" -> binaries_decoder()
     "counter_memory" -> counter_memory_decoder()
     "process_detail" -> process_detail_decoder()
     "supervision" -> supervision_decoder()
@@ -1102,6 +1216,140 @@ fn census_totals_decoder() -> Decoder(CensusTotals) {
     owners_tracked:,
     owners_listed:,
   ))
+}
+
+// ----------------------------------------------------------- owners detail
+
+// `{<<"owners_detail">>, Coverage, Rows, Owners, Totals, EtsPass}`: the shape
+// of `owners` with one field appended to each row (the initial call), two to
+// each owner (ETS tables and bytes) and the ETS pass at the end. The shared
+// parts are read with the `owners` decoders, which read tuples by position.
+fn owners_detail_decoder() -> Decoder(Reply) {
+  use coverage <- decode.field(1, coverage_decoder())
+  use rows <- decode.field(2, decode.list(detailed_row_decoder()))
+  use owners <- decode.field(3, decode.list(owner_detail_decoder()))
+  use totals <- decode.field(4, census_totals_decoder())
+  use ets <- decode.field(5, ets_pass_decoder())
+
+  decode.success(
+    OwnersDetailReport(OwnersDetailSnapshot(
+      coverage:,
+      rows:,
+      owners:,
+      totals:,
+      ets:,
+    )),
+  )
+}
+
+fn detailed_row_decoder() -> Decoder(DetailedRow) {
+  use row <- decode.then(row_decoder())
+  use initial_call <- decode.field(11, decode.string)
+
+  decode.success(DetailedRow(row:, initial_call:))
+}
+
+fn owner_detail_decoder() -> Decoder(OwnerDetail) {
+  use owner <- decode.then(owner_heap_decoder())
+  use ets_tables <- decode.field(6, decode.int)
+  use ets_bytes <- decode.field(7, decode.int)
+
+  decode.success(OwnerDetail(owner:, ets_tables:, ets_bytes:))
+}
+
+fn ets_pass_decoder() -> Decoder(EtsPass) {
+  use tables <- decode.field(0, decode.int)
+  use memory_bytes <- decode.field(1, decode.int)
+  use skipped <- decode.field(2, decode.int)
+  use stop <- decode.field(3, ets_stop_decoder())
+
+  decode.success(EtsPass(tables:, memory_bytes:, skipped:, stop:))
+}
+
+fn ets_stop_decoder() -> Decoder(EtsStop) {
+  use code <- decode.then(decode.string)
+
+  case code {
+    "finished" -> decode.success(EtsFinished)
+    "deadline" -> decode.success(EtsDeadline)
+    _ -> decode.failure(EtsFinished, "an ETS stop reason")
+  }
+}
+
+// ------------------------------------------------------------ ets tables
+
+// `{<<"ets_tables">>, {Total, Counted, Skipped, Stop, ElapsedMs}, Tables,
+// {Tables, Objects, MemoryBytes}}`.
+fn ets_tables_decoder() -> Decoder(Reply) {
+  use coverage <- decode.field(1, ets_coverage_decoder())
+  use tables <- decode.field(2, decode.list(ets_table_decoder()))
+  use totals <- decode.field(3, ets_totals_decoder())
+
+  decode.success(EtsTablesReport(EtsSnapshot(coverage:, tables:, totals:)))
+}
+
+fn ets_coverage_decoder() -> Decoder(EtsCoverage) {
+  use total <- decode.field(0, decode.int)
+  use counted <- decode.field(1, decode.int)
+  use skipped <- decode.field(2, decode.int)
+  use stop <- decode.field(3, ets_stop_decoder())
+  use elapsed_ms <- decode.field(4, decode.int)
+
+  decode.success(EtsCoverage(total:, counted:, skipped:, stop:, elapsed_ms:))
+}
+
+fn ets_table_decoder() -> Decoder(EtsTable) {
+  use id_text <- decode.field(0, decode.string)
+  use name <- decode.field(1, decode.string)
+  use owner_pid_text <- decode.field(2, decode.string)
+  use owner <- decode.field(3, owner_decoder())
+  use kind <- decode.field(4, decode.string)
+  use objects <- decode.field(5, decode.int)
+  use memory_bytes <- decode.field(6, decode.int)
+  use protection <- decode.field(7, decode.string)
+  use heir_pid_text <- decode.field(8, decode.string)
+
+  decode.success(EtsTable(
+    id_text:,
+    name:,
+    owner_pid_text:,
+    owner:,
+    kind:,
+    objects:,
+    memory_bytes:,
+    protection:,
+    heir_pid_text:,
+  ))
+}
+
+fn ets_totals_decoder() -> Decoder(EtsTotals) {
+  use tables <- decode.field(0, decode.int)
+  use objects <- decode.field(1, decode.int)
+  use memory_bytes <- decode.field(2, decode.int)
+
+  decode.success(EtsTotals(tables:, objects:, memory_bytes:))
+}
+
+// ------------------------------------------------------------- binaries
+
+// `{<<"binaries">>, PidText, Count, Bytes, [{AddressText, Bytes, RefCount}]}`.
+fn binaries_decoder() -> Decoder(Reply) {
+  use pid_text <- decode.field(1, decode.string)
+  use count <- decode.field(2, decode.int)
+  use bytes <- decode.field(3, decode.int)
+  use binaries <- decode.field(4, decode.list(binary_ref_decoder()))
+
+  decode.success(
+    BinariesReport(BinariesSnapshot(pid_text:, count:, bytes:, binaries:)),
+  )
+}
+
+fn binary_ref_decoder() -> Decoder(BinaryRef) {
+  use address_text <- decode.field(0, decode.string)
+  use bytes <- decode.field(1, decode.int)
+  use refc <- decode.field(2, decode.int)
+
+  decode.success(BinaryRef(address_text:, bytes:, refc:))
 }
 
 // ---------------------------------------------------------- counter memory
@@ -1996,6 +2244,21 @@ pub type ExtendedRequest {
   /// Parent edges over the node.
   AskSupervision(max_scanned: Int, max_edges: Int)
 
+  /// The census with each row's `proc_lib` initial call and each owner's ETS
+  /// memory. It walks every ETS table after the processes, which costs time
+  /// in proportion to the table count and is bounded by the census deadline.
+  AskOwnersDetail(max_scanned: Int, top_k: Int)
+
+  /// The largest ETS tables by memory, at most `top_k` (1 to 500, clamped),
+  /// described by properties only. `default_ets_top_k` is the usual count.
+  AskEtsTables(top_k: Int)
+
+  /// The reference-counted binaries one pinned process holds, the largest
+  /// `top_k` (1 to 200, clamped) listed. Costly for a process holding many
+  /// binaries: a process with more than 50,000 references is refused with
+  /// `too_many_binaries` rather than summarised.
+  AskBinaries(token: PinToken, top_k: Int)
+
   /// Node facts and allocator carriers.
   AskSystem
 
@@ -2099,6 +2362,11 @@ fn extended_body(request: ExtendedRequest) -> Dynamic {
     AskSupervision(max_scanned, max_edges) ->
       tagged("supervision", [dynamic.int(max_scanned), dynamic.int(max_edges)])
     AskSystem -> tagged("system", [])
+    AskOwnersDetail(max_scanned, top_k) ->
+      tagged("owners_detail", [dynamic.int(max_scanned), dynamic.int(top_k)])
+    AskEtsTables(top_k) -> tagged("ets_tables", [dynamic.int(top_k)])
+    AskBinaries(token, top_k) ->
+      tagged("binaries", [token_term(token), dynamic.int(top_k)])
     AskGc(token, deadline_ms) ->
       tagged("gc", [token_term(token), dynamic.int(deadline_ms)])
     AskMeasure(token, budget_ms) ->
