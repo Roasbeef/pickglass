@@ -36,10 +36,18 @@ pub type ProcessFlag {
 }
 
 /// Function trace flags. `local` covers calls that stay inside a module and
-/// `call_time` is the VM's per-function time counter.
+/// `call_time` is the VM's per-function time counter. `call_memory` counts
+/// the words each call allocates, on the releases that have it.
 pub type FunctionFlag {
   Local
   CallTime
+  CallMemory
+}
+
+/// Which counters a probe turns on in the traced functions.
+pub type CounterMode {
+  TimeOnly
+  TimeAndMemory
 }
 
 /// The functions the agent applies through `ffi_safe.call`.
@@ -131,20 +139,26 @@ pub fn clear_process_flags(
   }
 }
 
-/// Turn on `call_time` counting for the functions matching
-/// `{module, function, '_'}` and return how many functions matched. A
-/// pattern that matches nothing returns zero.
+/// Turn on `call_time` counting, and `call_memory` counting when `mode`
+/// asks for it, for the functions matching `{module, function, '_'}` and
+/// return how many functions matched. A pattern that matches nothing returns
+/// zero, and a release without `call_memory` returns `Error`.
 pub fn trace_functions(
   session: Session,
   module: Atom,
   function: Atom,
+  mode: CounterMode,
 ) -> Result(Int, Nil) {
   let pattern = #(module, function, ffi_term.atom("_"))
+  let flags = case mode {
+    TimeOnly -> [Local, CallTime]
+    TimeAndMemory -> [Local, CallTime, CallMemory]
+  }
   let args = [
     ffi_term.coerce(session),
     ffi_term.coerce(pattern),
     ffi_term.coerce(True),
-    ffi_term.coerce([Local, CallTime]),
+    ffi_term.coerce(flags),
   ]
 
   case ffi_safe.call(Trace, Function, args) {
@@ -168,6 +182,25 @@ pub fn call_time(
     ffi_term.coerce(session),
     ffi_term.coerce(pattern),
     ffi_term.coerce(CallTime),
+  ]
+
+  ffi_safe.call(Trace, Info, args)
+}
+
+/// The `{call_memory, Value}` answer for one function. `Value` is a list of
+/// `{Pid, Count, Words}` per traced process, or `false` when the function is
+/// no longer traced.
+pub fn call_memory(
+  session: Session,
+  module: Atom,
+  function: Atom,
+  arity: Int,
+) -> Result(Term, Nil) {
+  let pattern = #(module, function, arity)
+  let args = [
+    ffi_term.coerce(session),
+    ffi_term.coerce(pattern),
+    ffi_term.coerce(CallMemory),
   ]
 
   ffi_safe.call(Trace, Info, args)

@@ -20,6 +20,7 @@
 //// | release a pin | `{<<"unpin">>, {BootId, PinId}}` |
 //// | scheduler accounting | `{<<"scheduler">>, <<"on" \| "off" \| "read">>}` |
 //// | start a counters probe | `{<<"start_counters">>, Module, Function, Targets, DeadlineMs}` |
+//// | start a counters probe over several patterns | `{<<"start_counter_set">>, [{Module, Function}], Targets, DeadlineMs, <<"time" \| "time_and_memory">>}` |
 //// | read or stop a probe | `{<<"read_counters">>, Id}`, `{<<"stop_counters">>, Id}` |
 //// | one process in detail | `{<<"process_detail">>, Token}` |
 //// | parent edges over the node | `{<<"supervision">>, MaxScanned, MaxEdges}` |
@@ -36,6 +37,9 @@
 import pickglass_agent/internal/fallible
 import pickglass_agent/internal/ffi_safe
 import pickglass_agent/internal/ffi_term.{type Pid, type Reference, type Term}
+import pickglass_agent/internal/ffi_trace.{
+  type CounterMode, TimeAndMemory, TimeOnly,
+}
 import pickglass_agent/internal/seq
 
 /// The wire version this agent speaks.
@@ -71,6 +75,9 @@ pub const min_deadline_ms = 100
 /// The longest counters probe, in milliseconds.
 pub const max_deadline_ms = 300_000
 
+/// The most `{Module, Function}` patterns one counters probe may name.
+pub const max_patterns = 8
+
 const max_tag_bytes = 32
 
 const max_name_bytes = 255
@@ -87,6 +94,12 @@ pub type SchedulerAction {
 /// is refused.
 pub type Token {
   Token(boot_id: String, pin_id: Int)
+}
+
+/// One `{Module, Function}` pair of a counters probe, as names. A function
+/// of `"_"` covers every function of the module.
+pub type Pattern {
+  Pattern(module: String, function: String)
 }
 
 /// Which processes a counters probe covers.
@@ -107,10 +120,10 @@ pub type Request {
   Unpin(token: Token)
   Scheduler(action: SchedulerAction)
   StartCounters(
-    module: String,
-    function: String,
+    patterns: List(Pattern),
     targets: Targets,
     deadline_ms: Int,
+    mode: CounterMode,
   )
   ReadCounters(probe_id: Int)
   StopCounters(probe_id: Int)
@@ -204,6 +217,7 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "unpin", 2 -> decode_unpin(term)
     "scheduler", 2 -> decode_scheduler(term)
     "start_counters", 5 -> decode_start_counters(term)
+    "start_counter_set", 5 -> decode_start_counter_set(term)
     "read_counters", 2 -> decode_probe(term, ReadCounters)
     "stop_counters", 2 -> decode_probe(term, StopCounters)
     "process_detail", 2 -> decode_token_request(term, ProcessDetail)
@@ -253,11 +267,72 @@ fn decode_start_counters(term: Term) -> Result(Request, String) {
   use deadline <- fallible.then(integer(ffi_term.element(5, term), "deadline"))
 
   Ok(StartCounters(
-    module,
-    function,
+    [Pattern(module, function)],
     targets,
     clamp(deadline, min_deadline_ms, max_deadline_ms),
+    TimeOnly,
   ))
+}
+
+fn decode_start_counter_set(term: Term) -> Result(Request, String) {
+  use patterns <- fallible.then(decode_patterns(ffi_term.element(2, term)))
+  use targets <- fallible.then(decode_targets(ffi_term.element(3, term)))
+  use deadline <- fallible.then(integer(ffi_term.element(4, term), "deadline"))
+  use mode <- fallible.then(decode_mode(ffi_term.element(5, term)))
+
+  Ok(StartCounters(
+    patterns,
+    targets,
+    clamp(deadline, min_deadline_ms, max_deadline_ms),
+    mode,
+  ))
+}
+
+fn decode_mode(term: Term) -> Result(CounterMode, String) {
+  use mode <- fallible.then(name(term, "mode"))
+
+  case mode {
+    "time" -> Ok(TimeOnly)
+    "time_and_memory" -> Ok(TimeAndMemory)
+    _ -> Error("mode must be time or time_and_memory")
+  }
+}
+
+fn decode_patterns(term: Term) -> Result(List(Pattern), String) {
+  case ffi_safe.proper_length(term) {
+    Error(Nil) -> Error("patterns is not a list")
+    Ok(count) ->
+      case count < 1 || count > max_patterns {
+        True -> Error("a counters probe takes between one and eight patterns")
+        False -> decode_pattern_items(ffi_term.coerce(term), [])
+      }
+  }
+}
+
+fn decode_pattern_items(
+  items: List(Term),
+  acc: List(Pattern),
+) -> Result(List(Pattern), String) {
+  case items {
+    [] -> Ok(seq.reverse(acc))
+    [item, ..rest] -> {
+      use pattern <- fallible.then(decode_pattern(item))
+
+      decode_pattern_items(rest, [pattern, ..acc])
+    }
+  }
+}
+
+fn decode_pattern(term: Term) -> Result(Pattern, String) {
+  case ffi_term.is_tuple(term) && ffi_term.tuple_size(term) == 2 {
+    False -> Error("a pattern is a {Module, Function} pair")
+    True -> {
+      use module <- fallible.then(name(ffi_term.element(1, term), "module"))
+      use function <- fallible.then(name(ffi_term.element(2, term), "function"))
+
+      Ok(Pattern(module, function))
+    }
+  }
 }
 
 fn decode_token_request(

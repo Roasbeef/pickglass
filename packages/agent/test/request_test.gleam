@@ -1,4 +1,5 @@
 import pickglass_agent/internal/ffi_term.{type Term, coerce}
+import pickglass_agent/internal/ffi_trace.{TimeAndMemory, TimeOnly}
 import pickglass_agent/request.{
   AllProcesses, Census, Detach, Malformed, NotARequest, Ping, Valid,
 }
@@ -37,11 +38,76 @@ pub fn targets_decode_test() {
       envelope(#("start_counters", "lists", "sort", #("all"), 5)),
     )
     == Ok(request.StartCounters(
-      "lists",
-      "sort",
+      [request.Pattern("lists", "sort")],
       AllProcesses,
       request.min_deadline_ms,
+      TimeOnly,
     ))
+}
+
+// A pattern set names several modules, each with its own function or `_`,
+// and chooses whether `call_memory` is counted too.
+pub fn counter_sets_decode_test() {
+  assert decoded_request(
+      envelope(#(
+        "start_counter_set",
+        [#("a", "run"), #("b", "_")],
+        #("all"),
+        5000,
+        "time_and_memory",
+      )),
+    )
+    == Ok(request.StartCounters(
+      [request.Pattern("a", "run"), request.Pattern("b", "_")],
+      AllProcesses,
+      5000,
+      TimeAndMemory,
+    ))
+  assert decoded_request(
+      envelope(#("start_counter_set", [#("a", "run")], #("all"), 5000, "time")),
+    )
+    == Ok(request.StartCounters(
+      [request.Pattern("a", "run")],
+      AllProcesses,
+      5000,
+      TimeOnly,
+    ))
+}
+
+pub fn malformed_counter_sets_are_refused_test() {
+  let none: List(#(String, String)) = []
+  let nine = [
+    #("a", "_"),
+    #("b", "_"),
+    #("c", "_"),
+    #("d", "_"),
+    #("e", "_"),
+    #("f", "_"),
+    #("g", "_"),
+    #("h", "_"),
+    #("i", "_"),
+  ]
+
+  assert decoded_request(
+      envelope(#("start_counter_set", none, #("all"), 5000, "time")),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_counter_set", nine, #("all"), 5000, "time")),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_counter_set", [#("a", 1)], #("all"), 5000, "time")),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_counter_set", [#("a", "b")], #("all"), 5000, "sideways")),
+    )
+    |> is_error
+  assert decoded_request(
+      envelope(#("start_counter_set", "lists", #("all"), 5000, "time")),
+    )
+    |> is_error
 }
 
 pub fn supervision_and_system_decode_test() {

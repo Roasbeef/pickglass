@@ -47,6 +47,7 @@ import pickglass_agent/internal/ffi_safe
 import pickglass_agent/internal/ffi_term.{
   type Atom, type Pid, type Reference, type Term,
 }
+import pickglass_agent/internal/ffi_trace.{type CounterMode}
 import pickglass_agent/internal/ffi_vm
 import pickglass_agent/internal/seq
 import pickglass_agent/janitor
@@ -350,15 +351,15 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
     request.Pin(text) -> pin(state, reply_to, reference, text)
     request.Unpin(token) -> unpin(state, reply_to, reference, token)
     request.Scheduler(action) -> scheduler(state, reply_to, reference, action)
-    request.StartCounters(module, function, targets, deadline_ms) ->
+    request.StartCounters(patterns, targets, deadline_ms, mode) ->
       start_counters(
         state,
         reply_to,
         reference,
-        module,
-        function,
+        patterns,
         targets,
         deadline_ms,
+        mode,
       )
     request.ReadCounters(id) -> read_counters(state, reply_to, reference, id)
     request.StopCounters(id) -> stop_counters(state, reply_to, reference, id)
@@ -850,23 +851,19 @@ fn start_counters(
   state: State,
   reply_to: Pid,
   reference: Reference,
-  module_name: String,
-  function_name: String,
+  patterns: List(request.Pattern),
   targets: request.Targets,
   deadline_ms: Int,
+  mode: CounterMode,
 ) -> Next(State) {
   let started = {
     use _ <- fallible.then(check_probe_room(state))
-    use module <- fallible.then(resolve_name(module_name, "unknown_module"))
-    use function <- fallible.then(resolve_name(
-      function_name,
-      "unknown_function",
-    ))
+    use resolved <- fallible.then(resolve_patterns(patterns, []))
     use selection <- fallible.then(select(state, targets))
     use probe <- fallible.then(start_probe(
       state,
-      module,
-      function,
+      resolved,
+      mode,
       selection,
       deadline_ms,
     ))
@@ -892,8 +889,8 @@ fn start_counters(
 
 fn start_probe(
   state: State,
-  module: Atom,
-  function: Atom,
+  patterns: List(counters.Pattern),
+  mode: CounterMode,
   selection: counters.Selection,
   deadline_ms: Int,
 ) -> Result(Probe, Failure) {
@@ -901,8 +898,8 @@ fn start_probe(
     counters.start(
       state.next_probe,
       ffi_proc.self(),
-      module,
-      function,
+      patterns,
+      mode,
       selection,
       deadline_ms,
     )
@@ -917,6 +914,26 @@ fn check_probe_room(state: State) -> Result(Nil, Failure) {
     True ->
       Error(Failure("probe_limit", "two counters probes are already running"))
     False -> Ok(Nil)
+  }
+}
+
+// Every name in the set resolves to an atom the node already has, or the
+// whole request is refused: an unknown name is never turned into a new atom.
+fn resolve_patterns(
+  patterns: List(request.Pattern),
+  acc: List(counters.Pattern),
+) -> Result(List(counters.Pattern), Failure) {
+  case patterns {
+    [] -> Ok(seq.reverse(acc))
+    [pattern, ..rest] -> {
+      use module <- fallible.then(resolve_name(pattern.module, "unknown_module"))
+      use function <- fallible.then(resolve_name(
+        pattern.function,
+        "unknown_function",
+      ))
+
+      resolve_patterns(rest, [counters.Pattern(module, function), ..acc])
+    }
   }
 }
 
@@ -1029,7 +1046,7 @@ fn stop_counters(
 fn snapshot_of(probe: Probe) -> counters.Snapshot {
   case probe.phase {
     counters.Running(session) ->
-      counters.collect(session, probe.module, probe.function)
+      counters.collect(session, probe.patterns, probe.mode)
     counters.Finished(snapshot) -> snapshot
   }
 }

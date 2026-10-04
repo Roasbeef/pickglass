@@ -200,7 +200,19 @@ pub fn counters(
 }
 
 fn counter_row(row: counters.Row) -> Term {
-  ffi_term.coerce(#(row.module, row.function, row.arity, row.calls, row.time_us))
+  ffi_term.coerce(
+    #(
+      row.module,
+      row.function,
+      row.arity,
+      row.calls,
+      row.time_us,
+      case row.memory {
+        counters.NotCounted -> ffi_term.coerce(#("none"))
+        counters.Allocated(words) -> ffi_term.coerce(#("words", words))
+      },
+    ),
+  )
 }
 
 /// The answer to `detach`, sent after every session is destroyed.

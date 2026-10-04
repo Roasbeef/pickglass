@@ -97,8 +97,9 @@ scenario_link_killed(Target, Work) ->
     {<<"counters">>, ProbeId, <<"running">>, _, _, _, CRows} =
         ask(Target, {<<"read_counters">>, ProbeId}),
     check("the probe counted calls to work/1",
-          lists:any(fun({<<"pg_e2e_work">>, <<"work">>, 1, Calls, _}) -> Calls > 0;
+          lists:any(fun({<<"pg_e2e_work">>, <<"work">>, 1, Calls, _, {<<"none">>}}) -> Calls > 0;
                        (_) -> false end, CRows)),
+    scenario_counter_set(Target, PinId),
     {<<"error">>, <<"unknown_module">>, _} =
         ask(Target, {<<"start_counters">>, <<"zz_no_such_module_ever">>, <<"_">>,
                      {<<"all">>}, 1000}),
@@ -109,6 +110,40 @@ scenario_link_killed(Target, Work) ->
           not atom_exists(Target, <<"zz_no_such_module_ever">>)),
     exit(Link, kill),
     torn_down(Target, Agent, Work, "after the link process died").
+
+%% One probe over two modules, counting allocation as well as time, and the
+%% refusals that keep a set from becoming an outage.
+scenario_counter_set(Target, PinId) ->
+    Pins = {<<"pins">>, [{<<"boot-1">>, PinId}]},
+    %% Stop the probe the caller left running so the two-probe limit is free.
+    {<<"counters_started">>, SetId, Matched, _} =
+        ask(Target, {<<"start_counter_set">>,
+                     [{<<"pg_e2e_work">>, <<"_">>}, {<<"pg_e2e_more">>, <<"more">>}],
+                     Pins, 60000, <<"time_and_memory">>}),
+    check("a counters probe over two modules matches functions of both", Matched >= 2),
+    timer:sleep(500),
+    {<<"counters">>, SetId, <<"running">>, _, _, {_, _, 0}, Rows} =
+        ask(Target, {<<"read_counters">>, SetId}),
+    Has = fun(Mod) ->
+              lists:any(fun({M, _, _, Calls, _, {<<"words">>, W}}) ->
+                                M =:= Mod andalso Calls > 0 andalso W >= 0;
+                           (_) -> false end, Rows)
+          end,
+    check("the rows cover the first module with allocation counted", Has(<<"pg_e2e_work">>)),
+    check("the rows cover the second module with allocation counted", Has(<<"pg_e2e_more">>)),
+    {<<"counters">>, SetId, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, SetId}),
+    {<<"error">>, <<"no_match">>, _} =
+        ask(Target, {<<"start_counter_set">>,
+                     [{<<"pg_e2e_work">>, <<"work">>}, {<<"pg_e2e_more">>, <<"loop">>}],
+                     Pins, 1000, <<"time">>}),
+    check("one pattern that matches nothing refuses the set", true),
+    {<<"error">>, <<"pattern_too_broad">>, _} =
+        ask(Target, {<<"start_counter_set">>,
+                     [{<<"pg_e2e_work">>, <<"work">>}, {<<"lists">>, <<"_">>}],
+                     Pins, 1000, <<"time">>}),
+    check("a wildcard on a hot module inside a set is refused", true),
+    check("a refused set leaves no session behind", length(sessions(Target)) =< 2),
+    ok.
 
 %% Self-measure: a process that advertises the capability answers, and every
 %% way the exchange can go wrong is a typed refusal.
@@ -262,9 +297,12 @@ pid_text(Target, Pid) ->
 
 %% A process on the target that calls a traced function in a loop.
 push_workload(Target) ->
+    _ = load_source(Target, "pg_e2e_more",
+        "-module(pg_e2e_more). -export([more/1]). "
+        "more(0) -> ok; more(N) -> lists:reverse([1,2,3]), more(N-1). "),
     Work = load_source(Target, "pg_e2e_work",
         "-module(pg_e2e_work). -export([loop/0, work/1]). "
-        "loop() -> work(100), receive after 1 -> ok end, loop(). "
+        "loop() -> work(100), pg_e2e_more:more(3), receive after 1 -> ok end, loop(). "
         "work(0) -> ok; work(N) -> lists:sort([3,2,1]), work(N-1). "),
     _ = load_source(Target, "pg_e2e_measurable",
         "-module(pg_e2e_measurable). -export([start/1]). "

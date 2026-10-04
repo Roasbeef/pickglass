@@ -183,7 +183,12 @@ State, MatchedFunctions, ElapsedMs, {Functions, WithCalls, Invalidated},
 Rows}`. A row is now `{Module, Function, Arity, Calls, TimeUs, Memory}` with
 `Memory` `{<<"none">>}` or `{<<"words">>, Words}` (words allocated while the
 function ran in the traced processes). The 5,000-function cap and the deny
-list of hot modules apply to the whole set.
+list of hot modules apply to the whole set. A repeated pattern, or one a
+wildcard on the same module covers, is dropped before arming. Errors:
+`unknown_module`, `unknown_function` (names the node has never seen, never
+turned into atoms), `no_match` (any one pattern matching nothing refuses the
+set), `pattern_too_broad`, `too_many_functions`, `memory_unavailable`,
+`probe_limit`, `stale_pin`.
 
 ## Invariants
 
