@@ -323,7 +323,7 @@ pub fn taking_a_checkpoint_resets_the_page_to_the_newest_test() {
   let state =
     state_on(page, "overview")
     |> web_mount.ask(msg.ChooseBaseline(feeds.checkpoint_key(0)))
-    |> web_mount.ask(msg.TakeCheckpoint)
+    |> web_mount.ask(msg.TakeCheckpoint(""))
 
   assert web_mount.baseline_of(state) == None
   assert list.length(page.checkpoints()) == 2
@@ -478,4 +478,29 @@ pub fn a_running_probe_is_stopped_by_its_key_test() {
   let _ = web_mount.ask(state, msg.StopProbe(feeds.probe_key("7")))
 
   assert list.contains(fixture.drain(rig.seen, 100), wire.AskStopCounters(7))
+}
+
+pub fn a_typed_checkpoint_name_is_kept_and_an_empty_one_is_numbered_test() {
+  let rig = harness.replay([fixture.observation(0, 1000)], None)
+  let page = harness.page(rig, "alice", harness.all)
+  let _ =
+    state_on(page, "overview")
+    |> web_mount.ask(msg.TakeCheckpoint("idle-0"))
+    |> web_mount.ask(msg.TakeCheckpoint("  "))
+
+  let names = list.map(page.checkpoints(), fn(mark) { mark.checkpoint.name })
+
+  assert names == ["idle-0", "checkpoint-2"]
+}
+
+pub fn detaching_from_the_page_loses_the_target_and_says_so_test() {
+  let rig = harness.live(fixture.healthy, None)
+  let page = harness.page(rig, "alice", harness.all)
+
+  assert page.lost() == None
+
+  let state = web_mount.ask(state_on(page, "overview"), msg.DetachViewer)
+
+  assert web_mount.refusal_of(state) == None
+  assert page.lost() == Some("detached")
 }

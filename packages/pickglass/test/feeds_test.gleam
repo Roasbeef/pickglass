@@ -44,6 +44,7 @@ fn page() -> seam.Page {
     read_capture: fn(_) { Error("none") },
     audit: fn(_) { [] },
     pins: fn() { [] },
+    lost: fn() { None },
   )
 }
 
@@ -69,6 +70,7 @@ fn inputs(observations: List(observation.Observation)) -> feeds.Inputs {
     notes: [],
     refusal: None,
     refused_starts: [],
+    lost: None,
     cadence_ms: 2000,
     sort: model.ByMemory,
     offset: 0,

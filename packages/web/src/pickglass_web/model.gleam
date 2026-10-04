@@ -127,6 +127,11 @@ pub type DataSource {
 
   /// Reading a capture file, by its name.
   Viewing(capture: String)
+
+  /// The node was attached and is not any more, because the operator
+  /// detached or the node went away. The readings on the page are the last
+  /// ones; nothing new arrives and no command can run.
+  Detached(reason: String)
 }
 
 /// What the viewer is allowed to do on this attachment.

@@ -36,6 +36,7 @@ import pickglass_web/view/compare
 import pickglass_web/view/overview
 import pickglass_web/view/probes
 import pickglass_web/view/profile as profile_view
+import pickglass_web/view/shell
 import pickglass_web/view/ui
 import support
 
@@ -629,4 +630,34 @@ pub fn the_source_tab_names_its_column_precision_test() {
 
   string.contains(html, "<th>precision</th>") |> should.be_true
   string.contains(html, "<th>line</th>") |> should.be_false
+}
+
+fn shell_html(strip: model.StripModel) -> String {
+  element.to_string(shell.view(
+    strip:,
+    links: page.Routes,
+    current: page.Overview,
+    body: element.none(),
+  ))
+}
+
+pub fn the_strip_offers_detach_only_while_attached_with_the_grant_test() {
+  let strip = fixture.strip()
+
+  string.contains(shell_html(strip), "data-test-id=\"detach\"")
+  |> should.be_true
+
+  let detached = model.StripModel(..strip, source: model.Detached("detached"))
+
+  string.contains(shell_html(detached), "data-test-id=\"detach\"")
+  |> should.be_false
+  string.contains(shell_html(detached), "detached-pill") |> should.be_true
+
+  let banner = model.CapabilityBanner(..strip.banner, grants: [policy.Observe])
+
+  string.contains(
+    shell_html(model.StripModel(..strip, banner:)),
+    "data-test-id=\"detach\"",
+  )
+  |> should.be_false
 }

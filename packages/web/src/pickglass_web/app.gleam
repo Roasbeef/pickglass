@@ -24,9 +24,11 @@
 //// routing `Fed` to `store`, `Ui` to `ui_event`, and `Ask` to `ask`, which
 //// consults `check_request`; `view` draws the shell and the page body.
 
+import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/set
+import gleam/string
 import lustre
 import lustre/attribute
 import lustre/effect.{type Effect}
@@ -307,6 +309,9 @@ fn ui_event(
         ),
       )
 
+    msg.DraftCheckpointName(text) ->
+      with_ui(model, state.UiState(..current, checkpoint_name: text))
+
     msg.DraftDuration(duration) ->
       with_ui(
         model,
@@ -481,6 +486,10 @@ fn ask(
           ..model.ui,
           last_request: Some(request),
           notice: Some(describe(request)),
+          checkpoint_name: case request {
+            msg.TakeCheckpoint(_) -> ""
+            _ -> model.ui.checkpoint_name
+          },
         ),
       ),
       on_request(request),
@@ -503,7 +512,8 @@ pub fn describe(request: Request) -> String {
     msg.StopProbe(_) -> "stop a probe"
     msg.ChooseBaseline(_) -> "compare against another baseline"
     msg.ChooseCandidate(_) -> "use a capture as the candidate"
-    msg.TakeCheckpoint -> "take a checkpoint"
+    msg.TakeCheckpoint(_) -> "take a checkpoint"
+    msg.DetachViewer -> "detach from the node"
     msg.SaveCapture -> "save a capture"
     msg.SortProcesses(_) -> "sort the processes"
     msg.MovePage(_) -> "move the window"
@@ -595,7 +605,17 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
     msg.AddFilterAt(kind:, frame:) -> check_filter_at(model, kind, frame)
     msg.TruncateChain(from:) -> check_chain_index(model, from)
     msg.ChooseSamples(_) -> Ok(Nil)
-    msg.TakeCheckpoint -> Ok(Nil)
+    msg.TakeCheckpoint(name:) ->
+      case string.length(name) <= max_checkpoint_name {
+        True -> Ok(Nil)
+        False ->
+          Error(
+            "A checkpoint name is at most "
+            <> int.to_string(max_checkpoint_name)
+            <> " characters.",
+          )
+      }
+    msg.DetachViewer -> Ok(Nil)
     msg.SaveCapture -> Ok(Nil)
     msg.SortProcesses(_) -> Ok(Nil)
     msg.MovePage(_) -> Ok(Nil)
@@ -604,6 +624,10 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
     msg.ExportTrace(_) -> Ok(Nil)
   }
 }
+
+// The longest checkpoint name the viewer accepts, in characters. The viewer
+// checks it again.
+const max_checkpoint_name = 64
 
 fn require(known: Presence, sentence: String) -> Result(Nil, String) {
   case known {
@@ -842,7 +866,11 @@ fn node_known(model: Model, node: Key) -> Bool {
 /// Draw the page: the shell around the body for the page this runtime
 /// serves.
 pub fn view(model: Model) -> Element(Msg) {
-  let body = html.div([], [toast(model.ui), flow_view(model), page_body(model)])
+  let body = case detached_reason(model) {
+    Some(reason) ->
+      html.div([], [toast(model.ui), detached_view(model, reason)])
+    None -> html.div([], [toast(model.ui), flow_view(model), page_body(model)])
+  }
 
   case model.strip {
     Ready(strip) ->
@@ -856,6 +884,61 @@ pub fn view(model: Model) -> Element(Msg) {
       html.div([attribute.class("app")], [
         html.main([attribute.class("page")], [ui.waiting("Connecting"), body]),
       ])
+  }
+}
+
+// Why the viewer has no node, once it has had one.
+fn detached_reason(model: Model) -> Option(String) {
+  case model.strip {
+    Ready(strip) ->
+      case strip.source {
+        model.Detached(reason:) -> Some(reason)
+        model.Live | model.Viewing(_) -> None
+      }
+    Waiting -> None
+  }
+}
+
+// What a detached viewer shows. The pages that read the node would be panels
+// of readings that no longer change, with controls that can only be refused,
+// so they give way to one statement. The pages that work from what the viewer
+// already holds (a profile, the timeline, a comparison of saved captures and
+// the audit log) stay.
+fn detached_view(model: Model, reason: String) -> Element(Msg) {
+  let notice =
+    html.div(
+      [
+        attribute.class("panel stack"),
+        attribute.role("status"),
+        attribute.data("test-id", "detached"),
+      ],
+      [
+        html.h2([], [element.text("Detached")]),
+        html.p([], [
+          element.text(
+            "The viewer is not attached to the node: "
+            <> reason
+            <> ". Its modules were unloaded from the node and every pin and probe it held has ended. Nothing new is read, and no command can run.",
+          ),
+        ]),
+        html.p([], [
+          element.text(
+            "The profile, timeline, compare and audit pages still show what the viewer holds. To look at the node again, start pickglass open once more.",
+          ),
+        ]),
+      ],
+    )
+
+  case model.page {
+    page.Profile | page.Timeline | page.Compare | page.Audit ->
+      html.div([attribute.class("stack")], [notice, page_body(model)])
+    page.Overview
+    | page.Owners
+    | page.Processes
+    | page.ProcessDetail
+    | page.Memory
+    | page.Supervision
+    | page.Probes -> notice
   }
 }
 
@@ -908,6 +991,7 @@ fn page_body(model: Model) -> Element(Msg) {
             Waiting -> None
           },
           grants(model),
+          model.ui.checkpoint_name,
         )
       })
     page.Owners ->

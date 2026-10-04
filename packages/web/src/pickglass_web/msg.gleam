@@ -228,6 +228,9 @@ pub type UiEvent {
   /// The module pattern text in the plan form.
   DraftModules(String)
 
+  /// The name typed for the next checkpoint.
+  DraftCheckpointName(String)
+
   /// The duration in the plan form.
   DraftDuration(DurationChoice)
 
@@ -293,8 +296,13 @@ pub type Request {
   /// Use a capture file the compare page offers as the candidate.
   ChooseCandidate(capture: Key)
 
-  /// Take a checkpoint now.
-  TakeCheckpoint
+  /// Take a checkpoint now. An empty name asks the viewer to number it.
+  TakeCheckpoint(name: String)
+
+  /// Detach from the node: the agent unloads itself, every pin and running
+  /// probe ends, and the page shows a detached state. It needs the
+  /// administer capability, and the viewer checks that again.
+  DetachViewer
 
   /// Write the viewer's live window to a capture file in its save
   /// directory, where the compare page offers it.

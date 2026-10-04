@@ -130,6 +130,8 @@ pub type Inputs {
     refusal: Option(String),
     /// The probes the page confirmed and the agent refused at start.
     refused_starts: List(String),
+    /// Why the target is gone, when it is.
+    lost: Option(String),
     cadence_ms: Int,
     sort: model.SortColumn,
     offset: Int,
@@ -348,7 +350,10 @@ fn strip(inputs: Inputs) -> model.StripModel {
     },
     os:,
     uptime_ms: uptime_of(inputs),
-    source:,
+    source: case inputs.lost, source {
+      Some(reason), model.Live -> model.Detached(reason)
+      _, _ -> source
+    },
     banner: model.CapabilityBanner(
       role:,
       grants: page.grants,

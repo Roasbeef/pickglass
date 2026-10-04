@@ -326,7 +326,7 @@ fn modules_field(draft: state.PlanDraft) -> Element(Msg) {
         html.input([
           attribute.class("text mono"),
           attribute.type_("text"),
-          attribute.placeholder("loom@runtime@keeper  loom@*"),
+          attribute.placeholder("loom@runtime@keeper  lists"),
           attribute.value(draft.modules),
           wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
         ]),

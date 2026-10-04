@@ -52,6 +52,7 @@ import pickglass/feeds
 import pickglass/gate
 import pickglass/hub
 import pickglass/internal/ffi_dist
+import pickglass/marks
 import pickglass/observation
 import pickglass/probe_book
 import pickglass/profile_export
@@ -413,6 +414,7 @@ fn inputs(state: State) -> feeds.Inputs {
     notes: page.profile_notes(),
     refusal: state.refusal,
     refused_starts: state.refused_starts,
+    lost: page.lost(),
     cadence_ms: state.cadence_ms,
     sort: state.sort,
     offset: state.offset,
@@ -537,17 +539,15 @@ pub fn ask(state: State, request: msg.Request) -> State {
       }
     }
 
-    // A new checkpoint becomes what the page compares against.
-    msg.TakeCheckpoint ->
+    // A new checkpoint becomes what the page compares against. A name left
+    // empty is numbered.
+    msg.TakeCheckpoint(name:) ->
       State(
-        ..submit(
-          state,
-          seam.Checkpoint(
-            "checkpoint-" <> int.to_string(list.length(current.marks) + 1),
-          ),
-        ),
+        ..submit(state, seam.Checkpoint(checkpoint_name(name, current.marks))),
         baseline: None,
       )
+
+    msg.DetachViewer -> submit(state, seam.Detach)
 
     msg.SaveCapture -> submit(state, seam.SaveCapture)
     msg.ChooseBaseline(choice) -> choose_baseline(state, current, choice)
@@ -823,6 +823,15 @@ fn submit(state: State, request: seam.Request) -> State {
   case state.page.submit(request) {
     seam.Rejected(reason) -> State(..state, refusal: Some(reason))
     _ -> State(..state, refusal: None)
+  }
+}
+
+// The name a checkpoint is saved under: what the operator typed, or the next
+// number when nothing was.
+fn checkpoint_name(typed: String, marks: List(marks.Mark)) -> String {
+  case string.trim(typed) {
+    "" -> "checkpoint-" <> int.to_string(list.length(marks) + 1)
+    named -> named
   }
 }
 

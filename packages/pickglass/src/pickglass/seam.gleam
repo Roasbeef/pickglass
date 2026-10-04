@@ -39,6 +39,7 @@
 import gleam/erlang/process.{type Subject}
 import gleam/json.{type Json}
 import gleam/list
+import gleam/option.{type Option}
 import gleam/result
 import gleam/string
 import pickglass/audit
@@ -345,6 +346,10 @@ pub type Page {
     audit: fn(Int) -> List(audit.Entry),
     /// The pins, oldest first.
     pins: fn() -> List(PinCard),
+    /// Why the target is gone, once it has been attached and is not: the
+    /// operator detached, or the node went away. `None` while it answers and
+    /// for a capture file, which never had one.
+    lost: fn() -> Option(String),
   )
 }
 

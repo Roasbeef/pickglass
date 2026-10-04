@@ -61,6 +61,8 @@ pub type UiState {
     plan: PlanDraft,
     /// The filter form.
     filter: FilterDraft,
+    /// The name typed for the next checkpoint, as typed.
+    checkpoint_name: String,
     /// A sentence about the last refusal or request, shown near the control.
     notice: Option(String),
     /// The last request sent to the viewer.
@@ -83,6 +85,7 @@ pub fn initial() -> UiState {
       target: None,
     ),
     filter: FilterDraft(kind: msg.FocusFilter, pattern: ""),
+    checkpoint_name: "",
     notice: None,
     last_request: None,
   )

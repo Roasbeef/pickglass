@@ -203,6 +203,7 @@ pub opaque type Message {
   )
   Pins(reply: Subject(List(seam.PinCard)))
   Checkpoints(reply: Subject(List(Mark)))
+  Lost(reply: Subject(Option(String)))
   Probes(reply: Subject(List(ProbeRecord)))
   Results(reply: Subject(List(seam.ProcessResult)))
   Captures(principal: Principal, reply: Subject(List(String)))
@@ -424,6 +425,15 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
 
     Checkpoints(reply) -> {
       process.send(reply, list.reverse(state.marks))
+
+      actor.continue(state)
+    }
+
+    Lost(reply) -> {
+      process.send(reply, case gate.target(state.gate) {
+        gate.Lost(reason:) -> Some(reason)
+        gate.Attached | gate.Detached -> None
+      })
 
       actor.continue(state)
     }
@@ -1637,6 +1647,9 @@ pub fn page_for(service: Service, principal: Principal) -> seam.Page {
     },
     checkpoints: fn() {
       process.call(service.subject, 5000, fn(reply) { Checkpoints(reply) })
+    },
+    lost: fn() {
+      process.call(service.subject, 5000, fn(reply) { Lost(reply) })
     },
     probes: fn() {
       process.call(service.subject, 5000, fn(reply) { Probes(reply) })

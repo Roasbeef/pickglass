@@ -48,6 +48,7 @@ pub fn view(
   data: OverviewModel,
   movers: Option(model.OwnerMovers),
   grants: List(Capability),
+  checkpoint_name: String,
 ) -> Element(Msg) {
   html.div([attribute.class("stack")], [
     html.div([attribute.class("profile-bar")], [
@@ -59,16 +60,20 @@ pub fn view(
         ),
       ]),
     ]),
-    html.div([attribute.class("grid overview")], overview_panels(data, movers)),
+    html.div(
+      [attribute.class("grid overview")],
+      overview_panels(data, movers, checkpoint_name),
+    ),
   ])
 }
 
 fn overview_panels(
   data: OverviewModel,
   movers: Option(model.OwnerMovers),
+  checkpoint_name: String,
 ) -> List(Element(Msg)) {
   [
-    layers_panel(data),
+    layers_panel(data, checkpoint_name),
     schedulers_panel(data),
     movers_panel(movers),
     counts_panel(data),
@@ -142,14 +147,14 @@ fn movers_panel(movers: Option(model.OwnerMovers)) -> Element(Msg) {
   }
 }
 
-fn layers_panel(data: OverviewModel) -> Element(Msg) {
+fn layers_panel(data: OverviewModel, checkpoint_name: String) -> Element(Msg) {
   let rows = data.layers.body
   let peak = largest(rows)
 
   ui.panel(
     title: "Memory layers",
     info: data.layers.info,
-    controls: checkpoint_controls(data),
+    controls: checkpoint_controls(data, checkpoint_name),
     body: [
       html.table([attribute.class("tbl layers")], [
         html.thead([], [
@@ -177,7 +182,10 @@ fn delta_title(checkpoint: Option(CheckpointRef)) -> String {
   }
 }
 
-fn checkpoint_controls(data: OverviewModel) -> List(Element(Msg)) {
+fn checkpoint_controls(
+  data: OverviewModel,
+  name: String,
+) -> List(Element(Msg)) {
   let chosen = case data.checkpoint {
     Some(ref) -> Some(ref.key)
     None -> None
@@ -201,11 +209,20 @@ fn checkpoint_controls(data: OverviewModel) -> List(Element(Msg)) {
         }),
       ),
     ]),
+    html.input([
+      attribute.class("text"),
+      attribute.type_("text"),
+      attribute.placeholder("name, such as idle-0"),
+      attribute.attribute("maxlength", "64"),
+      attribute.attribute("aria-label", "Checkpoint name"),
+      attribute.value(name),
+      wire.text_entered(fn(text) { msg.Ui(msg.DraftCheckpointName(text)) }),
+    ]),
     html.button(
       [
         attribute.class("btn"),
         attribute.type_("button"),
-        wire.click(msg.Ask(msg.TakeCheckpoint)),
+        wire.click(msg.Ask(msg.TakeCheckpoint(name))),
       ],
       [element.text("Checkpoint now")],
     ),

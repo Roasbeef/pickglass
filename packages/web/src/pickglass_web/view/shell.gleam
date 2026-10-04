@@ -27,15 +27,17 @@ import pickglass_core/unit
 import pickglass_web/chart/svg_util
 import pickglass_web/fmt
 import pickglass_web/model.{type StripModel}
+import pickglass_web/msg.{type Msg}
 import pickglass_web/page.{type Links, type Page}
+import pickglass_web/wire
 
 /// The strip, banner, navigation and body of a page.
 pub fn view(
   strip strip: StripModel,
   links links: Links,
   current current: Page,
-  body body: Element(msg),
-) -> Element(msg) {
+  body body: Element(Msg),
+) -> Element(Msg) {
   html.div([attribute.class("app")], [
     html.header([attribute.class("top")], [
       self_strip(strip, links),
@@ -46,7 +48,7 @@ pub fn view(
   ])
 }
 
-fn self_strip(strip: StripModel, links: Links) -> Element(msg) {
+fn self_strip(strip: StripModel, links: Links) -> Element(Msg) {
   html.div([attribute.class("strip")], [
     html.span([attribute.class("brand")], [element.text("pickglass")]),
     html.span([attribute.class("node"), attribute.title(strip.node)], [
@@ -55,6 +57,7 @@ fn self_strip(strip: StripModel, links: Links) -> Element(msg) {
     incarnation(strip),
     source_pill(strip),
     html.span([attribute.class("spacer")], []),
+    detach_control(strip),
     observer_meter(strip),
     probe_indicator(strip, links),
   ])
@@ -105,6 +108,38 @@ fn source_pill(strip: StripModel) -> Element(msg) {
       html.span([attribute.class("pill pill-capture")], [
         element.text("viewing capture " <> capture),
       ])
+    model.Detached(reason:) ->
+      html.span(
+        [
+          attribute.class("pill pill-detached"),
+          attribute.title(reason),
+          attribute.data("test-id", "detached-pill"),
+        ],
+        [element.text("detached")],
+      )
+  }
+}
+
+// The control that ends the attachment: the agent unloads from the node, and
+// every pin and running probe ends. It is drawn only while attached and only
+// for a principal who holds the capability, as the other controls are; the
+// viewer checks the grant again.
+fn detach_control(strip: StripModel) -> Element(Msg) {
+  case strip.source, list.contains(strip.banner.grants, policy.Administer) {
+    model.Live, True ->
+      html.button(
+        [
+          attribute.class("btn"),
+          attribute.type_("button"),
+          attribute.title(
+            "Unload pickglass from the node and end every pin and running probe",
+          ),
+          attribute.data("test-id", "detach"),
+          wire.click(msg.Ask(msg.DetachViewer)),
+        ],
+        [element.text("Detach")],
+      )
+    _, _ -> element.none()
   }
 }
 
