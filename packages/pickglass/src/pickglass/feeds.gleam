@@ -572,9 +572,6 @@ fn os_roles(newest: Observation) -> List(model.OsRole) {
           os: identity.OsProcess(pid: reading.pid, start: reading.start),
           rss: reading.rss,
           anon: reading.anon,
-          // A coarse start is the same on every row of the platform, so the
-          // Overview says it once under the table and the cell stays empty.
-          note: "",
         )
       })
   }

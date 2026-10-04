@@ -270,8 +270,6 @@ pub type OsRole {
     rss: Measurement,
     /// The anonymous part of the resident set, when the OS reports it.
     anon: Measurement,
-    /// A short note, for example what the process is.
-    note: String,
   )
 }
 

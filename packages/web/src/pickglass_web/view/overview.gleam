@@ -21,7 +21,6 @@
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
@@ -238,11 +237,14 @@ fn checkpoint_controls(data: OverviewModel) -> List(Element(Msg)) {
 }
 
 // The text that changes when a checkpoint is added, which is what clears the
-// name field.
+// name field. The list is oldest first and its keys are positions, so the
+// newest key repeats once the list is full; the newest checkpoint's own clock
+// reading is what differs between two checkpoints.
 fn checkpoints_key(checkpoints: List(CheckpointRef)) -> String {
-  list.fold(checkpoints, "", fn(acc, ref) {
-    acc <> key.to_string(ref.key) <> ","
-  })
+  case list.last(checkpoints) {
+    Ok(newest) -> int.to_string(newest.checkpoint.agent_monotonic_ns)
+    Error(Nil) -> "none"
+  }
 }
 
 fn largest(rows: List(LayerRow)) -> Int {
@@ -459,11 +461,7 @@ fn role_row(role: OsRole, anon: Bool) -> Element(Msg) {
       },
       [
         html.td([attribute.class("note-cell")], [
-          element.text(
-            [role.note, start_note(role.os.start)]
-            |> list.filter(fn(part) { part != "" })
-            |> string.join(" · "),
-          ),
+          element.text(start_note(role.os.start)),
         ]),
       ],
     ]),
@@ -474,7 +472,8 @@ fn start_note(start: identity.StartIdentity) -> String {
   case start {
     identity.PreciseStart(_) -> ""
 
-    // The row's note already says so, once.
+    // A coarse start is the same on every row of the platform, so the
+    // Overview says it once under the table and the cell stays empty.
     identity.CoarseStart(_) -> ""
     identity.UnreadableStart -> "start time unreadable"
   }

@@ -339,7 +339,6 @@ pub fn overview() -> model.OverviewModel {
           48_211,
           1932 * mib + 700_000,
           Known(1751 * mib),
-          "loomd, the node pickglass is attached to",
           identity.PreciseStart(token: "a"),
         ),
         os_role(
@@ -347,7 +346,6 @@ pub fn overview() -> model.OverviewModel {
           48_390,
           96 * mib,
           Known(71 * mib),
-          "loom tui",
           identity.PreciseStart(token: "b"),
         ),
         os_role(
@@ -355,7 +353,6 @@ pub fn overview() -> model.OverviewModel {
           48_512,
           310 * mib,
           Known(280 * mib),
-          "code-mode satellite",
           identity.PreciseStart(token: "c"),
         ),
         os_role(
@@ -363,7 +360,6 @@ pub fn overview() -> model.OverviewModel {
           48_513,
           305 * mib,
           Known(277 * mib),
-          "code-mode satellite",
           identity.CoarseStart(token: "d"),
         ),
         os_role(
@@ -371,7 +367,6 @@ pub fn overview() -> model.OverviewModel {
           48_620,
           18 * mib,
           NotApplicable,
-          "sandbox helper",
           identity.PreciseStart(token: "e"),
         ),
         os_role(
@@ -379,7 +374,6 @@ pub fn overview() -> model.OverviewModel {
           48_701,
           640 * mib,
           Known(590 * mib),
-          "gopls",
           identity.UnreadableStart,
         ),
       ],
@@ -392,7 +386,6 @@ fn os_role(
   pid: Int,
   rss: Int,
   anon: Measurement,
-  note: String,
   start: identity.StartIdentity,
 ) -> model.OsRole {
   model.OsRole(
@@ -400,7 +393,6 @@ fn os_role(
     os: identity.OsProcess(pid:, start:),
     rss: Known(rss),
     anon:,
-    note:,
   )
 }
 
