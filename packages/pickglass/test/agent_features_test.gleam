@@ -330,6 +330,7 @@ fn base_inputs(page: seam.Page) -> feeds.Inputs {
     entries: [],
     notes: [],
     refusal: None,
+    refused_starts: [],
     cadence_ms: 2000,
     sort: model.ByMemory,
     offset: 0,

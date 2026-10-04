@@ -9,6 +9,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import harness
+import pickglass/feeds
 import pickglass/hub
 import pickglass/profile_scope.{Candidate}
 import pickglass/remote
@@ -427,4 +428,54 @@ pub fn a_swap_of_a_plan_that_is_gone_makes_no_request_test() {
 
   assert page.plans() == []
   assert fixture.drain(rig.seen, 50) == []
+}
+
+// An agent that refuses every call trace at start, as it does for a module
+// the node does not have.
+fn refusing_agent(
+  rows: List(wire.ProcessRow),
+) -> fn(wire.Request) -> Result(wire.Reply, remote.Failure) {
+  fn(request) {
+    case request {
+      wire.Extended(wire.AskStartCalltrace(..)) ->
+        Error(remote.Refusal(
+          "unknown_module",
+          "the node has no such name loaded",
+        ))
+      other -> agent(rows)(other)
+    }
+  }
+}
+
+pub fn a_probe_the_agent_refuses_at_start_is_shown_on_the_page_that_asked_test() {
+  let rows = [session(1), session(2)]
+  let rig = harness.live(refusing_agent(rows), None)
+  let page = harness.page(rig, "alice", harness.all)
+  let updates = process.new_subject()
+  let assert Ok(Nil) = page.subscribe(updates)
+
+  list.each([1, 2], fn(_) {
+    hub.tick(rig.hub)
+    let _ = process.receive(updates, 1000)
+    process.sleep(50)
+  })
+
+  let state =
+    web_mount.ask(
+      on(page, "process-detail"),
+      msg.TraceProcess(key.make(pid(2)), ["runtime"]),
+    )
+  let assert [#(plan_id, _)] = page.plans()
+  let state = web_mount.ask(state, msg.ConfirmPlan(feeds.plan_key(plan_id)))
+
+  // No probe exists, so the notice is the only place the reason can be.
+  let assert Some(notice) = web_mount.refusal_of(state)
+
+  assert string.contains(
+    notice,
+    "A probe of runtime was refused when it started",
+  )
+  assert string.contains(notice, "unknown_module")
+  assert page.probes() == []
+  assert web_mount.refused_starts_of(state) == [notice]
 }

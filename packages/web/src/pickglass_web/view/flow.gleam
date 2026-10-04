@@ -89,7 +89,7 @@ fn refusal(reason: Option(String)) -> Element(Msg) {
           attribute.role("status"),
           attribute.data("test-id", "profile-refused"),
         ],
-        [element.text("No profile was planned: " <> text)],
+        [element.text("Refused: " <> text)],
       )
     None -> element.none()
   }

@@ -128,19 +128,28 @@ pub type PatternRefusal {
   /// More patterns than a probe may scope.
   TooManyPatterns
 
-  /// A pattern held a character outside letters, digits, underscore, at
-  /// sign and star, or was empty or longer than 255 characters.
+  /// A pattern held a character outside letters, digits, underscore and at
+  /// sign, or was longer than 255 characters.
   BadPattern(text: String)
+
+  /// A pattern held a `*`. The agent turns each name into a module the node
+  /// already has and has no wildcard, so a pattern with a star can only be
+  /// refused when the probe starts, after the operator confirmed it.
+  WildcardPattern(text: String)
 }
 
 /// Read the module field of the plan form. Patterns are separated by commas
-/// or spaces; each is a module name with `*` as the only wildcard.
+/// or spaces; each is the exact name of a module the node has loaded, which
+/// is the only thing the agent resolves.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// wire.module_patterns("loom@runtime@keeper loom@*")
-/// // -> Ok(["loom@runtime@keeper", "loom@*"])
+/// wire.module_patterns("loom@runtime@keeper lists")
+/// // -> Ok(["loom@runtime@keeper", "lists"])
+///
+/// wire.module_patterns("loom@*")
+/// // -> Error(WildcardPattern("loom@*"))
 ///
 /// wire.module_patterns("../etc")
 /// // -> Error(BadPattern("../etc"))
@@ -165,9 +174,13 @@ pub fn module_patterns(text: String) -> Result(List(String), PatternRefusal) {
 fn check_patterns(
   tokens: List(String),
 ) -> Result(List(String), PatternRefusal) {
-  case list.find(tokens, fn(token) { !pattern_ok(token) }) {
-    Ok(bad) -> Error(BadPattern(bad))
-    Error(Nil) -> Ok(tokens)
+  case
+    list.find(tokens, string.contains(_, "*")),
+    list.find(tokens, fn(token) { !pattern_ok(token) })
+  {
+    Ok(starred), _ -> Error(WildcardPattern(starred))
+    Error(Nil), Ok(bad) -> Error(BadPattern(bad))
+    Error(Nil), Error(Nil) -> Ok(tokens)
   }
 }
 
@@ -181,6 +194,5 @@ fn pattern_ok(token: String) -> Bool {
     || { code >= 97 && code <= 122 }
     || code == 95
     || code == 64
-    || code == 42
   })
 }

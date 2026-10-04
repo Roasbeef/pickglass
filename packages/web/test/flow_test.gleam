@@ -255,7 +255,7 @@ pub fn a_refusal_is_said_where_the_button_was_test() {
 
   assert string.contains(
     html,
-    "No profile was planned: no live process carries that owner",
+    "Refused: no live process carries that owner",
   )
 }
 

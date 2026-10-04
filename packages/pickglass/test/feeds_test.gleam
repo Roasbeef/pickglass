@@ -68,6 +68,7 @@ fn inputs(observations: List(observation.Observation)) -> feeds.Inputs {
     entries: [],
     notes: [],
     refusal: None,
+    refused_starts: [],
     cadence_ms: 2000,
     sort: model.ByMemory,
     offset: 0,

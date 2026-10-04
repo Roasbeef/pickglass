@@ -86,10 +86,20 @@ pub fn counts_round_trip_through_their_digits_test() {
   )
 }
 
-pub fn module_patterns_accept_names_and_stars_test() {
-  wire.module_patterns("loom@runtime@keeper loom@*")
-  |> should.equal(Ok(["loom@runtime@keeper", "loom@*"]))
+pub fn module_patterns_accept_exact_names_test() {
+  wire.module_patterns("loom@runtime@keeper lists")
+  |> should.equal(Ok(["loom@runtime@keeper", "lists"]))
   wire.module_patterns("a, b") |> should.equal(Ok(["a", "b"]))
+}
+
+// The agent resolves each name to a module the node has, so a star can only
+// be refused after the operator confirmed the plan.
+pub fn module_patterns_refuse_a_wildcard_at_plan_time_test() {
+  wire.module_patterns("runtime@*")
+  |> should.equal(Error(wire.WildcardPattern("runtime@*")))
+  wire.module_patterns("lists a*b")
+  |> should.equal(Error(wire.WildcardPattern("a*b")))
+  wire.module_patterns("*") |> should.equal(Error(wire.WildcardPattern("*")))
 }
 
 pub fn module_patterns_refuse_everything_else_test() {

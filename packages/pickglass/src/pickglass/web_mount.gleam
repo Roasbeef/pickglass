@@ -21,8 +21,10 @@
 ////   the checkpoint it compares against, and the two capture files chosen on
 ////   the compare page. Two tabs therefore filter and compare independently
 ////   over the same probes.
-//// - A refusal from the gate is not shown by the page that asked; the Audit
-////   page is where it shows.
+//// - A request the viewer or the agent refuses is shown by the page that
+////   asked, as a notice above its body, and a probe the agent refused when
+////   it started is also listed on the Probes page. The Audit page still
+////   holds the gate's own record of it.
 ////
 //// The application and the feeder are linked to the socket process that
 //// started them. `shutdown` stops both when the browser goes away.
@@ -41,6 +43,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 import lustre
 import lustre/effect
 import lustre/server_component
@@ -107,8 +110,15 @@ pub opaque type State {
     /// Why this page's last profile button planned nothing, when it did not.
     /// The page that asked is the one told, so two tabs do not share it.
     refusal: Option(String),
+    /// The probes this page confirmed and the agent refused at start, newest
+    /// first. A refused start has no probe id and so no row in the viewer's
+    /// probe list; this is where the page that asked finds the reason.
+    refused_starts: List(String),
   )
 }
+
+/// How many refused starts a page keeps.
+const max_refused_starts = 5
 
 /// How old the spawn edges may be before the supervision page rereads them.
 const supervision_ms = 10_000
@@ -231,24 +241,27 @@ fn start_feeder(
 
       use _ <- result.try(page.subscribe(updates))
 
-      actor.initialised(State(
-        page:,
-        slug:,
-        cadence_ms:,
-        runtime: None,
-        sort: model.ByMemory,
-        offset: 0,
-        baseline: None,
-        samples: activity.OnSchedulerOnly,
-        chain: [],
-        exports: [],
-        baseline_file: None,
-        candidate_file: None,
-        compared: None,
-        subject: opened,
-        supervision: None,
-        refusal: None,
-      ))
+      actor.initialised(
+        State(
+          page:,
+          slug:,
+          cadence_ms:,
+          runtime: None,
+          sort: model.ByMemory,
+          offset: 0,
+          baseline: None,
+          samples: activity.OnSchedulerOnly,
+          chain: [],
+          exports: [],
+          baseline_file: None,
+          candidate_file: None,
+          compared: None,
+          subject: opened,
+          supervision: None,
+          refusal: None,
+          refused_starts: [],
+        ),
+      )
       |> actor.selecting(
         process.new_selector()
         |> process.select(subject)
@@ -317,12 +330,19 @@ pub fn new_state(
     subject:,
     supervision: None,
     refusal: None,
+    refused_starts: [],
   )
 }
 
 /// Why the last profile button of the page planned nothing, if it did not.
 pub fn refusal_of(state: State) -> Option(String) {
   state.refusal
+}
+
+/// The probes this page confirmed that the agent refused at start, newest
+/// first.
+pub fn refused_starts_of(state: State) -> List(String) {
+  state.refused_starts
 }
 
 /// Which samples of a sampled profile the page draws.
@@ -392,6 +412,7 @@ fn inputs(state: State) -> feeds.Inputs {
     },
     notes: page.profile_notes(),
     refusal: state.refusal,
+    refused_starts: state.refused_starts,
     cadence_ms: state.cadence_ms,
     sort: state.sort,
     offset: state.offset,
@@ -496,8 +517,7 @@ pub fn ask(state: State, request: msg.Request) -> State {
       submit_with(state, resolve_pin(current, pin), seam.UnpinProcess)
     msg.PlanGc(pin) ->
       submit_with(state, resolve_pin(current, pin), seam.PlanTargetedGc)
-    msg.ConfirmPlan(plan) ->
-      submit_with(state, resolve_plan(current, plan), seam.ConfirmPlan)
+    msg.ConfirmPlan(plan) -> confirm(state, current, plan)
     msg.CancelPlan(plan) ->
       submit_with(state, resolve_plan(current, plan), seam.CancelPlan)
     msg.PlanProbe(draft) -> {
@@ -800,9 +820,45 @@ fn submit_with(
 }
 
 fn submit(state: State, request: seam.Request) -> State {
-  let _ = state.page.submit(request)
+  case state.page.submit(request) {
+    seam.Rejected(reason) -> State(..state, refusal: Some(reason))
+    _ -> State(..state, refusal: None)
+  }
+}
 
-  state
+// A confirmed plan the agent refuses at start leaves no probe behind, so the
+// refusal is kept here, with what the plan was meant to trace, or the
+// operator would see the plan vanish and nothing else.
+fn confirm(state: State, current: feeds.Inputs, plan: Key) -> State {
+  case resolve_plan(current, plan) {
+    Error(Nil) -> state
+    Ok(plan_id) -> {
+      let modules = case list.key_find(current.plans, plan_id) {
+        Ok(held) -> policy.plan_scope(held).modules
+        Error(Nil) -> []
+      }
+
+      case state.page.submit(seam.ConfirmPlan(plan_id)) {
+        seam.Rejected(reason) -> {
+          let what = case modules {
+            [] -> "A probe"
+            named -> "A probe of " <> string.join(named, ", ")
+          }
+          let sentence = what <> " was refused when it started: " <> reason
+
+          State(
+            ..state,
+            refusal: Some(sentence),
+            refused_starts: list.take(
+              [sentence, ..state.refused_starts],
+              max_refused_starts,
+            ),
+          )
+        }
+        _ -> State(..state, refusal: None)
+      }
+    }
+  }
 }
 
 // A row key names a process in the newest census, or nothing.

@@ -241,8 +241,8 @@ process was running or runnable are counted, since on an idle node the others
 find processes waiting for a message; --include-waiting counts them too, and
 the summary states how the samples split.
 
---trace-calls traces the calls of the modules named with --module (a name,
-or a prefix ending in *, repeated or separated by commas) in at most 4
+--trace-calls traces the calls of the modules named with --module (exact
+names of loaded modules, repeated or separated by commas) in at most 4
 processes for at most 10 seconds (default 5) and builds a call tree from the
 exact calls and their times. At least one module is required, because the
 agent refuses to trace every function of a node. --rate and --include-waiting
@@ -691,25 +691,23 @@ fn finish_tracing(
 }
 
 // A `--module` value is one name or several joined by commas or spaces, from
-// the alphabet the page's form accepts. A lone `*` would name every module,
-// which the agent refuses, so it is refused here with the reason.
+// the alphabet the page's form accepts. The agent resolves each name to a
+// module the node has and has no wildcard, so a `*` is refused here with the
+// reason, as the page's form refuses it.
 fn module_arguments(value: String) -> Result(List(String), String) {
   case web_wire.module_patterns(value) {
     Error(web_wire.NoPatterns) -> Error("--module needs a module name")
     Error(web_wire.TooManyPatterns) ->
       Error("--module names too many modules for one call trace")
     Error(web_wire.BadPattern(text:)) ->
+      Error("--module takes letters, digits, _ and @ only; refused: " <> text)
+    Error(web_wire.WildcardPattern(text:)) ->
       Error(
-        "--module takes letters, digits, _, @ and * only; refused: " <> text,
+        "--module "
+        <> text
+        <> " has a wildcard, and the agent traces modules by exact name; name each module",
       )
-    Ok(names) ->
-      case list.contains(names, "*") {
-        True ->
-          Error(
-            "--module * would trace every module, which the agent refuses; name the modules",
-          )
-        False -> Ok(names)
-      }
+    Ok(names) -> Ok(names)
   }
 }
 

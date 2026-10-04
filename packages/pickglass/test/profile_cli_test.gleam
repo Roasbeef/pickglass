@@ -608,11 +608,14 @@ pub fn the_flags_of_each_method_are_refused_under_the_other_test() {
   )
   assert is_ok(with(["--owner", "session:abc", ..traced(["lists"])]))
 
-  // The module alphabet and the lone wildcard.
+  // The module alphabet, and any wildcard: the agent resolves exact names.
   assert is_error(with(["--top", "1", "--trace-calls", "--module", "../etc"]))
   assert is_error(with(["--top", "1", "--trace-calls", "--module", ""]))
   assert is_error(with(["--top", "1", "--trace-calls", "--module", "*"]))
-  assert is_ok(with(["--top", "1", "--trace-calls", "--module", "loom@*"]))
+  assert is_error(with(["--top", "1", "--trace-calls", "--module", "loom@*"]))
+  assert is_ok(
+    with(["--top", "1", "--trace-calls", "--module", "loom@runtime"]),
+  )
   assert is_error(with(["--top", "1", "--trace-calls", "--module"]))
 }
 

@@ -2,6 +2,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/set
+import gleam/string
 import gleeunit/should
 import lustre/dev/query
 import lustre/dev/simulate
@@ -255,7 +256,7 @@ pub fn the_plan_form_sends_a_checked_draft_test() {
   let model =
     simulate.model(sim)
     |> update(msg.Ui(msg.DraftTarget(key.indexed("proc", 1))))
-    |> update(msg.Ui(msg.DraftModules("loom@runtime@keeper loom@*")))
+    |> update(msg.Ui(msg.DraftModules("loom@runtime@keeper lists")))
     |> update(msg.Ui(msg.SubmitDraft))
 
   model.ui.last_request
@@ -264,7 +265,7 @@ pub fn the_plan_form_sends_a_checked_draft_test() {
       msg.PlanProbe(msg.ProbeDraft(
         kind: policy.Counters,
         targets: [key.indexed("proc", 1)],
-        modules: ["loom@runtime@keeper", "loom@*"],
+        modules: ["loom@runtime@keeper", "lists"],
         duration: msg.Seconds30,
       )),
     ),
@@ -300,4 +301,20 @@ pub fn a_valid_filter_pattern_is_sent_test() {
 
 fn effect_none() {
   lustre_effect.none()
+}
+
+pub fn a_wildcard_module_is_refused_with_the_reason_before_any_request_test() {
+  let sim = support.simulation(on: page.Probes)
+  let update = fn(model, message) {
+    app.update(fn(_) { effect_none() }, model, message).0
+  }
+
+  let model =
+    simulate.model(sim)
+    |> update(msg.Ui(msg.DraftTarget(key.indexed("proc", 1))))
+    |> update(msg.Ui(msg.DraftModules("runtime@*")))
+    |> update(msg.Ui(msg.SubmitDraft))
+
+  model.ui.last_request |> should.equal(None)
+  assert string.contains(option.unwrap(model.ui.notice, ""), "no wildcard")
 }

@@ -128,6 +128,8 @@ pub type Inputs {
     notes: List(seam.ProfileNote),
     /// Why the page's last profile button planned nothing, when it did not.
     refusal: Option(String),
+    /// The probes the page confirmed and the agent refused at start.
+    refused_starts: List(String),
     cadence_ms: Int,
     sort: model.SortColumn,
     offset: Int,
@@ -1263,6 +1265,7 @@ fn probes(inputs: Inputs, newest: Observation) -> model.ProbesModel {
     pending: list.first(plan_cards(inputs, rows)) |> option.from_result,
     active: active_probes(inputs),
     history: probe_history(inputs),
+    refused: inputs.refused_starts,
     grants: inputs.page.grants,
   )
 }

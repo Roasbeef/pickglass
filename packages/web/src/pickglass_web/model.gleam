@@ -749,6 +749,9 @@ pub type ProbesModel {
     active: List(ActiveProbe),
     /// Probes that ended.
     history: List(ProbeHistoryRow),
+    /// Probes confirmed on this page that the agent refused at start, as
+    /// sentences, newest first. They have no probe id and so no history row.
+    refused: List(String),
     /// The principal's capabilities, to say what may be planned.
     grants: List(policy.Capability),
   )

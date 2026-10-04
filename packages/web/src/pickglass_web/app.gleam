@@ -426,8 +426,15 @@ fn with_modules(
     Error(wire.BadPattern(text:)) ->
       refuse(
         model,
-        "Module patterns use letters, digits, _, @ and * only; refused: "
-          <> text,
+        "Module names use letters, digits, _ and @ only; refused: " <> text,
+      )
+
+    Error(wire.WildcardPattern(text:)) ->
+      refuse(
+        model,
+        "The agent traces modules by exact name and has no wildcard, so "
+          <> text
+          <> " would be refused when the probe starts. Name each module.",
       )
   }
 }

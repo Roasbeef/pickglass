@@ -228,6 +228,7 @@ pub fn view(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
       form,
       pending,
       [active_panel(data), history_panel(data)],
+      refused_panel(data),
     ]),
   )
 }
@@ -800,6 +801,25 @@ fn history_panel(data: ProbesModel) -> Element(Msg) {
       html.tbody([], list.map(data.history, history_row)),
     ]),
   ])
+}
+
+// The probes the agent refused when they started. They never got an id, so
+// they are not rows of the history table above, but the operator who
+// confirmed one is owed the reason.
+fn refused_panel(data: ProbesModel) -> List(Element(Msg)) {
+  case data.refused {
+    [] -> []
+    sentences -> [
+      ui.plain_panel(title: "Refused at start", body: [
+        html.ul(
+          [attribute.data("test-id", "refused-starts")],
+          list.map(sentences, fn(sentence) {
+            html.li([], [element.text(sentence)])
+          }),
+        ),
+      ]),
+    ]
+  }
 }
 
 fn history_row(row: ProbeHistoryRow) -> Element(Msg) {

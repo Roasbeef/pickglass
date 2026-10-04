@@ -1262,6 +1262,7 @@ pub fn probes() -> model.ProbesModel {
         ),
       ),
     ],
+    refused: [],
     grants: policy.all_capabilities,
   )
 }
