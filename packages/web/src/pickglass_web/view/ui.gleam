@@ -21,14 +21,19 @@
 //// `num`, `delta` and `overlap` build cells; `badge`, `note` and `waiting`
 //// are small text pieces.
 
+import gleam/int
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
 import pickglass_core/measure.{type Coverage, type Measurement}
+import pickglass_core/policy.{type Capability}
 import pickglass_core/unit.{type Unit}
 import pickglass_web/fmt
 import pickglass_web/model.{type PanelInfo}
+import pickglass_web/msg.{type Msg}
+import pickglass_web/wire
 
 /// The one-line description of where a panel's data came from, as the
 /// parts of the title-bar line in order.
@@ -272,4 +277,62 @@ pub fn waiting(page: String) -> Element(msg) {
       element.text("look like a measured zero."),
     ]),
   ])
+}
+
+/// A button that asks the viewer to plan a profile. It is drawn only for a
+/// principal that can both pin a process and plan a probe, because a
+/// handler in the tree is callable by anyone holding the socket and the
+/// viewer would refuse the request anyway. Pressing it plans nothing that
+/// runs: the plan appears above the page and waits for Confirm.
+///
+/// ## Examples
+///
+/// ```gleam
+/// ui.profile_button(grants, "Profile", "Profile this owner", request)
+/// ```
+pub fn profile_button(
+  grants: List(Capability),
+  label: String,
+  title: String,
+  request: msg.Request,
+) -> Element(Msg) {
+  case
+    list.contains(grants, policy.Profile),
+    list.contains(grants, policy.Observe)
+  {
+    True, True ->
+      html.button(
+        [
+          attribute.class("btn btn-small btn-profile"),
+          attribute.type_("button"),
+          attribute.title(title),
+          wire.click(msg.Ask(request)),
+        ],
+        [element.text(label)],
+      )
+    _, _ -> element.none()
+  }
+}
+
+/// The "profile the busiest" button, which Overview and Processes share. It
+/// names the number of processes the viewer will take, which is the agent's
+/// limit for one stack probe.
+///
+/// ## Examples
+///
+/// ```gleam
+/// ui.busiest_button(grants)
+/// ```
+pub fn busiest_button(grants: List(Capability)) -> Element(Msg) {
+  let count = int.to_string(msg.profile_limit)
+
+  profile_button(
+    grants,
+    "Profile the busiest " <> count,
+    "Pin the "
+      <> count
+      <> " processes with the most reductions per second "
+      <> "in the last pass and plan one stack probe over them",
+    msg.ProfileBusiest,
+  )
 }

@@ -17,6 +17,14 @@
 //// this actor, unaffected. The census and the other reads of the target never
 //// pass through here; the hub serves them from its ring.
 ////
+//// A one-click profile is the one request that is several commands. The
+//// service composes it (`profile`): the pins the profile needs are taken one
+//// command at a time through the gate, the stack probe is planned over them,
+//// and the plan waits for Confirm like any other. What it pinned is recorded
+//// as `Held` against the plan, and released when the plan is cancelled or
+//// lapses, when the probe fails to start, and when the probe ends, unless the
+//// operator had pinned the process already.
+////
 //// The service watches the hub for `TargetLost`. When the target is gone it
 //// marks every pin dead, so a later probe naming one is denied by the gate
 //// before it reaches the link, and closes every running probe as lost.
@@ -41,6 +49,8 @@
 ////   what it found.
 //// - `Subscribe` authorizes the read and registers the subscriber with the
 ////   hub.
+//// - `profile` composes a one-click profile in the submitter's process, and
+////   `Hold`, `Claim` and `sweep_held` keep what it pinned until it is done.
 
 import gleam/erlang/process.{type Subject}
 import gleam/int
@@ -123,7 +133,50 @@ pub opaque type Decided {
     follow: seam.Follow,
     /// Which kind of probe an id names, as of the decision.
     kind_of: fn(String) -> Option(policy.ProbeKind),
+    /// The plan a confirm acted on, so the outcome can be tied to what a
+    /// profile pinned for it.
+    plan_id: Option(String),
   )
+}
+
+/// Where a one-click profile stands, which says when its pins are released.
+pub type Stage {
+  /// The plan is waiting for Confirm. The pins are released when the plan is
+  /// cancelled, replaced or lapses.
+  Planned
+
+  /// The plan was confirmed and the agent has not yet answered the start.
+  Starting
+
+  /// The probe is running. The pins are released when it ends.
+  Sampling(probe_id: String)
+}
+
+/// What a one-click profile holds on the target: the pins it took for itself
+/// (never one the operator had already pinned), the processes it chose and
+/// how, and what the plan was for.
+pub type Held {
+  Held(
+    plan_id: String,
+    principal: Principal,
+    /// Pin tokens as text, in the order they were taken.
+    taken: List(String),
+    /// Every process the profile chose, for planning it again.
+    pids: List(String),
+    chosen: String,
+    duration_ms: Int,
+    rate_hz: Int,
+    stage: Stage,
+  )
+}
+
+/// Which pending profile plans a claim takes.
+pub type Which {
+  /// Every pending profile plan of the principal.
+  AnyPlan
+
+  /// The one with this plan id.
+  ThisPlan(plan_id: String)
 }
 
 /// What the actor receives.
@@ -132,9 +185,13 @@ pub opaque type Message {
   Apply(
     authorized: policy.Authorized(Command),
     follow: seam.Follow,
+    plan_id: Option(String),
     outcome: exec.Outcome,
     reply: Subject(Reply),
   )
+  Hold(held: Held, reply: Subject(Nil))
+  Claim(principal: policy.PrincipalId, which: Which, reply: Subject(List(Held)))
+  Notes(principal: policy.PrincipalId, reply: Subject(List(seam.ProfileNote)))
   Subscribe(
     principal: Principal,
     subscriber: Subject(hub.Update),
@@ -160,6 +217,7 @@ pub opaque type Message {
   )
   Poll
   Polled(weft.Pulled(#(String, exec.Poll), String))
+  Released(weft.Pulled(#(policy.Authorized(Command), exec.Outcome), String))
   TargetGone(hub.Update)
 }
 
@@ -177,6 +235,12 @@ type State {
     downloads: downloads.Registry,
     sink: Subject(weft.Pulled(#(String, exec.Poll), String)),
     polling: Polling,
+    /// What one-click profiles hold on the target, newest first.
+    held: List(Held),
+    /// Where the outcomes of the pin releases arrive.
+    release_sink: Subject(
+      weft.Pulled(#(policy.Authorized(Command), exec.Outcome), String),
+    ),
   )
 }
 
@@ -211,6 +275,7 @@ pub fn start(config: Config) -> Result(Service, String) {
     actor.new_with_initialiser(1000, fn(subject) {
       let watcher = process.new_subject()
       let sink = process.new_subject()
+      let release_sink = process.new_subject()
 
       hub.watch(config.hub, watcher)
 
@@ -224,12 +289,15 @@ pub fn start(config: Config) -> Result(Service, String) {
         downloads: downloads.new(),
         sink:,
         polling: PollIdle,
+        held: [],
+        release_sink:,
       ))
       |> actor.selecting(
         process.new_selector()
         |> process.select(subject)
         |> process.select_map(watcher, TargetGone)
-        |> process.select_map(sink, Polled),
+        |> process.select_map(sink, Polled)
+        |> process.select_map(release_sink, Released),
       )
       |> actor.returning(subject)
       |> Ok
@@ -262,10 +330,60 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
 
     // The submitter ran the command; its outcome changes the state here, in
     // the one process that owns the gate and the records.
-    Apply(authorized, follow, outcome, reply) -> {
+    Apply(authorized, follow, plan_id, outcome, reply) -> {
       let #(state, answer) = apply(state, authorized, follow, outcome)
 
       process.send(reply, answer)
+
+      actor.continue(settle(state, plan_id, outcome))
+    }
+
+    Hold(held, reply) -> {
+      process.send(reply, Nil)
+
+      actor.continue(State(..state, held: [held, ..state.held]))
+    }
+
+    // A claim hands the submitter the pending profile plans it asked for and
+    // cancels their plans, so the pins they took pass to the plan that
+    // replaces them and are not released in between.
+    Claim(principal, which, reply) -> {
+      let #(claimed, rest) =
+        list.partition(state.held, fn(held) {
+          held.principal.id == principal
+          && held.stage == Planned
+          && claims(which, held)
+        })
+
+      process.send(reply, claimed)
+
+      actor.continue(
+        State(
+          ..state,
+          held: rest,
+          gate: list.fold(claimed, state.gate, fn(current, held) {
+            gate.cancel(current, held.principal, held.plan_id)
+          }),
+        ),
+      )
+    }
+
+    Notes(principal, reply) -> {
+      process.send(
+        reply,
+        list.filter_map(state.held, fn(held) {
+          case held.principal.id == principal, held.stage {
+            True, Planned ->
+              Ok(seam.ProfileNote(
+                plan_id: held.plan_id,
+                chosen: held.chosen,
+                duration_ms: held.duration_ms,
+                rate_hz: held.rate_hz,
+              ))
+            _, _ -> Error(Nil)
+          }
+        }),
+      )
 
       actor.continue(state)
     }
@@ -348,7 +466,18 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
       actor.continue(State(..state, downloads: registry))
     }
 
-    Poll -> actor.continue(poll_probes(state))
+    Poll -> actor.continue(poll_probes(sweep_held(state)))
+
+    // A pin the service released for a finished profile. The outcome is what
+    // an operator's own release would have produced, so it is applied the
+    // same way; there is no submitter waiting on the answer.
+    Released(weft.PulledOutcome(weft.Completed(_, #(authorized, outcome)))) -> {
+      let #(state, _) = apply(state, authorized, seam.NoFollow, outcome)
+
+      actor.continue(state)
+    }
+
+    Released(_) -> actor.continue(state)
 
     Polled(pulled) -> actor.continue(finish_poll(state, pulled))
 
@@ -372,6 +501,7 @@ fn lose_target(state: State, reason: String) -> State {
 
   State(
     ..state,
+    held: [],
     gate: gate.target_lost(state.gate, reason, now),
     probes: list.map(state.probes, fn(probe) {
       case probe_book.is_running(probe) {
@@ -426,7 +556,7 @@ fn handle_request(
       let decision = gate.authorize(state.gate, principal, command, now)
 
       audit.append_all(state.config.audit, decision.entries)
-      run_decision(state, decision, follow)
+      run_decision(state, decision, follow, None)
     }
 
     Ok(seam.Plan(command)) -> {
@@ -451,7 +581,20 @@ fn handle_request(
       let #(next, decision) = gate.confirm(state.gate, principal, plan_id, now)
 
       audit.append_all(state.config.audit, decision.entries)
-      run_decision(State(..state, gate: next), decision, seam.NoFollow)
+
+      // A confirmed plan consumes itself, so a profile that was confirmed
+      // must stop looking like one that lapsed.
+      let held = case decision.result {
+        Ok(_) -> advance(state.held, plan_id)
+        Error(_) -> state.held
+      }
+
+      run_decision(
+        State(..state, gate: next, held:),
+        decision,
+        seam.NoFollow,
+        Some(plan_id),
+      )
     }
 
     Ok(seam.Cancel(plan_id)) -> #(
@@ -465,12 +608,18 @@ fn run_decision(
   state: State,
   decision: gate.Decision,
   follow: seam.Follow,
+  plan_id: Option(String),
 ) -> #(State, Decided) {
   case decision.result {
     Error(refusal) -> #(state, Answered(seam.Rejected(refusal_text(refusal))))
     Ok(authorized) -> #(
       state,
-      Execute(authorized, follow, fn(id) { kind_of_probe(state.probes, id) }),
+      Execute(
+        authorized,
+        follow,
+        fn(id) { kind_of_probe(state.probes, id) },
+        plan_id,
+      ),
     )
   }
 }
@@ -954,6 +1103,369 @@ fn read_capture(
   }
 }
 
+// ------------------------------------------------------- one-click profiles
+
+fn claims(which: Which, held: Held) -> Bool {
+  case which {
+    AnyPlan -> True
+    ThisPlan(plan_id:) -> held.plan_id == plan_id
+  }
+}
+
+// The plan was confirmed: its profile is starting, and no longer waits on
+// the plan the confirm consumed.
+fn advance(held: List(Held), plan_id: String) -> List(Held) {
+  list.map(held, fn(entry) {
+    case entry.plan_id == plan_id && entry.stage == Planned {
+      True -> Held(..entry, stage: Starting)
+      False -> entry
+    }
+  })
+}
+
+// What starting the probe produced. A probe the agent accepted is the
+// profile's from here on. Any other outcome means no probe is running, so the
+// profile goes back to waiting on a plan that no longer exists, and the next
+// sweep releases what it pinned.
+fn settle(
+  state: State,
+  plan_id: Option(String),
+  outcome: exec.Outcome,
+) -> State {
+  case plan_id {
+    None -> state
+    Some(id) ->
+      State(
+        ..state,
+        held: list.map(state.held, fn(entry) {
+          case entry.plan_id == id && entry.stage == Starting {
+            False -> entry
+            True ->
+              case outcome {
+                exec.ProbeStarted(probe_id, ..) ->
+                  Held(..entry, stage: Sampling(int.to_string(probe_id)))
+                _ -> Held(..entry, stage: Planned)
+              }
+          }
+        }),
+      )
+  }
+}
+
+// Whether a profile still needs its pins: while its plan can be confirmed,
+// while the start is in flight, and while its probe runs.
+fn needs_pins(state: State, held: Held, now: Int) -> Bool {
+  case held.stage {
+    Planned ->
+      list.any(gate.pending(state.gate, held.principal.id, now), fn(entry) {
+        entry.0 == held.plan_id
+      })
+    Starting -> True
+    Sampling(probe_id:) ->
+      case list.find(state.probes, fn(probe) { probe.id == probe_id }) {
+        Ok(probe) -> probe_book.is_running(probe)
+        Error(Nil) -> False
+      }
+  }
+}
+
+// Once a second, the profiles that no longer need their pins give them up.
+fn sweep_held(state: State) -> State {
+  let now = state.config.clock()
+  let #(keep, done) =
+    list.partition(state.held, fn(held) { needs_pins(state, held, now) })
+
+  case done {
+    [] -> state
+    _ -> release_pins(State(..state, held: keep), done, now)
+  }
+}
+
+/// How long a round of pin releases may take, in milliseconds.
+pub const release_deadline_ms = 20_000
+
+// Each pin goes through the gate as the operator's own release would, so it
+// is allowed and audited like one. The agent is asked in a weft run, so a
+// slow agent holds up neither this actor nor the other pages, and the
+// outcomes come back as `Released`.
+fn release_pins(state: State, done: List(Held), now: Int) -> State {
+  let remote = state.remote
+
+  let tasks =
+    list.flat_map(done, fn(held) {
+      list.filter_map(held.taken, fn(text) {
+        use token <- result.try(
+          identity.parse_pin(text) |> result.replace_error(Nil),
+        )
+        let decision =
+          gate.authorize(
+            state.gate,
+            held.principal,
+            policy.UnpinProcess(token),
+            now,
+          )
+
+        audit.append_all(state.config.audit, decision.entries)
+
+        case decision.result {
+          Ok(authorized) ->
+            Ok(fn() {
+              Ok(#(authorized, exec.run(remote, authorized, fn(_) { None })))
+            })
+          Error(_) -> Error(Nil)
+        }
+      })
+    })
+
+  case tasks {
+    [] -> state
+    _ -> {
+      let _ =
+        weft.new(tasks)
+        |> weft.deadline(release_deadline_ms)
+        |> weft.start_relayed(to: state.release_sink)
+
+      state
+    }
+  }
+}
+
+/// Plan a one-click profile, or plan an earlier one again.
+///
+/// This runs in the caller's process, like `submit`, and waits on the agent
+/// only there. It pins the processes that are not pinned, one command each
+/// through the gate, plans one stack probe over them, and records what it
+/// pinned against the plan so the service releases it later. A process that
+/// cannot be pinned (it exited, or the agent's pin table is full) is left out
+/// and the plan's sentence says so; if none can be pinned nothing is planned.
+///
+/// ## Examples
+///
+/// ```gleam
+/// service.profile(
+///   service,
+///   principal,
+///   seam.PlanProfile(["<0.91.0>"], "<0.91.0>", 10_000, 100),
+/// )
+/// // -> seam.PlanReady(id, plan)
+/// ```
+pub fn profile(
+  service: Service,
+  principal: Principal,
+  request: seam.ProfileRequest,
+) -> Reply {
+  case request {
+    seam.PlanProfile(pids:, chosen:, duration_ms:, rate_hz:) -> {
+      let claimed = claim(service, principal, AnyPlan)
+
+      plan_profile(
+        service,
+        principal,
+        pids,
+        chosen,
+        duration_ms,
+        rate_hz,
+        list.flat_map(claimed, fn(held) { held.taken }),
+      )
+    }
+
+    seam.ReplanProfile(plan_id:, duration_ms:, rate_hz:) ->
+      case claim(service, principal, ThisPlan(plan_id)) {
+        [held, ..] ->
+          plan_profile(
+            service,
+            principal,
+            held.pids,
+            held.chosen,
+            duration_ms,
+            rate_hz,
+            held.taken,
+          )
+        [] -> seam.Rejected("that profile plan is no longer pending")
+      }
+  }
+}
+
+fn claim(service: Service, principal: Principal, which: Which) -> List(Held) {
+  process.call(service.subject, 5000, fn(reply) {
+    Claim(principal.id, which, reply)
+  })
+}
+
+// `inherited` are pins an earlier pending plan of this principal took and
+// handed over, which this plan now holds whether or not it uses them.
+fn plan_profile(
+  service: Service,
+  principal: Principal,
+  pids: List(String),
+  chosen: String,
+  duration_ms: Int,
+  rate_hz: Int,
+  inherited: List(String),
+) -> Reply {
+  let wanted = list.unique(pids)
+
+  case list.length(wanted) {
+    0 -> {
+      release_now(service, principal, inherited)
+
+      seam.Rejected("no process to profile")
+    }
+    count if count > seam.profile_limit -> {
+      release_now(service, principal, inherited)
+
+      seam.Rejected(
+        "a profile takes at most "
+        <> int.to_string(seam.profile_limit)
+        <> " processes",
+      )
+    }
+    _ -> {
+      let cards = process.call(service.subject, 5000, fn(reply) { Pins(reply) })
+      let pinned =
+        list.fold(
+          wanted,
+          Pinning(targets: [], taken: inherited, left_out: []),
+          fn(so_far, pid) { pin_one(service, principal, cards, so_far, pid) },
+        )
+
+      case list.reverse(pinned.targets) {
+        [] -> {
+          release_now(service, principal, pinned.taken)
+
+          seam.Rejected(
+            "none of the "
+            <> int.to_string(list.length(wanted))
+            <> " processes could be pinned: "
+            <> string.join(list.reverse(pinned.left_out), "; "),
+          )
+        }
+        targets ->
+          plan_over(
+            service,
+            principal,
+            targets,
+            pinned,
+            wanted,
+            chosen,
+            duration_ms,
+            rate_hz,
+          )
+      }
+    }
+  }
+}
+
+// What pinning the chosen processes has done so far: the tokens to plan
+// over, the tokens this profile took for itself and must release, and the
+// reasons any process was left out.
+type Pinning {
+  Pinning(targets: List(String), taken: List(String), left_out: List(String))
+}
+
+fn pin_one(
+  service: Service,
+  principal: Principal,
+  cards: List(seam.PinCard),
+  so_far: Pinning,
+  pid: String,
+) -> Pinning {
+  let held =
+    list.find(cards, fn(card) {
+      card.pid_text == pid && card.status == seam.PinLive
+    })
+
+  case held {
+    // Already pinned, by the operator or by a plan this one replaced. A pin
+    // of the second kind is in `taken` already; one of the first never is.
+    Ok(card) -> Pinning(..so_far, targets: [card.token, ..so_far.targets])
+    Error(Nil) ->
+      case submit(service, principal, seam.PinProcess(pid)) {
+        seam.PinIssued(token, _) ->
+          Pinning(..so_far, targets: [token, ..so_far.targets], taken: [
+            token,
+            ..so_far.taken
+          ])
+        seam.Rejected(reason) ->
+          Pinning(..so_far, left_out: [pid <> ": " <> reason, ..so_far.left_out])
+        _ ->
+          Pinning(..so_far, left_out: [
+            pid <> ": the viewer did not pin it",
+            ..so_far.left_out
+          ])
+      }
+  }
+}
+
+fn plan_over(
+  service: Service,
+  principal: Principal,
+  targets: List(String),
+  pinned: Pinning,
+  wanted: List(String),
+  chosen: String,
+  duration_ms: Int,
+  rate_hz: Int,
+) -> Reply {
+  let planned =
+    submit(
+      service,
+      principal,
+      seam.PlanProbe(policy.Sampling, targets, [], duration_ms, rate_hz),
+    )
+
+  case planned {
+    seam.PlanReady(plan_id, _) -> {
+      let sentence = case list.length(pinned.left_out) {
+        0 -> chosen
+        n ->
+          chosen
+          <> " ("
+          <> int.to_string(n)
+          <> " could not be pinned and are left out)"
+      }
+
+      process.call(service.subject, 5000, fn(reply) {
+        Hold(
+          Held(
+            plan_id:,
+            principal:,
+            taken: pinned.taken,
+            pids: wanted,
+            chosen: sentence,
+            duration_ms:,
+            rate_hz:,
+            stage: Planned,
+          ),
+          reply,
+        )
+      })
+
+      planned
+    }
+    refused -> {
+      release_now(service, principal, pinned.taken)
+
+      refused
+    }
+  }
+}
+
+// A profile that planned nothing gives its pins back at once, in the
+// caller's process, so a refused request leaves the agent's pin table as it
+// was.
+fn release_now(
+  service: Service,
+  principal: Principal,
+  tokens: List(String),
+) -> Nil {
+  list.each(tokens, fn(token) {
+    let _ = submit(service, principal, seam.UnpinProcess(token))
+
+    Nil
+  })
+}
+
 // -------------------------------------------------------------- the page
 
 /// The `Page` a principal's socket hands its application. Every closure is
@@ -977,6 +1489,12 @@ pub fn page_for(service: Service, principal: Principal) -> seam.Page {
       })
     },
     submit: fn(request) { submit(service, principal, request) },
+    profile: fn(request) { profile(service, principal, request) },
+    profile_notes: fn() {
+      process.call(service.subject, 5000, fn(reply) {
+        Notes(principal.id, reply)
+      })
+    },
     plans: fn() {
       process.call(service.subject, 5000, fn(reply) {
         Plans(principal.id, reply)
@@ -1039,11 +1557,11 @@ fn submit(service: Service, principal: Principal, request: Request) -> Reply {
 
   case decided {
     Answered(reply) -> reply
-    Execute(authorized, follow, kind_of) -> {
+    Execute(authorized, follow, kind_of, plan_id) -> {
       let outcome = exec.run(service.remote, authorized, kind_of)
 
       process.call(service.subject, 30_000, fn(reply) {
-        Apply(authorized, follow, outcome, reply)
+        Apply(authorized, follow, plan_id, outcome, reply)
       })
     }
   }

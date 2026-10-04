@@ -20,6 +20,7 @@ fn probe(token: policy.PrincipalId) -> policy.Command {
     targets: [fixture.pin_token(1)],
     modules: ["lists"],
     duration_ms: 10_000,
+    rate_hz: 0,
   ))
 }
 

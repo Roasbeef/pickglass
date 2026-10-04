@@ -1069,6 +1069,7 @@ fn plan_card() -> Option(model.PlanCard) {
         targets: [identity.live_token(pin)],
         modules: ["loom@runtime@keeper"],
         duration_ms: 30_000,
+        rate_hz: 0,
       )
 
     let estimate =
@@ -1085,17 +1086,103 @@ fn plan_card() -> Option(model.PlanCard) {
 
   case planned {
     Ok(plan) ->
-      Some(
-        model.PlanCard(
-          key: key.make("plan.1"),
-          what: model.ProbePlan(policy.Counters),
-          plan:,
-          matched: Known(23),
-          target_labels: ["<0.4411.0> session s-12 / restart_keeper (pin p-17)"],
-        ),
-      )
+      Some(model.PlanCard(
+        key: key.make("plan.1"),
+        what: model.ProbePlan(policy.Counters),
+        plan:,
+        matched: Known(23),
+        target_labels: ["<0.4411.0> session s-12 / restart_keeper (pin p-17)"],
+        chosen: "",
+        adjust: model.NotAdjustable,
+      ))
     Error(Nil) -> None
   }
+}
+
+// A stack probe over three pinned processes, as a profile button plans it.
+fn profile_plan_card() -> Option(model.PlanCard) {
+  let planned = {
+    use first <- result.try(live_pin())
+    use token_two <- result.try(identity.pin(boot(), 18))
+    use second <- result.try(result.replace_error(
+      identity.check_pin(token_two, boot()),
+      Nil,
+    ))
+    use token_three <- result.try(identity.pin(boot(), 19))
+    use third <- result.try(result.replace_error(
+      identity.check_pin(token_three, boot()),
+      Nil,
+    ))
+
+    let spec =
+      policy.ProbeSpec(
+        kind: policy.Sampling,
+        targets: [
+          identity.live_token(first),
+          identity.live_token(second),
+          identity.live_token(third),
+        ],
+        modules: [],
+        duration_ms: 10_000,
+        rate_hz: 100,
+      )
+
+    let estimate =
+      policy.Estimate(
+        events_low: 0,
+        events_high: 3000,
+        bytes_high: 384_000,
+        wall_ms: 10_000,
+      )
+
+    policy.plan(
+      principal(),
+      policy.StartProbe(spec),
+      [first, second, third],
+      estimate,
+      now_ms,
+    ).result
+    |> result.replace_error(Nil)
+  }
+
+  case planned {
+    Ok(plan) ->
+      Some(model.PlanCard(
+        key: key.make("plan.2"),
+        what: model.ProbePlan(policy.Sampling),
+        plan:,
+        matched: NotApplicable,
+        target_labels: [
+          "<0.4411.0> session s-12 / restart_keeper",
+          "<0.4412.0> session s-12 / worker",
+          "<0.4413.0> session s-12 / worker",
+        ],
+        chosen: "3 of 3 processes of session s-12, the busiest by reductions/s",
+        adjust: model.Adjustable(duration_ms: 10_000, rate_hz: 100),
+      ))
+    Error(Nil) -> None
+  }
+}
+
+/// The flow above every page but Probes: a profile button's plan waiting for
+/// confirmation, one probe running and a finished profile to open.
+pub fn flow() -> model.FlowModel {
+  model.FlowModel(
+    pending: profile_plan_card(),
+    running: [
+      model.ActiveProbe(
+        key: key.make("probe.p-41"),
+        kind: policy.Sampling,
+        remaining_ms: Known(6000),
+      ),
+    ],
+    ready: Some(model.ReadyProfile(
+      probe: "p-40",
+      age_ms: 12_000,
+      summary: "1,840 samples at 100 Hz",
+    )),
+    refused: None,
+  )
 }
 
 /// The probes page's data, with one plan waiting for confirmation.
@@ -1587,6 +1674,7 @@ pub fn feeds() -> List(msg.Feed) {
       msg.FedMemory(memory()),
       msg.FedSupervision(supervision()),
       msg.FedProbes(probes()),
+      msg.FedFlow(flow()),
       msg.FedTimeline(timeline()),
       msg.FedAudit(audit()),
     ],

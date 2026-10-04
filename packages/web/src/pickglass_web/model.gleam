@@ -643,6 +643,16 @@ pub type PlanWhat {
   MeasurePlan
 }
 
+/// Whether a plan can be made again for another duration and rate. Only the
+/// plans a profile button made can: they remember the processes they chose.
+pub type Adjust {
+  /// The plan was drafted by hand in the form.
+  NotAdjustable
+
+  /// A profile button made it with this duration and requested rate.
+  Adjustable(duration_ms: Int, rate_hz: Int)
+}
+
 /// A plan waiting for confirmation.
 pub type PlanCard {
   PlanCard(
@@ -656,6 +666,40 @@ pub type PlanCard {
     matched: Measurement,
     /// What the target said about the targets, as text for the dialog.
     target_labels: List(String),
+    /// How the processes were chosen, in the viewer's words, for example
+    /// "12 of 31 processes, the busiest by reductions/s". Empty for a plan
+    /// drafted by hand, whose scope is only what the operator picked.
+    chosen: String,
+    /// Whether the plan can be remade for another duration and rate.
+    adjust: Adjust,
+  )
+}
+
+/// A profile that has finished, for the link that opens it.
+pub type ReadyProfile {
+  ReadyProfile(
+    /// The probe's id.
+    probe: String,
+    /// How long ago it finished, in milliseconds.
+    age_ms: Int,
+    /// What it holds, in a sentence: samples and rate.
+    summary: String,
+  )
+}
+
+/// The one-click profile in flight. Every page but Probes draws it above its
+/// body, so the plan a button made can be confirmed where the button was.
+pub type FlowModel {
+  FlowModel(
+    /// A plan waiting for confirmation.
+    pending: Option(PlanCard),
+    /// Stack probes running, with the time each has left.
+    running: List(ActiveProbe),
+    /// The newest finished stack profile, while it is recent.
+    ready: Option(ReadyProfile),
+    /// Why the last profile button planned nothing, when it did not: an
+    /// owner with no live process, a full pin table, a refusal by the gate.
+    refused: Option(String),
   )
 }
 

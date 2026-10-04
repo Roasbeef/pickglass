@@ -379,6 +379,24 @@ input.text { width: 100%; }
 .does-not-prove { color: var(--warn); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px 14px; border-top: 1px solid var(--rule); }
 
+/* ------------------------------------------------- one-click profile flow */
+
+.flow { margin-bottom: 16px; }
+.profile-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.btn-profile { border-color: var(--accent); color: var(--accent); }
+.btn-profile:hover { background: var(--accent-soft); }
+.btn-current { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.dialog-adjust { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 10px 14px 0; }
+.dialog-adjust .field-label { margin-left: 10px; }
+.dialog-adjust .field-label:first-child { margin-left: 0; }
+.flow-running, .flow-ready, .flow-refused {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 14px; border: 1px solid var(--rule-2); border-radius: var(--radius); background: var(--card);
+}
+.flow-running p { margin: 0; display: flex; align-items: center; gap: 8px; }
+.flow-ready { border-color: var(--good); background: var(--good-soft); }
+.flow-refused { border-color: var(--warn); background: var(--warn-soft); }
+
 /* ------------------------------------------------------------ profile */
 
 .caveats { margin: 4px 14px 12px; padding-left: 18px; color: var(--ink-2); font-size: 12.5px; }

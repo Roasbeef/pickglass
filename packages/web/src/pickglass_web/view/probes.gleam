@@ -334,7 +334,19 @@ fn notice(text: Option(String)) -> Element(Msg) {
   }
 }
 
-fn plan_dialog(card: PlanCard) -> Element(Msg) {
+/// Draw a pending plan as a dialog: what it will touch, what it costs, what
+/// it perturbs and what it does not prove, with Cancel and Confirm. A plan a
+/// profile button made also says how its processes were chosen and offers the
+/// duration and rate as buttons that plan again. The Probes page and the
+/// one-click flow draw the same dialog, so a plan reads the same wherever it
+/// is confirmed.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probes.plan_dialog(card)
+/// ```
+pub fn plan_dialog(card: PlanCard) -> Element(Msg) {
   let scope = policy.plan_scope(card.plan)
   let estimate = policy.plan_estimate(card.plan)
   let needs =
@@ -354,38 +366,36 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
           element.text("needs " <> list.fold(needs, "", join_words)),
         ]),
       ]),
-      html.dl([attribute.class("kv wide")], [
-        html.dt([], [element.text("Scope")]),
-        html.dd([], [
-          element.text(
-            list.fold(card.target_labels, "", join_words)
-            <> " · "
-            <> int.to_string(list.length(scope.targets))
-            <> " target(s) revalidated · modules "
-            <> list.fold(scope.modules, "", join_words)
-            <> " · "
-            <> matched_text(card.matched),
-          ),
+      html.dl(
+        [attribute.class("kv wide")],
+        list.flatten([
+          scope_rows(card, scope),
+          sampling_rows(card),
+          [
+            html.dt([], [element.text("Action")]),
+            html.dd([], [element.text(what_action(card.what))]),
+            html.dt([], [element.text("Cost")]),
+            html.dd([attribute.class("num")], [
+              element.text(cost_text(
+                policy.plan_perturbation(card.plan),
+                estimate,
+                scope.duration_ms,
+              )),
+            ]),
+            html.dt([], [element.text("Perturbation")]),
+            html.dd([], [
+              element.text(
+                perturbation_text(policy.plan_perturbation(card.plan)),
+              ),
+            ]),
+            html.dt([], [element.text("Does not prove")]),
+            html.dd([attribute.class("does-not-prove")], [
+              element.text(what_does_not_prove(card.what)),
+            ]),
+          ],
         ]),
-        html.dt([], [element.text("Action")]),
-        html.dd([], [element.text(what_action(card.what))]),
-        html.dt([], [element.text("Cost")]),
-        html.dd([attribute.class("num")], [
-          element.text(cost_text(
-            policy.plan_perturbation(card.plan),
-            estimate,
-            scope.duration_ms,
-          )),
-        ]),
-        html.dt([], [element.text("Perturbation")]),
-        html.dd([], [
-          element.text(perturbation_text(policy.plan_perturbation(card.plan))),
-        ]),
-        html.dt([], [element.text("Does not prove")]),
-        html.dd([attribute.class("does-not-prove")], [
-          element.text(what_does_not_prove(card.what)),
-        ]),
-      ]),
+      ),
+      adjust_controls(card),
       html.div([attribute.class("dialog-actions")], [
         html.button(
           [
@@ -405,6 +415,175 @@ fn plan_dialog(card: PlanCard) -> Element(Msg) {
         ),
       ]),
     ],
+  )
+}
+
+// The scope of a plan: the processes it names, how they were chosen when a
+// profile button chose them, and the modules and matches of a trace probe. A
+// stack probe has no modules, so it does not print an empty list of them.
+fn scope_rows(card: PlanCard, scope: policy.PlanScope) -> List(Element(Msg)) {
+  let processes =
+    int.to_string(list.length(scope.targets))
+    <> " process(es) revalidated: "
+    <> list.fold(card.target_labels, "", join_words)
+
+  let chosen = case card.chosen {
+    "" -> []
+    text -> [
+      html.dt([], [element.text("Chosen")]),
+      html.dd([], [element.text(text)]),
+    ]
+  }
+
+  let modules = case card.what {
+    model.ProbePlan(kind: policy.Sampling) -> ""
+    model.ProbePlan(..) | model.GcPlan | model.MeasurePlan ->
+      " · modules "
+      <> list.fold(scope.modules, "", join_words)
+      <> " · "
+      <> matched_text(card.matched)
+  }
+
+  list.append(chosen, [
+    html.dt([], [element.text("Scope")]),
+    html.dd([], [element.text(processes <> modules)]),
+  ])
+}
+
+// What a stack probe will run, stated apart from the cost line so the rate
+// the agent will really use, and the budget of samples it may take, are
+// each a figure the operator can find: the rate asked, the rate after the
+// agent shares its ceiling between the processes, the duration, and the most
+// samples the run can hold.
+fn sampling_rows(card: PlanCard) -> List(Element(Msg)) {
+  case policy.plan_command(card.plan) {
+    policy.StartProbe(spec: policy.ProbeSpec(kind: policy.Sampling, ..) as spec) -> {
+      let targets = list.length(spec.targets)
+      let effective = policy.sampling_rate_hz(spec.rate_hz, targets)
+      let estimate = policy.plan_estimate(card.plan)
+
+      [
+        html.dt([], [element.text("Rate")]),
+        html.dd([attribute.class("num")], [
+          element.text(case effective == spec.rate_hz {
+            True -> int.to_string(effective) <> " Hz per process"
+            False ->
+              int.to_string(effective)
+              <> " Hz per process ("
+              <> int.to_string(spec.rate_hz)
+              <> " Hz asked; the agent shares "
+              <> fmt.count(policy.max_total_sampling_hz)
+              <> " samples a second between "
+              <> int.to_string(targets)
+              <> " processes)"
+          }),
+        ]),
+        html.dt([], [element.text("Duration")]),
+        html.dd([attribute.class("num")], [
+          element.text(fmt.duration_ms(spec.duration_ms)),
+        ]),
+        html.dt([], [element.text("Sample budget")]),
+        html.dd([attribute.class("num")], [
+          element.text(
+            "at most "
+            <> fmt.count(estimate.events_high)
+            <> " samples ("
+            <> int.to_string(effective)
+            <> " Hz × "
+            <> int.to_string(targets)
+            <> " processes × "
+            <> fmt.duration_ms(spec.duration_ms)
+            <> ")",
+          ),
+        ]),
+      ]
+    }
+    _ -> []
+  }
+}
+
+// The duration and rate of a plan a profile button made, as buttons. Each is
+// a fixed request to plan the same processes again, so nothing the browser
+// sends names a duration or a rate; the current choices are marked.
+fn adjust_controls(card: PlanCard) -> Element(Msg) {
+  case card.adjust {
+    model.NotAdjustable -> element.none()
+    model.Adjustable(duration_ms:, rate_hz:) ->
+      html.div([attribute.class("dialog-adjust")], [
+        html.span([attribute.class("field-label")], [element.text("Duration")]),
+        ..list.append(
+          list.map([msg.Seconds10, msg.Seconds30, msg.Seconds60], fn(choice) {
+            adjust_button(
+              int.to_string(msg.duration_ms(choice) / 1000) <> " s",
+              choice_of(msg.duration_ms(choice) == duration_ms),
+              msg.AdjustProfile(card.key, choice, rate_or(rate_hz)),
+            )
+          }),
+          [
+            html.span([attribute.class("field-label")], [element.text("Rate")]),
+            ..list.map([msg.Hz50, msg.Hz100, msg.Hz250], fn(choice) {
+              adjust_button(
+                int.to_string(msg.rate_hz(choice)) <> " Hz",
+                choice_of(msg.rate_hz(choice) == rate_hz),
+                msg.AdjustProfile(card.key, duration_or(duration_ms), choice),
+              )
+            })
+          ],
+        )
+      ])
+  }
+}
+
+// The choice in force, or the default when the plan's own value is not one
+// of the closed choices.
+fn rate_or(hz: Int) -> msg.RateChoice {
+  case msg.rate_choice(hz) {
+    Ok(choice) -> choice
+    Error(Nil) -> msg.Hz100
+  }
+}
+
+fn duration_or(ms: Int) -> msg.DurationChoice {
+  case msg.duration_choice(ms) {
+    Ok(choice) -> choice
+    Error(Nil) -> msg.Seconds10
+  }
+}
+
+// Whether a button names the choice the plan already has.
+type Choice {
+  InForce
+  Offered
+}
+
+fn choice_of(matches: Bool) -> Choice {
+  case matches {
+    True -> InForce
+    False -> Offered
+  }
+}
+
+fn adjust_button(
+  label: String,
+  choice: Choice,
+  request: msg.Request,
+) -> Element(Msg) {
+  let class = case choice {
+    InForce -> "btn btn-small btn-current"
+    Offered -> "btn btn-small"
+  }
+
+  html.button(
+    [
+      attribute.class(class),
+      attribute.type_("button"),
+      attribute.aria("pressed", case choice {
+        InForce -> "true"
+        Offered -> "false"
+      }),
+      wire.click(msg.Ask(request)),
+    ],
+    [element.text(label)],
   )
 }
 

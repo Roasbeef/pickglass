@@ -455,7 +455,7 @@ pub fn a_running_probe_is_stopped_by_its_key_test() {
   let page = harness.page(rig, "alice", harness.all)
   let assert seam.PinIssued(token, _) = page.submit(seam.PinProcess("<0.5.0>"))
   let assert seam.PlanReady(id, _) =
-    page.submit(seam.PlanProbe(policy.Counters, [token], ["lists"], 30_000))
+    page.submit(seam.PlanProbe(policy.Counters, [token], ["lists"], 30_000, 0))
   let assert seam.ProbeStarted(..) = page.submit(seam.ConfirmPlan(id))
   let state = state_on(page, "probes")
 

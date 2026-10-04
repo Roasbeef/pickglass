@@ -130,7 +130,7 @@ pub fn a_sampling_probe_becomes_a_stack_profile_test() {
   let page = harness.page(rig, "alice", harness.all)
   let token = pinned(page)
   let assert seam.PlanReady(id, _) =
-    page.submit(seam.PlanProbe(policy.Sampling, [token], ["*"], 10_000))
+    page.submit(seam.PlanProbe(policy.Sampling, [token], ["*"], 10_000, 50))
 
   assert page.submit(seam.ConfirmPlan(id)) == seam.ProbeStarted("11", 1)
 
@@ -177,7 +177,7 @@ pub fn stopping_a_stack_probe_reads_it_with_the_stack_request_test() {
   let page = harness.page(rig, "alice", harness.all)
   let token = pinned(page)
   let assert seam.PlanReady(id, _) =
-    page.submit(seam.PlanProbe(policy.Sampling, [token], ["*"], 10_000))
+    page.submit(seam.PlanProbe(policy.Sampling, [token], ["*"], 10_000, 50))
   let assert seam.ProbeStarted(..) = page.submit(seam.ConfirmPlan(id))
   let assert seam.StacksStopped(snapshot) = page.submit(seam.StopProbe("11"))
 
@@ -225,6 +225,7 @@ pub fn several_modules_start_one_counter_set_test() {
       [token],
       ["lists", "maps"],
       10_000,
+      0,
     ))
 
   assert page.submit(seam.ConfirmPlan(id)) == seam.ProbeStarted("12", 9)
@@ -307,6 +308,8 @@ fn base_inputs(page: seam.Page) -> feeds.Inputs {
     results: [],
     supervision: None,
     entries: [],
+    notes: [],
+    refusal: None,
     cadence_ms: 2000,
     sort: model.ByMemory,
     offset: 0,
@@ -623,7 +626,7 @@ pub fn a_stack_probe_asks_for_twice_the_samples_its_duration_allows_test() {
   let page = harness.page(rig, "alice", harness.all)
   let token = pinned(page)
   let assert seam.PlanReady(id, _) =
-    page.submit(seam.PlanProbe(policy.Sampling, [token], ["*"], 10_000))
+    page.submit(seam.PlanProbe(policy.Sampling, [token], ["*"], 10_000, 50))
   let assert seam.ProbeStarted(..) = page.submit(seam.ConfirmPlan(id))
 
   // 50 Hz for 10 s over one target is 500 samples; the budget is 1 000, so

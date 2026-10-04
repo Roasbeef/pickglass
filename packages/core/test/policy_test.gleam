@@ -43,6 +43,7 @@ fn spec(kind: policy.ProbeKind) -> policy.ProbeSpec {
     targets: [token(1)],
     modules: ["loom_session"],
     duration_ms: 1000,
+    rate_hz: 50,
   )
 }
 
@@ -374,6 +375,7 @@ pub fn sampling_limits_differ_from_trace_limits_test() {
       targets: list.repeat(token(1), 16),
       modules: [],
       duration_ms: 1000,
+      rate_hz: 50,
     )
 
   assert policy.validate_spec(sampling) == Ok(Nil)
@@ -441,4 +443,40 @@ pub fn a_sampling_probe_is_limited_to_what_the_agent_runs_test() {
     )
     == Error(policy.BadDuration(60_000))
   assert policy.max_duration_ms(policy.Counters) == policy.max_probe_duration_ms
+}
+
+// A sampling probe carries the rate it asked for, and the agent's ceiling is
+// shared by its targets, so the plan can say what will really run.
+pub fn a_sampling_rate_is_bounded_and_shared_between_targets_test() {
+  let sampling = spec(policy.Sampling)
+
+  assert policy.validate_spec(policy.ProbeSpec(..sampling, rate_hz: 0))
+    == Error(policy.BadRate(1000))
+  assert policy.validate_spec(policy.ProbeSpec(..sampling, rate_hz: 1001))
+    == Error(policy.BadRate(1000))
+  assert policy.validate_spec(policy.ProbeSpec(..sampling, rate_hz: 1000))
+    == Ok(Nil)
+
+  // A trace probe has no rate to check.
+  assert policy.validate_spec(
+      policy.ProbeSpec(..spec(policy.Counters), rate_hz: 0),
+    )
+    == Ok(Nil)
+
+  assert policy.sampling_rate_hz(100, 1) == 100
+  assert policy.sampling_rate_hz(100, 10) == 100
+  assert policy.sampling_rate_hz(100, 16) == 62
+  assert policy.sampling_rate_hz(5000, 1) == 1000
+  assert policy.sampling_rate_hz(0, 4) == 1
+  assert policy.target_limit(policy.Sampling) == 16
+}
+
+// The rate is part of what a plan binds to: a plan for another rate is a
+// different plan.
+pub fn the_rate_is_part_of_the_plan_digest_test() {
+  let at_50 = policy.StartProbe(spec(policy.Sampling))
+  let at_100 =
+    policy.StartProbe(policy.ProbeSpec(..spec(policy.Sampling), rate_hz: 100))
+
+  assert policy.describe(at_50) != policy.describe(at_100)
 }

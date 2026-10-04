@@ -33,6 +33,8 @@ fn page() -> seam.Page {
     latest: fn() { [] },
     subscribe: fn(_) { Ok(Nil) },
     submit: fn(_) { seam.Done("") },
+    profile: fn(_) { seam.Done("") },
+    profile_notes: fn() { [] },
     plans: fn() { [] },
     checkpoints: fn() { [] },
     probes: fn() { [] },
@@ -62,6 +64,8 @@ fn inputs(observations: List(observation.Observation)) -> feeds.Inputs {
     results: [],
     supervision: None,
     entries: [],
+    notes: [],
+    refusal: None,
     cadence_ms: 2000,
     sort: model.ByMemory,
     offset: 0,
@@ -865,6 +869,7 @@ pub fn a_stack_probe_plan_is_bounded_by_its_rate_not_by_a_thousand_a_second_test
       targets: [fixture.pin_token(1)],
       modules: [],
       duration_ms: 10_000,
+      rate_hz: 50,
     )
   let estimate = gate.estimate_for(policy.StartProbe(spec))
 

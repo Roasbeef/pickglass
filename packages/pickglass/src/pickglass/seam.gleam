@@ -67,13 +67,16 @@ pub type Request {
   /// Release a pin, named by the token text a pin card showed.
   UnpinProcess(token: String)
 
-  /// Ask for a plan for a counters probe over pinned processes. The viewer
-  /// offers no probe over every process, so there is no way to ask for one.
+  /// Ask for a plan for a probe over pinned processes. The viewer offers no
+  /// probe over every process, so there is no way to ask for one. `rate_hz`
+  /// is samples per second per process for a sampling probe and zero for any
+  /// other kind.
   PlanProbe(
     kind: policy.ProbeKind,
     targets: List(String),
     modules: List(String),
     duration_ms: Int,
+    rate_hz: Int,
   )
 
   /// Ask for a plan for a garbage collection of one pinned process.
@@ -117,6 +120,50 @@ pub type Request {
 
   /// Detach from the target.
   Detach
+}
+
+/// The longest a one-click profile may name, mirrored from the agent's limit
+/// for one stack probe so a page never asks for more than it will run.
+pub const profile_limit = 16
+
+/// How long a one-click profile samples unless the plan card says otherwise.
+pub const profile_duration_ms = 10_000
+
+/// How fast a one-click profile samples unless the plan card says otherwise,
+/// in samples per second per process.
+pub const profile_rate_hz = 100
+
+/// A one-click profile. Unlike a `Request` it is not one command: pinning the
+/// processes that are not pinned and planning the probe over them are several
+/// commands, each decided by the gate and audited on its own, and the service
+/// composes them so that what it pinned for the profile is released when the
+/// profile is done.
+pub type ProfileRequest {
+  /// Pin the processes (pid texts the viewer read from its own census) and
+  /// plan one stack probe over them. `chosen` is the sentence that says how
+  /// they were chosen, kept for the plan card. The plan waits for Confirm, as
+  /// any plan does.
+  PlanProfile(
+    pids: List(String),
+    chosen: String,
+    duration_ms: Int,
+    rate_hz: Int,
+  )
+
+  /// Plan the same processes again for another duration and rate, replacing
+  /// the pending plan a profile button made.
+  ReplanProfile(plan_id: String, duration_ms: Int, rate_hz: Int)
+}
+
+/// What the viewer remembers of a pending profile plan, for its card.
+pub type ProfileNote {
+  ProfileNote(
+    plan_id: String,
+    /// How the processes were chosen.
+    chosen: String,
+    duration_ms: Int,
+    rate_hz: Int,
+  )
 }
 
 /// What the viewer answers.
@@ -221,6 +268,11 @@ pub type Page {
     subscribe: fn(Subject(hub.Update)) -> Result(Nil, String),
     /// Ask the viewer to do something, as this principal.
     submit: fn(Request) -> Reply,
+    /// Ask the viewer for a one-click profile, as this principal. The answer
+    /// is `PlanReady` or `Rejected`.
+    profile: fn(ProfileRequest) -> Reply,
+    /// The pending profile plans of this principal, with how each was chosen.
+    profile_notes: fn() -> List(ProfileNote),
     /// The plans this principal has pending, as `(id, plan)`.
     plans: fn() -> List(#(String, policy.Plan)),
     /// The checkpoints recorded in the live capture with the observations
@@ -290,7 +342,7 @@ pub fn intent(request: Request) -> Result(Intent, String) {
     UnpinProcess(token) ->
       token_of(token)
       |> result.map(fn(token) { Run(policy.UnpinProcess(token), NoFollow) })
-    PlanProbe(kind, targets, modules, duration_ms) -> {
+    PlanProbe(kind, targets, modules, duration_ms, rate_hz) -> {
       use tokens <- result.try(result.all(list.map(targets, token_of)))
 
       Ok(
@@ -300,6 +352,7 @@ pub fn intent(request: Request) -> Result(Intent, String) {
             targets: tokens,
             modules:,
             duration_ms:,
+            rate_hz:,
           )),
         ),
       )

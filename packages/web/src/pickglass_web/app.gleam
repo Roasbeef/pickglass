@@ -44,6 +44,7 @@ import pickglass_web/page.{type Links, type Page}
 import pickglass_web/state.{type UiState}
 import pickglass_web/view/audit
 import pickglass_web/view/compare
+import pickglass_web/view/flow
 import pickglass_web/view/memory
 import pickglass_web/view/overview
 import pickglass_web/view/owners
@@ -115,6 +116,8 @@ pub type Model {
     captures: Loadable(model.CapturesModel),
     /// The audit data.
     audit: Loadable(model.AuditModel),
+    /// The one-click profile in flight, drawn above every page but Probes.
+    flow: Loadable(model.FlowModel),
     /// The operator's view state.
     ui: UiState,
   )
@@ -152,6 +155,7 @@ pub fn init(start: Start) -> Model {
       compare: Waiting,
       captures: Waiting,
       audit: Waiting,
+      flow: Waiting,
       ui: state.initial(),
     )
 
@@ -193,6 +197,7 @@ fn store(model: Model, feed: Feed) -> Model {
     msg.FedAudit(data) -> Model(..model, audit: Ready(data))
     msg.FedCaptures(data) -> Model(..model, captures: Ready(data))
     msg.FedPlanTarget(target) -> offer_target(model, target)
+    msg.FedFlow(data) -> Model(..model, flow: Ready(data))
   }
 }
 
@@ -446,6 +451,10 @@ pub fn describe(request: Request) -> String {
     msg.AddFilter(..) -> "add a filter step"
     msg.AddFilterAt(..) -> "add a filter step on the selected function"
     msg.PlanProbeFor(_) -> "open the probe form for this process"
+    msg.ProfileOwner(_) -> "plan a profile of this owner's processes"
+    msg.ProfileBusiest -> "plan a profile of the busiest processes"
+    msg.ProfileProcess(_) -> "plan a profile of this process"
+    msg.AdjustProfile(..) -> "plan the profile again with another setting"
     msg.TruncateChain(_) -> "remove filter steps"
     msg.ExportProfile(_) -> "export the profile"
   }
@@ -485,6 +494,19 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
         process_known(model, process),
         "That process is not on this page.",
       )
+    msg.ProfileOwner(owner) ->
+      require(
+        bool_presence(owner_key_known(model, owner)),
+        "That owner is not on this page.",
+      )
+    msg.ProfileBusiest -> Ok(Nil)
+    msg.ProfileProcess(process) ->
+      require(
+        process_known(model, process),
+        "That process is not on this page.",
+      )
+    msg.AdjustProfile(plan:, ..) ->
+      require(plan_known(model, plan), "That plan is not the one shown.")
     msg.AddFilterAt(kind:, frame:) -> check_filter_at(model, kind, frame)
     msg.TruncateChain(from:) -> check_chain_index(model, from)
     msg.TakeCheckpoint -> Ok(Nil)
@@ -587,8 +609,17 @@ fn pin_known(model: Model, pin: Key) -> Presence {
   }
 }
 
+fn bool_presence(known: Bool) -> Presence {
+  case known {
+    True -> Present
+    False -> Absent
+  }
+}
+
+// The plan the page shows: the Probes page's, or the flow's above any other
+// page. Either is the viewer's current pending plan.
 fn plan_known(model: Model, plan: Key) -> Presence {
-  case model.probes {
+  let on_probes = case model.probes {
     Ready(data) ->
       case data.pending {
         Some(card) -> present([card.key], fn(item) { item == plan })
@@ -596,12 +627,36 @@ fn plan_known(model: Model, plan: Key) -> Presence {
       }
     Waiting -> Absent
   }
+
+  let in_flow = case model.flow {
+    Ready(data) ->
+      case data.pending {
+        Some(card) -> present([card.key], fn(item) { item == plan })
+        None -> Absent
+      }
+    Waiting -> Absent
+  }
+
+  case on_probes, in_flow {
+    Absent, Absent -> Absent
+    _, _ -> Present
+  }
 }
 
 fn probe_known(model: Model, probe: Key) -> Presence {
-  case model.probes {
+  let on_probes = case model.probes {
     Ready(data) -> present(data.active, fn(item) { item.key == probe })
     Waiting -> Absent
+  }
+
+  let in_flow = case model.flow {
+    Ready(data) -> present(data.running, fn(item) { item.key == probe })
+    Waiting -> Absent
+  }
+
+  case on_probes, in_flow {
+    Absent, Absent -> Absent
+    _, _ -> Present
   }
 }
 
@@ -700,7 +755,7 @@ fn node_known(model: Model, node: Key) -> Bool {
 /// Draw the page: the shell around the body for the page this runtime
 /// serves.
 pub fn view(model: Model) -> Element(Msg) {
-  let body = html.div([], [toast(model.ui), page_body(model)])
+  let body = html.div([], [toast(model.ui), flow_view(model), page_body(model)])
 
   case model.strip {
     Ready(strip) ->
@@ -740,6 +795,14 @@ fn toast(ui_state: UiState) -> Element(Msg) {
   }
 }
 
+// The one-click profile above the page body, once the viewer has fed it.
+fn flow_view(model: Model) -> Element(Msg) {
+  case model.flow {
+    Ready(data) -> flow.view(data, model.links, model.page)
+    Waiting -> element.none()
+  }
+}
+
 fn grants(model: Model) -> List(policy.Capability) {
   case model.strip {
     Ready(strip) -> strip.banner.grants
@@ -751,18 +814,22 @@ fn page_body(model: Model) -> Element(Msg) {
   case model.page {
     page.Overview ->
       loaded("Overview", model.overview, fn(data) {
-        overview.view(data, case model.movers {
-          Ready(movers) -> Some(movers)
-          Waiting -> None
-        })
+        overview.view(
+          data,
+          case model.movers {
+            Ready(movers) -> Some(movers)
+            Waiting -> None
+          },
+          grants(model),
+        )
       })
     page.Owners ->
       loaded("Owners", model.owners, fn(data) {
-        owners.view(data, model.ui, model.links)
+        owners.view(data, model.ui, model.links, grants(model))
       })
     page.Processes ->
       loaded("Processes", model.processes, fn(data) {
-        processes.view(data, model.links)
+        processes.view(data, model.links, grants(model))
       })
     page.ProcessDetail ->
       loaded("Process", model.process_detail, fn(data) {

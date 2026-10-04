@@ -118,6 +118,11 @@ pub type Inputs {
     supervision: Option(Result(wire.SupervisionSnapshot, String)),
     /// The newest audit entries, newest first.
     entries: List(audit.Entry),
+    /// What this principal's pending profile plans were chosen from, by plan
+    /// id.
+    notes: List(seam.ProfileNote),
+    /// Why the page's last profile button planned nothing, when it did not.
+    refusal: Option(String),
     cadence_ms: Int,
     sort: model.SortColumn,
     offset: Int,
@@ -166,9 +171,10 @@ pub fn slug_of(slug: String) -> Result(Slug, Nil) {
   }
 }
 
-/// The feeds of a page: the strip, and the page's own model when the viewer
-/// has data for it. With no observation yet only the strip and the audit page
-/// are fed, so the other pages say they are waiting.
+/// The feeds of a page: the strip, the one-click profile in flight, and the
+/// page's own model when the viewer has data for it. With no observation yet
+/// only the strip, the flow and the audit page are fed, so the other pages say
+/// they are waiting.
 ///
 /// ## Examples
 ///
@@ -176,27 +182,31 @@ pub fn slug_of(slug: String) -> Result(Slug, Nil) {
 /// feeds.feeds_for(feeds.Owners, inputs)
 /// ```
 pub fn feeds_for(slug: Slug, inputs: Inputs) -> List(msg.Feed) {
-  let strip = msg.FedStrip(strip(inputs))
+  [
+    msg.FedStrip(strip(inputs)),
+    msg.FedFlow(flow(inputs)),
+    ..page_feeds(slug, inputs)
+  ]
+}
 
+fn page_feeds(slug: Slug, inputs: Inputs) -> List(msg.Feed) {
   case slug, inputs.observations {
-    Audit, _ -> [strip, msg.FedAudit(audit_model(inputs))]
-    Waiting, _ -> [strip]
-    Profile, _ -> [strip, ..profile_feed(inputs)]
-    Supervision, _ -> [strip, ..supervision_feed(inputs)]
-    Timeline, observations -> [strip, ..timeline_feed(inputs, observations)]
-    Compare, _ -> [strip, ..compare_feed(inputs)]
-    _, [] -> [strip]
+    Audit, _ -> [msg.FedAudit(audit_model(inputs))]
+    Waiting, _ -> []
+    Profile, _ -> profile_feed(inputs)
+    Supervision, _ -> supervision_feed(inputs)
+    Timeline, observations -> timeline_feed(inputs, observations)
+    Compare, _ -> compare_feed(inputs)
+    _, [] -> []
     Overview, [newest, ..] -> [
-      strip,
       msg.FedOverview(overview(inputs, newest)),
       ..movers_feed(inputs, newest)
     ]
-    Owners, [newest, ..] -> [strip, ..owners_feed(inputs, newest)]
-    Processes, [newest, ..] -> [strip, ..processes_feed(inputs, newest)]
-    Memory, [newest, ..] -> [strip, msg.FedMemory(memory(inputs, newest))]
-    ProcessDetail, [newest, ..] -> [strip, ..detail_feed(inputs, newest)]
+    Owners, [newest, ..] -> owners_feed(inputs, newest)
+    Processes, [newest, ..] -> processes_feed(inputs, newest)
+    Memory, [newest, ..] -> [msg.FedMemory(memory(inputs, newest))]
+    ProcessDetail, [newest, ..] -> detail_feed(inputs, newest)
     Probes, [newest, ..] -> [
-      strip,
       msg.FedProbes(probes(inputs, newest)),
       ..plan_target(inputs)
     ]
@@ -913,6 +923,58 @@ fn word_size_of(newest: Observation, inputs: Inputs) -> Int {
   }
 }
 
+/// The processes behind one row of the owners page, with the row's name as
+/// the page writes it. An owner row's processes are those of the role rows
+/// beneath it, a role row's are its own, and the unknown row's are the
+/// processes nobody claimed. `Error` for a key no row has now, which a page
+/// may send after the census moved on.
+///
+/// ## Examples
+///
+/// ```gleam
+/// feeds.owner_members(inputs, newest, key.make("owner:session:abc"))
+/// // -> Ok(#("session:abc", rows))
+/// ```
+pub fn owner_members(
+  inputs: Inputs,
+  newest: Observation,
+  wanted: Key,
+) -> Result(#(String, List(model.ProcRow)), Nil) {
+  let page = owners_page(inputs, newest)
+
+  members_behind(list.append(page.rows, [page.unknown]), wanted, "")
+}
+
+// Rows are in page order: an owner, then its roles, then the next owner, and
+// the unknown row last. `owner` is the label of the owner row last passed.
+fn members_behind(
+  rows: List(model.OwnerRow),
+  wanted: Key,
+  owner: String,
+) -> Result(#(String, List(model.ProcRow)), Nil) {
+  case rows {
+    [] -> Error(Nil)
+    [row, ..rest] ->
+      case row.kind, row.key == wanted {
+        model.OwnerGroup, True ->
+          Ok(#(
+            row.label,
+            list.flat_map(roles_of(rest), fn(role) { role.members }),
+          ))
+        model.OwnerGroup, False -> members_behind(rest, wanted, row.label)
+        model.RoleGroup, True -> Ok(#(owner <> " / " <> row.label, row.members))
+        model.UnknownGroup, True -> Ok(#("unknown", row.members))
+        model.RoleGroup, False | model.UnknownGroup, False ->
+          members_behind(rest, wanted, owner)
+      }
+  }
+}
+
+// The role rows that follow an owner row, up to the next row of another kind.
+fn roles_of(rows: List(model.OwnerRow)) -> List(model.OwnerRow) {
+  list.take_while(rows, fn(row) { row.kind == model.RoleGroup })
+}
+
 fn owners_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
   [msg.FedOwners(owners_page(inputs, newest))]
 }
@@ -1178,39 +1240,6 @@ fn probes(inputs: Inputs, newest: Observation) -> model.ProbesModel {
   let rows = rated_rows_of(inputs.observations, word_size_of(newest, inputs)).0
   let live_pins =
     list.filter(inputs.pins, fn(pin) { pin.status == seam.PinLive })
-  let pending =
-    list.find_map(inputs.plans, fn(entry) {
-      let card = fn(what, tokens) {
-        Ok(model.PlanCard(
-          key: plan_key(entry.0),
-          what:,
-          plan: entry.1,
-          matched: NotApplicable,
-          target_labels: list.map(tokens, fn(token) {
-            identity.pin_to_string(token)
-          }),
-        ))
-      }
-
-      case policy.plan_command(entry.1) {
-        policy.StartProbe(spec:) ->
-          card(model.ProbePlan(spec.kind), spec.targets)
-        policy.TargetedGc(token:) -> card(model.GcPlan, [token])
-        policy.SelfMeasure(token:) -> card(model.MeasurePlan, [token])
-        policy.ReadCensus(_)
-        | policy.ReadOwners
-        | policy.ReadMemory
-        | policy.ReadSupervision
-        | policy.ReadAudit(_)
-        | policy.PinProcess(_)
-        | policy.UnpinProcess(_)
-        | policy.ReadProcess(_)
-        | policy.StopProbe(_)
-        | policy.ExportCapture(..)
-        | policy.Checkpoint(_)
-        | policy.Detach -> Error(Nil)
-      }
-    })
 
   model.ProbesModel(
     info: info(
@@ -1226,11 +1255,147 @@ fn probes(inputs: Inputs, newest: Observation) -> model.ProbesModel {
     targets: list.map(live_pins, fn(pin) {
       #(pin_key(pin.token), pin.pid_text <> label_for(rows, pin.pid_text))
     }),
-    pending: option.from_result(pending),
+    pending: list.first(plan_cards(inputs, rows)) |> option.from_result,
     active: active_probes(inputs),
     history: probe_history(inputs),
     grants: inputs.page.grants,
   )
+}
+
+// The plans the principal has pending, as cards, in the order the gate holds
+// them. A plan that no card can describe (it is not a probe, a collection or
+// a measure) is left out.
+fn plan_cards(
+  inputs: Inputs,
+  rows: List(model.ProcRow),
+) -> List(model.PlanCard) {
+  list.filter_map(inputs.plans, fn(entry) {
+    let card = fn(what, tokens) {
+      let note = list.find(inputs.notes, fn(note) { note.plan_id == entry.0 })
+
+      Ok(
+        model.PlanCard(
+          key: plan_key(entry.0),
+          what:,
+          plan: entry.1,
+          matched: NotApplicable,
+          target_labels: list.map(tokens, fn(token) {
+            target_label(inputs, rows, token)
+          }),
+          chosen: case note {
+            Ok(found) -> found.chosen
+            Error(Nil) -> ""
+          },
+          adjust: case note {
+            Ok(found) ->
+              model.Adjustable(
+                duration_ms: found.duration_ms,
+                rate_hz: found.rate_hz,
+              )
+            Error(Nil) -> model.NotAdjustable
+          },
+        ),
+      )
+    }
+
+    case policy.plan_command(entry.1) {
+      policy.StartProbe(spec:) -> card(model.ProbePlan(spec.kind), spec.targets)
+      policy.TargetedGc(token:) -> card(model.GcPlan, [token])
+      policy.SelfMeasure(token:) -> card(model.MeasurePlan, [token])
+      policy.ReadCensus(_)
+      | policy.ReadOwners
+      | policy.ReadMemory
+      | policy.ReadSupervision
+      | policy.ReadAudit(_)
+      | policy.PinProcess(_)
+      | policy.UnpinProcess(_)
+      | policy.ReadProcess(_)
+      | policy.StopProbe(_)
+      | policy.ExportCapture(..)
+      | policy.Checkpoint(_)
+      | policy.Detach -> Error(Nil)
+    }
+  })
+}
+
+// A target as the plan card names it: the process it pins and who owns it,
+// or the token when the viewer holds no pin by that name.
+fn target_label(
+  inputs: Inputs,
+  rows: List(model.ProcRow),
+  token: identity.PinToken,
+) -> String {
+  let text = identity.pin_to_string(token)
+
+  case list.find(inputs.pins, fn(pin) { pin.token == text }) {
+    Ok(pin) -> pin.pid_text <> label_for(rows, pin.pid_text)
+    Error(Nil) -> text
+  }
+}
+
+/// How long after it ends a stack profile is still offered as "ready" above
+/// every page, in milliseconds.
+pub const ready_ms = 300_000
+
+// The one-click profile in flight, for every page: the plan a profile button
+// made, the stack probes running, and the profile that just finished.
+fn flow(inputs: Inputs) -> model.FlowModel {
+  let rows = case inputs.observations {
+    [newest, ..] ->
+      rated_rows_of(inputs.observations, word_size_of(newest, inputs)).0
+    [] -> []
+  }
+  let profile_plans =
+    list.filter(plan_cards(inputs, rows), fn(card) {
+      card.adjust != model.NotAdjustable
+    })
+
+  model.FlowModel(
+    pending: list.first(profile_plans) |> option.from_result,
+    running: list.filter(active_probes(inputs), fn(probe) {
+      probe.kind == policy.Sampling
+    }),
+    ready: ready_profile(inputs),
+    refused: inputs.refusal,
+  )
+}
+
+// The newest finished stack probe that has a profile, while it is recent.
+fn ready_profile(inputs: Inputs) -> Option(model.ReadyProfile) {
+  option.from_result(find_ready(inputs))
+}
+
+fn find_ready(inputs: Inputs) -> Result(model.ReadyProfile, Nil) {
+  list.find_map(inputs.probes, fn(probe) {
+    case probe.kind, probe.state {
+      policy.Sampling, probe_book.Finished(ended_ms:, profile: Some(found), ..)
+      -> {
+        let age = int.max(0, inputs.now_ms - ended_ms)
+        let samples = case profile.columns(found) {
+          [first, ..] -> profile.total(found, first)
+          [] -> 0
+        }
+        let rate = case profile.source(found) {
+          profile.SampledStacks(rate:, ..) ->
+            " at " <> int.to_string(rate) <> " Hz"
+          profile.TracedCalls
+          | profile.TracedCounters
+          | profile.AllocationCounts -> ""
+        }
+
+        case age <= ready_ms {
+          True ->
+            Ok(model.ReadyProfile(
+              probe: probe.id,
+              age_ms: age,
+              summary: fmt.count(samples) <> " samples" <> rate,
+            ))
+          False -> Error(Nil)
+        }
+      }
+      _, _ -> Error(Nil)
+    }
+  })
 }
 
 /// The key of a probe, which names it by the agent's id.
@@ -1446,11 +1611,15 @@ fn profile_header(
         [] -> 0
       }
 
-      #(
-        "samples",
-        gate.sampling_hz * seconds * int.max(1, probe.matched),
-        taken,
-      )
+      // The rate is the one the agent ran, which the profile records.
+      let rate = case profile.source(found) {
+        profile.SampledStacks(rate:, ..) -> rate
+        profile.TracedCalls
+        | profile.TracedCounters
+        | profile.AllocationCounts -> gate.sampling_hz
+      }
+
+      #("samples", rate * seconds * int.max(1, probe.matched), taken)
     }
     policy.Counters | policy.CallTree | policy.SchedulingGc -> #(
       "functions with calls",

@@ -27,6 +27,7 @@ import lustre/element/html
 import lustre/element/keyed
 import pickglass_core/measure
 import pickglass_core/owner
+import pickglass_core/policy.{type Capability}
 import pickglass_core/unit
 import pickglass_web/fmt
 import pickglass_web/key
@@ -41,28 +42,37 @@ const binary_why: String =
   <> "are never totalled."
 
 /// Draw the processes page.
-pub fn view(data: ProcessesModel, links: Links) -> Element(Msg) {
+pub fn view(
+  data: ProcessesModel,
+  links: Links,
+  grants: List(Capability),
+) -> Element(Msg) {
   let binaries = binaries_of(data.rows)
 
-  ui.panel(title: "Processes", info: data.info, controls: [pager(data)], body: [
-    html.table([attribute.class("tbl processes")], [
-      head(data.sort, data.rate_ms, binaries),
-      keyed.tbody(
-        [],
-        list.map(data.rows, fn(process) {
-          #(key.to_string(process.key), row(process, links, binaries))
-        }),
+  ui.panel(
+    title: "Processes",
+    info: data.info,
+    controls: [ui.busiest_button(grants), pager(data)],
+    body: [
+      html.table([attribute.class("tbl processes")], [
+        head(data.sort, data.rate_ms, binaries),
+        keyed.tbody(
+          [],
+          list.map(data.rows, fn(process) {
+            #(key.to_string(process.key), row(process, links, binaries))
+          }),
+        ),
+      ]),
+      ui.note(
+        "Rows are one window of a sorted index held by the viewer. "
+        <> "Reductions are a work counter, not CPU time."
+        <> case binaries {
+          Counted -> ""
+          NotRead(word:) -> " Binary references: " <> word <> " for every row."
+        },
       ),
-    ]),
-    ui.note(
-      "Rows are one window of a sorted index held by the viewer. "
-      <> "Reductions are a work counter, not CPU time."
-      <> case binaries {
-        Counted -> ""
-        NotRead(word:) -> " Binary references: " <> word <> " for every row."
-      },
-    ),
-  ])
+    ],
+  )
 }
 
 // Whether the binary reference column carries figures. When every row in the

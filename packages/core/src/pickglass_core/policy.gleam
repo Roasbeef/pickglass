@@ -127,6 +127,11 @@ pub type ProbeSpec {
     targets: List(PinToken),
     modules: List(String),
     duration_ms: Int,
+    /// Samples per second per target for a `Sampling` probe, as asked. The
+    /// agent lowers it when the targets share its ceiling
+    /// (`sampling_rate_hz` computes what it will run). Zero for a kind that
+    /// does not sample.
+    rate_hz: Int,
   )
 }
 
@@ -403,6 +408,7 @@ fn describe_spec(spec: ProbeSpec) -> List(String) {
       <> string.join(list.map(spec.targets, identity.pin_to_string), ","),
     "modules=" <> string.join(spec.modules, ","),
     "duration_ms=" <> int.to_string(spec.duration_ms),
+    "rate_hz=" <> int.to_string(spec.rate_hz),
   ]
 }
 
@@ -445,6 +451,9 @@ pub type SpecError {
 
   /// The duration is not between one millisecond and the maximum.
   BadDuration(max_ms: Int)
+
+  /// A sampling probe's rate is not between 1 and the agent's ceiling.
+  BadRate(max_hz: Int)
 }
 
 /// The most modules a probe may name.
@@ -470,11 +479,42 @@ pub fn max_duration_ms(kind: ProbeKind) -> Int {
   }
 }
 
-fn target_limit(kind: ProbeKind) -> Int {
+/// The most pinned targets a probe of this kind may name. The agent takes
+/// sixteen for a stack probe and the viewer holds trace probes to eight.
+///
+/// ## Examples
+///
+/// ```gleam
+/// policy.target_limit(Sampling)
+/// // -> 16
+/// ```
+pub fn target_limit(kind: ProbeKind) -> Int {
   case kind {
     Sampling -> 16
     Counters | CallTree | SchedulingGc -> 8
   }
+}
+
+/// The ceiling on samples per second, summed over every target of one stack
+/// probe. It mirrors the agent's own constant, so the viewer can tell the
+/// operator the rate the agent will run before it runs.
+pub const max_total_sampling_hz = 1000
+
+/// The rate per target the agent will run for a request: the one asked for,
+/// cut to the ceiling divided by the number of targets, and never below one.
+///
+/// ## Examples
+///
+/// ```gleam
+/// policy.sampling_rate_hz(100, 4)
+/// // -> 100
+/// policy.sampling_rate_hz(100, 16)
+/// // -> 62
+/// ```
+pub fn sampling_rate_hz(requested: Int, targets: Int) -> Int {
+  let ceiling = max_total_sampling_hz / int.max(1, targets)
+
+  int.max(1, int.min(requested, ceiling))
 }
 
 fn needs_modules(kind: ProbeKind) -> Bool {
@@ -490,7 +530,7 @@ fn needs_modules(kind: ProbeKind) -> Bool {
 /// ## Examples
 ///
 /// ```gleam
-/// policy.validate_spec(ProbeSpec(Sampling, [], [], 1000))
+/// policy.validate_spec(ProbeSpec(Sampling, [], [], 1000, 50))
 /// // -> Error(NoTargets)
 /// ```
 pub fn validate_spec(spec: ProbeSpec) -> Result(Nil, SpecError) {
@@ -510,7 +550,20 @@ pub fn validate_spec(spec: ProbeSpec) -> Result(Nil, SpecError) {
       Error(TooManyModules(limit: max_probe_modules))
     _, 0, True, _ -> Error(NoModules)
     _, _, _, d if d < 1 || d > longest -> Error(BadDuration(max_ms: longest))
-    _, _, _, _ -> Ok(Nil)
+    _, _, _, _ -> check_rate(spec)
+  }
+}
+
+// A sampling probe needs a rate the agent can run. A kind that does not
+// sample carries none.
+fn check_rate(spec: ProbeSpec) -> Result(Nil, SpecError) {
+  case spec.kind {
+    Sampling ->
+      case spec.rate_hz >= 1 && spec.rate_hz <= max_total_sampling_hz {
+        True -> Ok(Nil)
+        False -> Error(BadRate(max_hz: max_total_sampling_hz))
+      }
+    Counters | CallTree | SchedulingGc -> Ok(Nil)
   }
 }
 
@@ -522,6 +575,7 @@ fn spec_error_text(error: SpecError) -> String {
     NoModules -> "no modules named"
     BadDuration(max_ms:) ->
       "duration outside 1.." <> int.to_string(max_ms) <> " ms"
+    BadRate(max_hz:) -> "rate outside 1.." <> int.to_string(max_hz) <> " Hz"
   }
 }
 

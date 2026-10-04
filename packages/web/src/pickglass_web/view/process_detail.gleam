@@ -127,7 +127,19 @@ fn actions(
     False -> []
   }
 
-  [pin_button, ..list.flatten([probe, gc, summary])]
+  // A profile pins the process when it is not pinned and plans one stack
+  // probe over it, so it is the short way to what "Plan probe" reaches in
+  // several steps. It still ends in a plan that waits for Confirm.
+  let profile = [
+    ui.profile_button(
+      grants,
+      "Profile this process",
+      "Plan a stack probe of this process, pinning it first if needed",
+      msg.ProfileProcess(data.key),
+    ),
+  ]
+
+  [pin_button, ..list.flatten([profile, probe, gc, summary])]
 }
 
 fn button(label: String, class: String, message: Msg) -> Element(Msg) {

@@ -89,6 +89,11 @@ pub type Feed {
   /// A target the plan form should offer first, by the key of its pin. The
   /// page applies it only when the pin is among the offered targets.
   FedPlanTarget(Key)
+
+  /// The one-click profile in flight: its plan, the probes running and the
+  /// profile that just finished. Every page but Probes draws it above its
+  /// body, so a profile started from any page is confirmed and found there.
+  FedFlow(model.FlowModel)
 }
 
 /// The tabs of the profile page.
@@ -125,6 +130,20 @@ pub type DurationChoice {
 
   /// Five minutes.
   Seconds300
+}
+
+/// How many samples per second per process a profile takes, as a closed
+/// choice. The agent lowers it when many processes share its ceiling, and the
+/// plan says what it will run.
+pub type RateChoice {
+  /// Fifty samples per second.
+  Hz50
+
+  /// One hundred samples per second.
+  Hz100
+
+  /// Two hundred and fifty samples per second.
+  Hz250
 }
 
 /// The kind of step a filter adds to the chain.
@@ -278,6 +297,21 @@ pub type Request {
   /// pre-fills the form's target. It plans nothing.
   PlanProbeFor(process: Key)
 
+  /// Profile the processes of the owner row with this key: pin the busiest of
+  /// them, plan one stack probe over the pins and show the plan. It starts
+  /// nothing until the plan is confirmed.
+  ProfileOwner(owner: Key)
+
+  /// Profile the busiest processes of the last pass, planned the same way.
+  ProfileBusiest
+
+  /// Profile one process, pinning it if it is not pinned.
+  ProfileProcess(process: Key)
+
+  /// Plan again the same processes for another duration and rate. The key
+  /// names the pending plan a profile button made.
+  AdjustProfile(plan: Key, duration: DurationChoice, rate: RateChoice)
+
   /// Drop every chain step from this index on.
   TruncateChain(from: Int)
 
@@ -300,6 +334,10 @@ pub type ProbeDraft {
   )
 }
 
+/// How many processes a "profile the busiest" button takes, and the most
+/// any profile button takes: the agent's limit for one stack probe.
+pub const profile_limit = 16
+
 /// The duration in milliseconds.
 pub fn duration_ms(choice: DurationChoice) -> Int {
   case choice {
@@ -307,6 +345,44 @@ pub fn duration_ms(choice: DurationChoice) -> Int {
     Seconds30 -> 30_000
     Seconds60 -> 60_000
     Seconds300 -> 300_000
+  }
+}
+
+/// The sampling rate of a choice, in samples per second per process.
+///
+/// ## Examples
+///
+/// ```gleam
+/// msg.rate_hz(Hz100)
+/// // -> 100
+/// ```
+pub fn rate_hz(choice: RateChoice) -> Int {
+  case choice {
+    Hz50 -> 50
+    Hz100 -> 100
+    Hz250 -> 250
+  }
+}
+
+/// The choice whose rate is exactly `hz`, when there is one. The plan card
+/// uses it to mark the choice in force.
+pub fn rate_choice(hz: Int) -> Result(RateChoice, Nil) {
+  case hz {
+    50 -> Ok(Hz50)
+    100 -> Ok(Hz100)
+    250 -> Ok(Hz250)
+    _ -> Error(Nil)
+  }
+}
+
+/// The duration choice that is exactly `ms` milliseconds, when there is one.
+pub fn duration_choice(ms: Int) -> Result(DurationChoice, Nil) {
+  case ms {
+    10_000 -> Ok(Seconds10)
+    30_000 -> Ok(Seconds30)
+    60_000 -> Ok(Seconds60)
+    300_000 -> Ok(Seconds300)
+    _ -> Error(Nil)
   }
 }
 

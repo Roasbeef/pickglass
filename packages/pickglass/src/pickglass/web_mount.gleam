@@ -46,10 +46,13 @@ import lustre/effect
 import lustre/server_component
 import pickglass/compare_build
 import pickglass/feeds
+import pickglass/gate
 import pickglass/hub
 import pickglass/internal/ffi_dist
+import pickglass/observation
 import pickglass/probe_book
 import pickglass/profile_export
+import pickglass/profile_scope
 import pickglass/seam
 import pickglass_core/analysis/transform
 import pickglass_core/measure
@@ -96,6 +99,9 @@ pub opaque type State {
     /// The newest spawn edges and when they were read. A walk visits every
     /// process, so the page rereads it at most every `supervision_ms`.
     supervision: Option(#(Int, Result(wire.SupervisionSnapshot, String))),
+    /// Why this page's last profile button planned nothing, when it did not.
+    /// The page that asked is the one told, so two tabs do not share it.
+    refusal: Option(String),
   )
 }
 
@@ -235,6 +241,7 @@ fn start_feeder(
         compared: None,
         subject: opened,
         supervision: None,
+        refusal: None,
       ))
       |> actor.selecting(
         process.new_selector()
@@ -302,7 +309,13 @@ pub fn new_state(
     compared: None,
     subject:,
     supervision: None,
+    refusal: None,
   )
+}
+
+/// Why the last profile button of the page planned nothing, if it did not.
+pub fn refusal_of(state: State) -> Option(String) {
+  state.refusal
 }
 
 /// The filter chain the page has built.
@@ -364,6 +377,8 @@ fn inputs(state: State) -> feeds.Inputs {
       feeds.Audit -> page.audit(100)
       _ -> []
     },
+    notes: page.profile_notes(),
+    refusal: state.refusal,
     cadence_ms: state.cadence_ms,
     sort: state.sort,
     offset: state.offset,
@@ -482,6 +497,7 @@ pub fn ask(state: State, request: msg.Request) -> State {
               targets:,
               modules: draft.modules,
               duration_ms: msg.duration_ms(draft.duration),
+              rate_hz: form_rate(draft.kind),
             ),
           )
         Error(Nil) -> state
@@ -523,6 +539,122 @@ pub fn ask(state: State, request: msg.Request) -> State {
 
     msg.RequestSelfMeasure(pin) ->
       submit_with(state, resolve_pin(current, pin), seam.PlanSelfMeasure)
+
+    msg.ProfileOwner(owner) -> profile_owner(state, current, owner)
+    msg.ProfileBusiest -> profile_busiest(state, current)
+    msg.ProfileProcess(row) -> profile_process(state, current, row)
+    msg.AdjustProfile(plan, duration, rate) ->
+      case resolve_plan(current, plan) {
+        Ok(plan_id) ->
+          planned(
+            state,
+            state.page.profile(seam.ReplanProfile(
+              plan_id,
+              msg.duration_ms(duration),
+              msg.rate_hz(rate),
+            )),
+          )
+        Error(Nil) -> state
+      }
+  }
+}
+
+// The probe form has no rate field, so its stack probes run at the gate's
+// default; a profile button plans its own.
+fn form_rate(kind: policy.ProbeKind) -> Int {
+  case kind {
+    policy.Sampling -> gate.sampling_hz
+    policy.Counters | policy.CallTree | policy.SchedulingGc -> 0
+  }
+}
+
+// ------------------------------------------------------------ one click
+
+// The processes of an owners-page row, found in the newest pass. A key that
+// names no row now makes no request.
+fn profile_owner(state: State, current: feeds.Inputs, owner: Key) -> State {
+  case current.observations {
+    [] -> state
+    [newest, ..] ->
+      case feeds.owner_members(current, newest, owner) {
+        Error(Nil) -> state
+        Ok(#(label, members)) ->
+          choose_and_plan(
+            state,
+            profile_scope.OwnerScope(label),
+            profile_scope.candidates_of(members),
+          )
+      }
+  }
+}
+
+// The busiest processes of the newest pass, by reductions per second.
+fn profile_busiest(state: State, current: feeds.Inputs) -> State {
+  case current.observations {
+    [] -> state
+    [newest, ..] -> {
+      let #(rows, _) =
+        feeds.rated_rows_of(current.observations, word_size(newest, current))
+
+      choose_and_plan(
+        state,
+        profile_scope.WholeNode,
+        profile_scope.candidates_of(rows),
+      )
+    }
+  }
+}
+
+fn profile_process(state: State, current: feeds.Inputs, row: Key) -> State {
+  case resolve_row(current, row) {
+    Error(Nil) -> state
+    Ok(pid_text) ->
+      choose_and_plan(state, profile_scope.OneProcess(pid_text), [
+        profile_scope.Candidate(pid_text:, rate: None, heap_bytes: 0),
+      ])
+  }
+}
+
+// The word size the census rows' heap figures are read with. A page that has
+// never seen a memory report assumes the common one, as the feeds do.
+fn word_size(newest: observation.Observation, current: feeds.Inputs) -> Int {
+  case newest.memory {
+    Ok(memory) -> memory.word_size
+    Error(_) ->
+      case list.find_map(current.observations, fn(o) { o.memory }) {
+        Ok(memory) -> memory.word_size
+        Error(Nil) -> 8
+      }
+  }
+}
+
+fn choose_and_plan(
+  state: State,
+  scope: profile_scope.Scope,
+  candidates: List(profile_scope.Candidate),
+) -> State {
+  case profile_scope.choose(candidates, seam.profile_limit, scope) {
+    Error(profile_scope.NothingToProfile(reason:)) ->
+      State(..state, refusal: Some(reason))
+    Ok(chosen) ->
+      planned(
+        state,
+        state.page.profile(seam.PlanProfile(
+          pids: chosen.pids,
+          chosen: chosen.sentence,
+          duration_ms: seam.profile_duration_ms,
+          rate_hz: seam.profile_rate_hz,
+        )),
+      )
+  }
+}
+
+// A plan the viewer made clears the page's refusal; a refusal replaces it.
+fn planned(state: State, reply: seam.Reply) -> State {
+  case reply {
+    seam.PlanReady(..) -> State(..state, refusal: None)
+    seam.Rejected(reason) -> State(..state, refusal: Some(reason))
+    _ -> State(..state, refusal: Some("the viewer did not plan a profile"))
   }
 }
 

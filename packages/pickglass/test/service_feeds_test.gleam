@@ -52,7 +52,7 @@ fn ended(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
 fn start_probe(page: seam.Page) -> Nil {
   let assert seam.PinIssued(token, _) = page.submit(seam.PinProcess("<0.5.0>"))
   let assert seam.PlanReady(id, _) =
-    page.submit(seam.PlanProbe(policy.Counters, [token], ["lists"], 30_000))
+    page.submit(seam.PlanProbe(policy.Counters, [token], ["lists"], 30_000, 0))
   let assert seam.ProbeStarted("7", 3) = page.submit(seam.ConfirmPlan(id))
 
   Nil

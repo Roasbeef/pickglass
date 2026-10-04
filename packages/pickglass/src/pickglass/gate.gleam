@@ -123,8 +123,9 @@ pub fn new(boot: BootId, target: Target) -> Gate {
   Gate(boot:, target:, pins: dict.new(), plans: plans.new())
 }
 
-/// The rate a stack probe asks for, in samples per second. The agent cuts it
-/// to what the number of targets allows.
+/// The rate the probe form's stack probes ask for, in samples per second per
+/// process. The agent cuts it to what the number of targets allows. A profile
+/// button asks for its own rate.
 pub const sampling_hz = 50
 
 /// The estimate the operator is shown for a command, and the one
@@ -142,13 +143,15 @@ pub fn estimate_for(command: Command) -> Estimate {
   case command {
     policy.StartProbe(spec: policy.ProbeSpec(kind: policy.Sampling, ..) as spec) -> {
       // A stack probe takes one sample per target per tick of its rate, so
-      // its bound is the rate times the duration, and nothing like the
+      // its bound is the rate the agent will run (the one asked for, shared
+      // between the targets) times the duration, and nothing like the
       // thousand events a second a tracing probe is budgeted for.
       let seconds = int.max(1, spec.duration_ms / 1000)
+      let targets = int.max(1, list.length(spec.targets))
       let samples =
         int.min(
           200_000,
-          sampling_hz * seconds * int.max(1, list.length(spec.targets)),
+          policy.sampling_rate_hz(spec.rate_hz, targets) * seconds * targets,
         )
 
       policy.Estimate(

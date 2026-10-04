@@ -183,10 +183,9 @@ pub fn a_column_of_identical_missing_words_is_said_once_test() {
       model.ProcRow(..process, binary_refs: Missing(measure.NotCollected))
     })
   let html =
-    element.to_string(processes.view(
-      model.ProcessesModel(..base, rows:),
-      page.Files,
-    ))
+    element.to_string(
+      processes.view(model.ProcessesModel(..base, rows:), page.Files, []),
+    )
 
   string.contains(html, "binary refs") |> should.be_false
   string.contains(
@@ -227,7 +226,9 @@ fn unknown_with(members: Int) -> model.OwnersModel {
 // answers "who" without a click.
 pub fn the_unknown_row_lists_its_largest_members_test() {
   let html =
-    element.to_string(owners.view(unknown_with(8), state.initial(), page.Files))
+    element.to_string(
+      owners.view(unknown_with(8), state.initial(), page.Files, []),
+    )
 
   // Members 8 to 4 are the five largest.
   string.contains(html, "&lt;9.8.0&gt;") |> should.be_true

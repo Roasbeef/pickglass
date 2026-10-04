@@ -27,6 +27,7 @@ import lustre/element/html
 import lustre/element/svg
 import pickglass_core/identity
 import pickglass_core/measure.{type Measurement, Known}
+import pickglass_core/policy.{type Capability}
 import pickglass_core/unit
 import pickglass_web/chart/spark
 import pickglass_web/chart/svg_util
@@ -46,14 +47,33 @@ import pickglass_web/wire
 pub fn view(
   data: OverviewModel,
   movers: Option(model.OwnerMovers),
+  grants: List(Capability),
 ) -> Element(Msg) {
-  html.div([attribute.class("grid overview")], [
+  html.div([attribute.class("stack")], [
+    html.div([attribute.class("profile-bar")], [
+      ui.busiest_button(grants),
+      html.span([attribute.class("muted")], [
+        element.text(
+          "Pins the busiest processes, plans one stack probe and waits "
+          <> "for your confirmation.",
+        ),
+      ]),
+    ]),
+    html.div([attribute.class("grid overview")], overview_panels(data, movers)),
+  ])
+}
+
+fn overview_panels(
+  data: OverviewModel,
+  movers: Option(model.OwnerMovers),
+) -> List(Element(Msg)) {
+  [
     layers_panel(data),
     schedulers_panel(data),
     movers_panel(movers),
     counts_panel(data),
     roles_panel(data),
-  ])
+  ]
 }
 
 /// The most owners the movers panel lists.

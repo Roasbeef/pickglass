@@ -32,6 +32,7 @@ import lustre/element/html
 import lustre/element/keyed
 import pickglass_core/measure
 import pickglass_core/owner
+import pickglass_core/policy.{type Capability}
 import pickglass_core/unit
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
@@ -60,6 +61,7 @@ pub fn view(
   data: OwnersModel,
   ui_state: UiState,
   links: Links,
+  grants: List(Capability),
 ) -> Element(Msg) {
   let rows = visible(data.rows, ui_state)
   let all = list.append(rows, [data.unknown])
@@ -74,7 +76,7 @@ pub fn view(
     list.flat_map(all, fn(row) {
       let heading = #(
         key.to_string(row.key) <> "/row",
-        group_row(row, ui_state),
+        group_row(row, ui_state, grants),
       )
 
       // An open row shows every member. The unknown row shows its largest
@@ -225,7 +227,11 @@ fn opened(ui_state: UiState, row: Key) -> Visibility {
   }
 }
 
-fn group_row(row: OwnerRow, ui_state: UiState) -> Element(Msg) {
+fn group_row(
+  row: OwnerRow,
+  ui_state: UiState,
+  grants: List(Capability),
+) -> Element(Msg) {
   let class = case row.kind {
     model.OwnerGroup -> "group"
     model.RoleGroup -> "group role-row"
@@ -242,6 +248,14 @@ fn group_row(row: OwnerRow, ui_state: UiState) -> Element(Msg) {
       expandable,
       html.span([attribute.class("owner-label")], [element.text(row.label)]),
       source_tag(row),
+      ui.profile_button(
+        grants,
+        "Profile",
+        "Pin the busiest processes of "
+          <> row.label
+          <> " and plan one stack probe over them",
+        msg.ProfileOwner(row.key),
+      ),
     ]),
     ui.num(row.procs, unit.Count),
     heap_cell(row),

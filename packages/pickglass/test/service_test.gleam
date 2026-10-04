@@ -19,7 +19,7 @@ import pickglass_core/wire
 import simplifile
 
 fn counters(token: String) -> seam.Request {
-  seam.PlanProbe(policy.Counters, [token], ["lists"], 30_000)
+  seam.PlanProbe(policy.Counters, [token], ["lists"], 30_000, 0)
 }
 
 fn pinned_token(page: seam.Page) -> String {
@@ -121,7 +121,7 @@ pub fn a_probe_needs_pinned_targets_test() {
   // No targets at all: the viewer offers no probe over every process.
   let none =
     rejected(
-      page.submit(seam.PlanProbe(policy.Counters, [], ["lists"], 30_000)),
+      page.submit(seam.PlanProbe(policy.Counters, [], ["lists"], 30_000, 0)),
     )
 
   assert string.contains(none, "invalid spec")
@@ -176,7 +176,7 @@ pub fn a_probe_kind_the_agent_cannot_run_is_refused_in_words_test() {
   let token = pinned_token(page)
   let id =
     plan_id(
-      page.submit(seam.PlanProbe(policy.CallTree, [token], ["lists"], 10_000)),
+      page.submit(seam.PlanProbe(policy.CallTree, [token], ["lists"], 10_000, 0)),
     )
 
   assert string.contains(
