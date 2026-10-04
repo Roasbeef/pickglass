@@ -57,7 +57,8 @@ pages there until you press Ctrl-C, which detaches. `pickglass view FILE`
 serves the same pages over a capture with no target. `docs/attach.md` is the
 operator's guide: what a distributed node is, how to start yours so pickglass
 can attach, how to label your processes, and what to check when attaching
-fails. `docs/design/plan.md` is the plan of record that the code is built to.
+fails. `docs/case-studies/loom-720.md` walks through the #720 investigation
+with screenshots from two live runs. `docs/design/plan.md` is the plan of record that the code is built to.
 
 ## Safety model
 
