@@ -459,13 +459,15 @@ fn ets_table() -> Generator(wire.EtsTable) {
   use objects <- qcheck.bind(non_negative())
   use memory_bytes <- qcheck.bind(non_negative())
   use protection <- qcheck.bind(ident())
-  use heir_pid_text <- qcheck.map(text())
+  use heir_pid_text <- qcheck.bind(text())
+  use owner_name <- qcheck.map(text())
 
   wire.EtsTable(
     id_text:,
     name:,
     owner_pid_text:,
     owner:,
+    owner_name:,
     kind:,
     objects:,
     memory_bytes:,

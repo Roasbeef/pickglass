@@ -264,6 +264,7 @@ fn table_json(table: EtsTable) -> Json {
     #("bytes", json.int(table.memory_bytes)),
     #("protection", json.string(table.protection)),
     #("heir", json.string(table.heir_pid_text)),
+    #("owner_name", json.string(table.owner_name)),
   ])
 }
 
@@ -278,11 +279,16 @@ fn table_decoder() -> Decoder(EtsTable) {
   use protection <- decode.field("protection", decode.string)
   use heir_pid_text <- decode.field("heir", decode.string)
 
+  // A capture written before the agent sent the owner's registered name has
+  // no such field; it reads as no name.
+  use owner_name <- decode.optional_field("owner_name", "", decode.string)
+
   decode.success(wire.EtsTable(
     id_text:,
     name:,
     owner_pid_text:,
     owner:,
+    owner_name:,
     kind:,
     objects:,
     memory_bytes:,

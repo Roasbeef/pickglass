@@ -196,6 +196,7 @@ fn ets_row(table: ets.Table) -> Term {
     table.memory_bytes,
     table.protection,
     table.heir,
+    table.owner_name,
   ))
 }
 

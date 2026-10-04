@@ -344,14 +344,15 @@ pub type EtsCoverage {
 }
 
 /// One ETS table, described by its properties and never its contents. `name`
-/// is `""` for a table with no name and `heir_pid_text` is `""` for one with
-/// no heir. `memory_bytes` is bytes; `objects` is the object count.
+/// is `""` for a table with no name, `heir_pid_text` is `""` for one with no
+/// heir and `owner_name` is `""` for an owner with no registered name. `memory_bytes` is bytes; `objects` is the object count.
 pub type EtsTable {
   EtsTable(
     id_text: String,
     name: String,
     owner_pid_text: String,
     owner: OwnerReading,
+    owner_name: String,
     kind: String,
     objects: Int,
     memory_bytes: Int,
@@ -1312,12 +1313,14 @@ fn ets_table_decoder() -> Decoder(EtsTable) {
   use memory_bytes <- decode.field(6, decode.int)
   use protection <- decode.field(7, decode.string)
   use heir_pid_text <- decode.field(8, decode.string)
+  use owner_name <- decode.field(9, decode.string)
 
   decode.success(EtsTable(
     id_text:,
     name:,
     owner_pid_text:,
     owner:,
+    owner_name:,
     kind:,
     objects:,
     memory_bytes:,

@@ -1929,6 +1929,7 @@ fn ets_table() -> Generator(wire.EtsTable) {
         name: names.1,
         owner_pid_text: names.2,
         owner: owner,
+        owner_name: more.1,
         kind: sizes.0,
         objects: sizes.1,
         memory_bytes: sizes.2,
@@ -1996,6 +1997,7 @@ fn encode_ets_tables(snapshot: wire.EtsSnapshot) -> Dynamic {
           num(table.memory_bytes),
           text(table.protection),
           text(table.heir_pid_text),
+          text(table.owner_name),
         ])
       }),
     ),

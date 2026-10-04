@@ -56,12 +56,15 @@ pub type Stop {
 /// One table as `ets:info/1` describes it. `name` is empty for a table that
 /// has no name, `heir` is empty for a table with no heir, and `owner` is the
 /// owner label of the owning process, `Unknown` until a caller resolves it.
+/// `owner_name` is the owning process's registered name, empty for a process
+/// with none, resolved with the label.
 pub type Table {
   Table(
     id: String,
     name: String,
     owner_pid: Pid,
     owner: Owner,
+    owner_name: String,
     kind: String,
     objects: Int,
     memory_bytes: Int,
@@ -155,7 +158,9 @@ fn label_owners(tables: List(Table)) -> List(Table) {
       let #(done, cache) = acc
       let #(found, cache) = owner_of(cache, table.owner_pid)
 
-      #([Table(..table, owner: found), ..done], cache)
+      let name = proc_info.read_registered_name(table.owner_pid)
+
+      #([Table(..table, owner: found, owner_name: name), ..done], cache)
     })
 
   seq.reverse(labelled)
@@ -263,6 +268,7 @@ fn read(id: Term, word: Int) -> Result(Table, Nil) {
         name: name_text(info),
         owner_pid: owner_pid,
         owner: Unknown,
+        owner_name: "",
         kind: kind,
         objects: objects,
         memory_bytes: memory * word,

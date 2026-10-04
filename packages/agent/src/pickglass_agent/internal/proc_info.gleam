@@ -83,6 +83,40 @@ pub fn read_label(pid: Pid) -> Term {
   }
 }
 
+/// Read one process's registered name as text: empty for a process with no
+/// name and for one that exited. The ETS listing names the owner of a table
+/// with it, because a process that carries no label is still often a
+/// registered one.
+///
+/// ## Examples
+///
+/// ```gleam
+/// read_registered_name(self())
+/// // -> ""
+/// ```
+pub fn read_registered_name(pid: Pid) -> String {
+  let answer = ffi_proc.process_info(pid, [ffi_proc.RegisteredName])
+
+  case ffi_term.is_atom(answer) {
+    True -> ""
+    False -> {
+      let items: List(Term) = ffi_term.coerce(answer)
+
+      case items {
+        [item] -> {
+          let name = ffi_term.element(2, item)
+
+          case ffi_term.is_atom(name) {
+            True -> ffi_term.atom_name(ffi_term.coerce(name))
+            False -> ""
+          }
+        }
+        _ -> ""
+      }
+    }
+  }
+}
+
 /// Read the census items and the process's `proc_lib` initial call. The call
 /// lives in the dictionary key `'$initial_call'`, which `proc_lib` writes
 /// before it runs the process's code, and the `{dictionary, Key}` item returns

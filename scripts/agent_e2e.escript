@@ -536,18 +536,19 @@ scenario_ets(Target) ->
     check("the listing covers every table", Counted + Skipped =< Total andalso Counted >= 2),
     check("the totals cover every table read", NTables =:= Counted andalso NObjects >= 3500 andalso NBytes > 0),
     Find = fun(Name) ->
-               [T || {_, N, _, _, _, _, _, _, _} = T <- Tables, N =:= Name]
+               [T || {_, N, _, _, _, _, _, _, _, _} = T <- Tables, N =:= Name]
            end,
-    [{LId, <<"pg_e2e_ets_labelled">>, LOwnerPid, LOwner, <<"set">>, 3000, LMem, <<"public">>, <<>>}] =
+    [{LId, <<"pg_e2e_ets_labelled">>, LOwnerPid, LOwner, <<"set">>, 3000, LMem, <<"public">>, <<>>, LName}] =
         Find(<<"pg_e2e_ets_labelled">>),
     check("a named table is listed with its owner, size and memory",
           LOwnerPid =:= pid_text(Target, Mine) andalso LMem > 3000 andalso
           is_binary(LId) andalso byte_size(LId) > 0),
     check("the owner's label is decoded",
           LOwner =:= {<<"owner">>, [{<<"app">>, <<"e2e_ets">>}], <<"cache">>}),
-    [{_, _, PPid, POwner, _, 500, _, _, _}] = Find(<<"pg_e2e_ets_plain">>),
+    [{_, _, PPid, POwner, _, 500, _, _, _, PName}] = Find(<<"pg_e2e_ets_plain">>),
     check("an unlabelled owner is unknown", PPid =:= pid_text(Target, Plain) andalso POwner =:= {<<"unknown">>}),
-    Mems = [M || {_, _, _, _, _, _, M, _, _} <- Tables],
+    check("an owner with no registered name sends an empty one", LName =:= <<>> andalso PName =:= <<>>),
+    Mems = [M || {_, _, _, _, _, _, M, _, _, _} <- Tables],
     check("tables are listed largest first", Mems =:= lists:reverse(lists:sort(Mems))),
     {<<"ets_tables">>, _, Two, _} = ask(Target, {<<"ets_tables">>, 2}),
     check("the listing is bounded by the requested count", length(Two) =:= 2),
@@ -555,7 +556,7 @@ scenario_ets(Target) ->
     check("the listing defaults to at most 100 tables", length(Default) =< 100),
     io:format("       ets listing: ~b tables, ~b objects, ~b bytes; top: ~p~n",
               [NTables, NObjects, NBytes,
-               [{N, M} || {_, N, _, _, _, _, M, _, _} <- lists:sublist(Tables, 3)]]),
+               [{N, M} || {_, N, _, _, _, _, M, _, _, _} <- lists:sublist(Tables, 3)]]),
     {<<"owners_detail">>, _, DRows, DAggs, DTotals, {EtsTables, EtsBytes, _, <<"finished">>}} =
         ask(Target, {<<"owners_detail">>, 100000, 200}),
     check("owners_detail rows carry a twelfth field, the initial call",

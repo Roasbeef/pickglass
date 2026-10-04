@@ -489,6 +489,7 @@ fn an_ets_listing() -> Record(String) {
           name: "",
           owner_pid_text: "<0.9.0>",
           owner: wire.Unlabelled,
+          owner_name: "code_server",
           kind: "set",
           objects: 12,
           memory_bytes: 2048,
