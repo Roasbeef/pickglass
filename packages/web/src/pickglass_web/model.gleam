@@ -685,7 +685,21 @@ pub type ProfileModel {
     stacks: Stacks,
     /// The Top table.
     top: top.Table,
+    /// What the operator asked to export and what became of each request,
+    /// newest first.
+    exports: List(ExportNote),
   )
+}
+
+/// What became of a request to export the profile.
+pub type ExportNote {
+  /// The file is ready at a one-time address. `ticket` is the viewer's own
+  /// token, never text from the target, and the file can be fetched once.
+  /// `losses` is core's list of what the format does not carry.
+  ExportReady(label: String, ticket: Key, losses: List(String))
+
+  /// The format cannot represent this profile, with core's reason.
+  ExportRefused(label: String, reason: String)
 }
 
 /// The views of a profile that exist only for a source with call stacks.
@@ -789,6 +803,37 @@ pub type CompareRow {
     baseline: Measurement,
     /// The candidate reading.
     candidate: Measurement,
+  )
+}
+
+/// What a capture file offered on the compare page is chosen as.
+pub type ChosenAs {
+  /// Not chosen.
+  NotChosen
+
+  /// The baseline of the comparison.
+  AsBaseline
+
+  /// The candidate of the comparison.
+  AsCandidate
+}
+
+/// One capture file the viewer offers for comparison. The key is the
+/// viewer's, derived from the file name; the browser never names a path.
+pub type CaptureOffer {
+  CaptureOffer(key: Key, name: String, chosen: ChosenAs)
+}
+
+/// The capture files offered for comparison and how the last attempt to
+/// load the chosen ones went.
+pub type CapturesModel {
+  CapturesModel(
+    /// Where the offers came from.
+    info: PanelInfo,
+    /// The files, newest first.
+    offers: List(CaptureOffer),
+    /// Why the chosen pair could not be compared, or what is still needed.
+    note: String,
   )
 }
 

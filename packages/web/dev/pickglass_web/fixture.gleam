@@ -1221,6 +1221,7 @@ pub fn profile() -> Result(model.ProfileModel, String) {
     chain: applied.reports,
     stacks: model.HasStacks(layout:, graph: call_graph, dag: placed, peeks:),
     top: table,
+    exports: [],
   ))
 }
 

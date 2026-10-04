@@ -43,9 +43,75 @@ import pickglass_core/provenance.{
 import pickglass_core/unit
 import pickglass_web/chart/flame as flame_chart
 import pickglass_web/fmt
-import pickglass_web/model.{type CompareModel, type CompareRow}
+import pickglass_web/model.{
+  type CapturesModel, type CompareModel, type CompareRow,
+}
 import pickglass_web/msg.{type Msg}
 import pickglass_web/view/ui
+import pickglass_web/wire
+
+/// Draw the capture files on offer. Each row has two buttons that ask the
+/// viewer to use the file as the baseline or as the candidate; the viewer
+/// reads the files, so the page names a key and never a path.
+///
+/// ## Examples
+///
+/// ```gleam
+/// compare.offers_view(offers)
+/// ```
+pub fn offers_view(data: CapturesModel) -> Element(Msg) {
+  ui.panel(title: "Captures", info: data.info, controls: [], body: [
+    case data.offers {
+      [] -> ui.note("No capture files are saved yet. Save one from the strip.")
+      offers ->
+        html.table([attribute.class("tbl")], [
+          html.thead([], [
+            html.tr([], [
+              ui.th("file", None),
+              ui.th("use as", None),
+              ui.th("", None),
+            ]),
+          ]),
+          html.tbody(
+            [],
+            list.map(offers, fn(offer) {
+              html.tr([], [
+                html.td([attribute.class("mono")], [element.text(offer.name)]),
+                html.td([], [chosen_badge(offer.chosen)]),
+                html.td([], [
+                  choice_button("Baseline", msg.ChooseBaseline(offer.key)),
+                  choice_button("Candidate", msg.ChooseCandidate(offer.key)),
+                ]),
+              ])
+            }),
+          ),
+        ])
+    },
+    case data.note {
+      "" -> element.none()
+      note -> ui.note(note)
+    },
+  ])
+}
+
+fn chosen_badge(chosen: model.ChosenAs) -> Element(Msg) {
+  case chosen {
+    model.NotChosen -> element.none()
+    model.AsBaseline -> ui.badge("ok", "baseline")
+    model.AsCandidate -> ui.badge("ok", "candidate")
+  }
+}
+
+fn choice_button(label: String, request: msg.Request) -> Element(Msg) {
+  html.button(
+    [
+      attribute.class("btn btn-small"),
+      attribute.type_("button"),
+      wire.click(msg.Ask(request)),
+    ],
+    [element.text(label)],
+  )
+}
 
 /// Draw the compare page.
 pub fn view(data: CompareModel) -> Element(Msg) {

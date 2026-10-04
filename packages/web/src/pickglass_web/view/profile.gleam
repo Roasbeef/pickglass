@@ -187,7 +187,46 @@ fn header(data: ProfileModel) -> Element(Msg) {
       [attribute.class("caveats")],
       list.map(h.caveats, fn(text) { html.li([], [element.text(text)]) }),
     ),
+    export_notes(data.exports),
   ])
+}
+
+// Each export the operator asked for is either a one-time link, with what
+// the format leaves out, or the reason the format cannot show this profile.
+// The link's address is the viewer's own ticket, which `key` limits to a
+// closed alphabet, so no text from the target is ever part of an address.
+fn export_notes(notes: List(model.ExportNote)) -> Element(Msg) {
+  case notes {
+    [] -> element.none()
+    _ ->
+      html.ul(
+        [attribute.class("exports")],
+        list.map(notes, fn(note) {
+          case note {
+            model.ExportReady(label:, ticket:, losses:) ->
+              html.li([attribute.data("test-id", "export-ready")], [
+                html.a(
+                  [
+                    attribute.href("/download/" <> key.to_string(ticket)),
+                    attribute.download(label),
+                  ],
+                  [element.text(label <> " (one download)")],
+                ),
+                html.span([attribute.class("muted")], [
+                  element.text(
+                    " does not carry: " <> string.join(losses, "; ") <> ".",
+                  ),
+                ]),
+              ])
+            model.ExportRefused(label:, reason:) ->
+              html.li([attribute.data("test-id", "export-refused")], [
+                ui.badge("warn", label <> " refused"),
+                element.text(" " <> reason),
+              ])
+          }
+        }),
+      )
+  }
 }
 
 // For sampled stacks the number of samples collected is the profile's own

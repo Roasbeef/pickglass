@@ -82,6 +82,13 @@ pub type Feed {
 
   /// The audit page.
   FedAudit(model.AuditModel)
+
+  /// The capture files offered on the compare page.
+  FedCaptures(model.CapturesModel)
+
+  /// A target the plan form should offer first, by the key of its pin. The
+  /// page applies it only when the pin is among the offered targets.
+  FedPlanTarget(Key)
 }
 
 /// The tabs of the profile page.
@@ -237,8 +244,12 @@ pub type Request {
   /// Stop a running probe.
   StopProbe(probe: Key)
 
-  /// Compare against another checkpoint.
+  /// Compare against another checkpoint, or on the compare page use a
+  /// capture file as the baseline.
   ChooseBaseline(checkpoint: Key)
+
+  /// Use a capture file the compare page offers as the candidate.
+  ChooseCandidate(capture: Key)
 
   /// Take a checkpoint now.
   TakeCheckpoint

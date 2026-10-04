@@ -111,6 +111,8 @@ pub type Model {
     timeline: Loadable(model.TimelineModel),
     /// The compare data.
     compare: Loadable(model.CompareModel),
+    /// The capture files offered on the compare page.
+    captures: Loadable(model.CapturesModel),
     /// The audit data.
     audit: Loadable(model.AuditModel),
     /// The operator's view state.
@@ -148,6 +150,7 @@ pub fn init(start: Start) -> Model {
       profile: Waiting,
       timeline: Waiting,
       compare: Waiting,
+      captures: Waiting,
       audit: Waiting,
       ui: state.initial(),
     )
@@ -188,6 +191,28 @@ fn store(model: Model, feed: Feed) -> Model {
     msg.FedTimeline(data) -> Model(..model, timeline: Ready(data))
     msg.FedCompare(data) -> Model(..model, compare: Ready(data))
     msg.FedAudit(data) -> Model(..model, audit: Ready(data))
+    msg.FedCaptures(data) -> Model(..model, captures: Ready(data))
+    msg.FedPlanTarget(target) -> offer_target(model, target)
+  }
+}
+
+// The viewer suggests a target for the plan form, for instance the process
+// whose "Plan probe" was pressed. It is applied only when the form has none
+// yet and the target is one the page offers, so a stale suggestion cannot
+// replace the operator's own choice.
+fn offer_target(model: Model, target: Key) -> Model {
+  let draft = model.ui.plan
+
+  case draft.target, target_known(model, target) {
+    None, True ->
+      Model(
+        ..model,
+        ui: state.UiState(
+          ..model.ui,
+          plan: state.PlanDraft(..draft, target: Some(target)),
+        ),
+      )
+    _, _ -> model
   }
 }
 
@@ -412,7 +437,8 @@ pub fn describe(request: Request) -> String {
     msg.ConfirmPlan(_) -> "confirm the plan"
     msg.CancelPlan(_) -> "cancel the plan"
     msg.StopProbe(_) -> "stop a probe"
-    msg.ChooseBaseline(_) -> "compare against another checkpoint"
+    msg.ChooseBaseline(_) -> "compare against another baseline"
+    msg.ChooseCandidate(_) -> "use a capture as the candidate"
     msg.TakeCheckpoint -> "take a checkpoint"
     msg.SortProcesses(_) -> "sort the processes"
     msg.MovePage(_) -> "move the window"
@@ -445,11 +471,13 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
       require(plan_known(model, plan), "That plan is not the one shown.")
     msg.StopProbe(probe) ->
       require(probe_known(model, probe), "That probe is not running.")
-    msg.ChooseBaseline(checkpoint) ->
-      require(
-        checkpoint_known(model, checkpoint),
-        "That checkpoint is not offered.",
-      )
+    msg.ChooseBaseline(choice) ->
+      case checkpoint_known(model, choice), capture_known(model, choice) {
+        Absent, Absent -> Error("That checkpoint is not offered.")
+        _, _ -> Ok(Nil)
+      }
+    msg.ChooseCandidate(choice) ->
+      require(capture_known(model, choice), "That capture is not offered.")
     msg.PlanProbe(draft) -> check_draft(model, draft)
     msg.PlanProbeFor(process) ->
       require(
@@ -583,6 +611,13 @@ fn checkpoint_known(model: Model, checkpoint: Key) -> Presence {
   }
 
   present(offered, fn(ref) { ref.key == checkpoint })
+}
+
+fn capture_known(model: Model, choice: Key) -> Presence {
+  case model.captures {
+    Ready(data) -> present(data.offers, fn(offer) { offer.key == choice })
+    Waiting -> Absent
+  }
 }
 
 fn target_known(model: Model, target: Key) -> Bool {
@@ -744,8 +779,28 @@ fn page_body(model: Model) -> Element(Msg) {
       loaded("Timeline", model.timeline, fn(data) {
         timeline.view(data, model.ui)
       })
-    page.Compare -> loaded("Compare", model.compare, compare.view)
+    page.Compare -> compare_body(model)
     page.Audit -> loaded("Audit", model.audit, audit.view)
+  }
+}
+
+// The compare page has two parts: the captures on offer, which exist as soon
+// as the viewer has a directory to look in, and the comparison, which exists
+// once a baseline and a candidate are chosen and read.
+fn compare_body(model: Model) -> Element(Msg) {
+  case model.captures, model.compare {
+    Ready(offers), Ready(data) ->
+      html.div([attribute.class("stack")], [
+        compare.offers_view(offers),
+        compare.view(data),
+      ])
+    Ready(offers), Waiting ->
+      html.div([attribute.class("stack")], [
+        compare.offers_view(offers),
+        ui.waiting("Compare"),
+      ])
+    Waiting, Ready(data) -> compare.view(data)
+    Waiting, Waiting -> ui.waiting("Compare")
   }
 }
 
