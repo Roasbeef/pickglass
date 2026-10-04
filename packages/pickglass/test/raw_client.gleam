@@ -159,7 +159,7 @@ pub fn upgrade(
     <> "\r\n\r\n"
   let _ = tcp_send(conn.socket, bit_array.from_string(text))
 
-  case receive(conn, 2000) {
+  case read_head(conn, <<>>) {
     Error(Nil) -> Error(Reply(0, "", ""))
     Ok(raw) -> {
       let reply = parse_reply(result.unwrap(bit_array.to_string(raw), ""))
@@ -173,6 +173,28 @@ pub fn upgrade(
         }
       }
     }
+  }
+}
+
+// Read until the blank line that ends the response head has arrived. A
+// receive returns whatever the socket holds, and a server that writes the
+// status line and the headers in separate sends can have the first segment
+// reach the client alone, so one receive is not the head. Parsing it as if it
+// were gave a status of zero and a refused upgrade that the server had never
+// refused. The wait applies to each receive, so a server that is slow to
+// answer is still told apart from one that answered in pieces.
+fn read_head(conn: Conn, so_far: BitArray) -> Result(BitArray, Nil) {
+  case split_head(so_far, 0) {
+    Ok(_) -> Ok(so_far)
+    Error(Nil) ->
+      case receive(conn, 2000) {
+        Ok(chunk) -> read_head(conn, bit_array.append(so_far, chunk))
+        Error(Nil) ->
+          case so_far {
+            <<>> -> Error(Nil)
+            _ -> Ok(so_far)
+          }
+      }
   }
 }
 
