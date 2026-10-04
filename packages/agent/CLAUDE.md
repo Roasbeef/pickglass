@@ -37,6 +37,151 @@ atom, so the agent creates no atom from input. Names in a probe spec resolve
 with `binary_to_existing_atom`. The agent monitors the viewer's link process
 and node, and ticks every 250 ms to enforce a lease and probe deadlines.
 
+## Wire requests and replies
+
+Every request is `{<<"pg">>, 1, ReplyTo, Ref, Body}` and every reply is
+`{<<"pg">>, 1, Ref, Body}`. A body is a tuple whose first element is a binary
+tag. Only binaries, integers, lists, tuples and `true`/`false` cross the
+wire. A pin token is `{BootId, PinId}`. "Words" are VM words (multiply by the
+`memory` reply's `word_size`); a field named `Bytes` is already bytes. The
+decoders for all of these are in `pickglass_core/wire.gleam`. Any request may
+instead be answered `{<<"error">>, Code, Detail}`; the codes a request can
+produce are listed with it. A reply the viewer never receives (a crashed
+worker) is covered by the viewer's own request timeout, and `ping`'s `probes`
+count tells it what is still running.
+
+**Existing, unchanged.** `{<<"ping">>}` gives `{<<"pong">>, BootId, Node,
+OtpRelease, UptimeMs, Pins, Probes}` (`Probes` counts running counters probes
+and running stack probes). `{<<"memory">>}` gives `{<<"memory">>,
+[{Category, Bytes}], WordSize, ProcessCount, OtpRelease, ErtsVersion,
+SchedulersOnline}`. `{<<"pin">>, PidText}` gives `{<<"pinned">>, BootId,
+PinId, PidText}`; `{<<"unpin">>, Token}` gives `{<<"unpinned">>, PinId}`.
+`{<<"scheduler">>, <<"on"|"off"|"read">>}` gives `{<<"scheduler">>,
+<<"collecting"|"not_collecting">>, [{Id, Active, Total}]}`. `{<<"detach">>}`
+gives `{<<"detached">>, Reason}` after every session and sampler is gone.
+
+**Census.** `{<<"census">>, MaxScanned, TopK}` gives `{<<"census">>,
+Coverage, Rows, Owners, Totals}`.
+- `Coverage` is `{Scanned, Total, Stop, ElapsedMs}`; `Stop` is
+  `<<"finished"|"scan_budget"|"deadline">>`.
+- A row is `{PidText, MemoryBytes, TotalHeapWords, HeapWords, StackWords,
+  QueueLength, Reductions, Status, CurrentFunction, RegisteredName, Owner}`.
+- An owner aggregate is `{Owner, Processes, MemoryBytes, QueueLength,
+  Reductions, TotalHeapWords}`. At most 100 are listed, largest memory
+  first, plus the `unknown` one when any process is unlabelled.
+- `Totals` covers every process the walk scanned, listed or not:
+  `{Processes, MemoryBytes, QueueLength, Reductions, TotalHeapWords,
+  OwnersTracked, OwnersListed}`. The remainder row is `Totals` minus the sum
+  of the listed aggregates; `OwnersTracked - OwnersListed` is how many
+  owners it stands for.
+- `Owner` is `{<<"unknown">>}` or `{<<"owner">>, [{Kind, Id}], Role}`. The
+  agent labels its own processes `{pickglass_owner, 1, [{<<"tool">>,
+  <<"pickglass">>}], <<"agent">>}`, so its cost appears as that owner.
+- Reductions deltas between censuses are not computed by the agent. A sum
+  per owner falls when a process exits, so a correct rate needs a per-pid
+  baseline; the viewer owns that.
+- Errors: `busy` (four workers already running).
+
+**Process detail.** `{<<"process_detail">>, Token}` gives
+`{<<"process_detail">>, PidText, Sizes, Activity, Gc, Relations, Owner,
+Capabilities}`:
+- `Sizes` is `{MemoryBytes, TotalHeapBytes, HeapBytes, StackBytes}`.
+- `Activity` is `{QueueLength, Reductions, Status, CurrentFunction,
+  InitialCall, RegisteredName}`. Function texts are `module:function/arity`
+  or `""`.
+- `Gc` is `{MinorGcs, FullsweepAfter, MinHeapBytes, MaxHeapBytes,
+  HeapBlockBytes, OldHeapBytes, OldHeapBlockBytes, MbufBytes,
+  BinVheapBytes}`. `MaxHeapBytes` 0 is the VM's "no limit".
+- `Relations` is `{Links, Monitors, MonitoredBy, ParentPidText}`, counts
+  and a parent (`""` when the process has none).
+- `Capabilities` is the list of binaries in the label's optional fifth
+  element, for example `[<<"measure">>]`.
+- Never read: `messages`, `dictionary`, `backtrace`, process state.
+- Errors: `stale_pin`, `busy`, `target_gone`, `deadline` (2 s).
+
+**Supervision walk.** `{<<"supervision">>, MaxScanned, MaxEdges}` gives
+`{<<"supervision">>, Coverage, Edges}`. `Coverage` is `{Scanned, Total, Stop,
+ElapsedMs}` with `Stop` one of `<<"finished"|"scan_budget"|"deadline"|
+"edge_budget">>`. An edge is `{ChildPidText, ParentPidText, RegisteredName,
+InitialCall, Owner}`, from `process_info(P, parent)`. `ParentPidText` is `""`
+for a process whose parent is not known. At most 10,000 edges; a walk that
+stops early says so in `Stop`. A parent is whoever spawned the process, which
+for an OTP child is its supervisor and for any other process may be an
+unrelated spawner. Errors: `busy`.
+
+**System.** `{<<"system">>}` gives `{<<"system">>, Facts, Carriers}`.
+`Facts` is `{UptimeMs, Creation, EmuFlavor, EmuType, ErtsVersion,
+OtpRelease, Schedulers, SchedulersOnline, DirtyCpu, DirtyCpuOnline,
+DirtyIo, WordSize}`. `Carriers` is `{<<"unavailable">>, Reason}` (the
+`instrument` module or its allocator is missing, never a zero) or
+`{<<"carriers">>, Rows}` with a row `{Allocator, InPool, CarrierCount,
+TotalBytes, UsedBytes, UnscannedBytes}`; `InPool` is `true`/`false`, and
+`UnscannedBytes` is what `instrument:carriers` skipped. Errors: `busy`,
+`deadline`.
+
+**Targeted garbage collection (intrusive).** `{<<"gc">>, Token,
+DeadlineMs}` (100 to 10,000) gives `{<<"gc">>, <<"intrusive">>, PidText,
+Outcome, ElapsedMs, Before, After}`. `Outcome` is `<<"completed"|"deadline"|
+"target_gone">>`. `Before` and `After` are `{<<"heap">>, MemoryBytes,
+TotalHeapBytes, HeapBytes, HeapBlockBytes, OldHeapBytes, OldHeapBlockBytes,
+MbufBytes, StackBytes, BinVheapBytes}` or `{<<"gone">>}`. The collection is a
+major `garbage_collect(Pid, [{async, Ref}])` that stops the target while it
+runs. Errors: `stale_pin`, `gc_limit` (two collections already pending).
+
+**Self-measure.** `{<<"measure">>, Token, BudgetMs}` (50 to 5,000) gives
+`{<<"measure">>, PidText, ElapsedMs, Readings}` with a reading `{Name,
+Value, Unit}`, `Unit` one of `<<"words"|"bytes"|"count">>`. The agent sends
+the target `{pickglass_measure, BudgetMs, AgentPid, Ref}` and expects
+`{pickglass_measure_reply, Ref, [{Name, Value, Unit}]}` back; at most 32
+readings of printable ASCII names up to 64 bytes are kept. Only a process
+whose label advertises `<<"measure">>` is asked. Errors: `stale_pin`,
+`not_measurable`, `measure_limit`, `measure_deadline`, `target_gone`,
+`bad_reply`.
+
+**Stack sampling probe.** `{<<"start_stacks">>, Tokens, RateHz, DurationMs,
+MaxSamples}` (1 to 16 tokens, `RateHz` 1 to 1,000 and cut to `1000 /
+targets`, `DurationMs` 100 to 60,000, `MaxSamples` 1 to 200,000) gives
+`{<<"stacks_started">>, ProbeId, Targets, RateHz, DurationMs, MaxSamples}`
+with the values after clamping. `{<<"read_stacks">>, ProbeId}` and
+`{<<"stop_stacks">>, ProbeId}` give `{<<"stacks">>, ProbeId, State, Stop,
+Meter, Frames, Stacks}`:
+- `State` is `<<"running"|"finished"|"stopped">>`; `Stop` is
+  `<<"running"|"deadline"|"sample_budget"|"targets_gone"|"stopped">>`.
+- `Meter` is `{Method, RequestedHz, AchievedMilliHz, Rounds, Samples,
+  ElapsedMs, DepthLimit, AtDepthLimit, TargetsGone, DroppedSamples,
+  DistinctStacks, TruncatedSamples}`. `Method` is
+  `<<"polled_current_stacktrace">>`: samples are taken at reduction safe
+  points, so time in long BIFs is under-sampled and the result is not wall
+  time. `AchievedMilliHz` is rounds per second times 1,000. `DepthLimit` is
+  the node's `backtrace_depth`, measured by the agent (capped at 256);
+  `AtDepthLimit` counts samples whose stack reached it. `DroppedSamples`
+  were not stored because 5,000 distinct stacks were already held;
+  `TruncatedSamples` were stored but left out of the reply by its frame
+  bound. `Samples` equals the sum of the returned counts plus both.
+- `Frames` is `[{Module, Function, Arity, Location}]` with `Location`
+  `{<<"none">>}`, `{<<"file">>, File}` or `{<<"at">>, File, Line}`.
+- `Stacks` is `[{Count, Status, [FrameIndex]}]`, largest count first, each
+  stack leaf first, `Status` the process status atom as a binary.
+- Aggregation happens in the agent. The sampler is its own process, ends
+  itself at the deadline or sample budget, and keeps its result until read,
+  stopped, or evicted (two finished probes are kept).
+- Errors: `stale_pin`, `probe_limit` (two probes running in all, one of
+  them a stack probe at most), `no_such_probe`.
+
+**Counters probe.** `{<<"start_counters">>, Module, Function, Targets,
+DeadlineMs}` is unchanged. `{<<"start_counter_set">>, Patterns, Targets,
+DeadlineMs, Mode}` takes 1 to 8 `{Module, Function}` patterns (`Function`
+`<<"_">>` for every function) and `Mode` `<<"time">>` or
+`<<"time_and_memory">>`; `time_and_memory` also turns on `call_memory` and is
+refused with `memory_unavailable` where the VM lacks it. Both reply
+`{<<"counters_started">>, ProbeId, MatchedFunctions, DeadlineMs}` and share
+`read_counters` and `stop_counters`, which give `{<<"counters">>, ProbeId,
+State, MatchedFunctions, ElapsedMs, {Functions, WithCalls, Invalidated},
+Rows}`. A row is now `{Module, Function, Arity, Calls, TimeUs, Memory}` with
+`Memory` `{<<"none">>}` or `{<<"words">>, Words}` (words allocated while the
+function ran in the traced processes). The 5,000-function cap and the deny
+list of hot modules apply to the whole set.
+
 ## Invariants
 
 - Imports stay inside `pickglass_agent@*`, `erlang`, `trace`, `code`, `maps`,
