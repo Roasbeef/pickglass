@@ -86,3 +86,49 @@ pub fn the_drawing_has_a_natural_size_and_a_matching_view_box_test() {
   assert string.contains(html, " " <> width <> " ")
   assert list.length(string.split(html, "viewBox=\"")) >= 2
 }
+
+// A node whose only caller is a reversed back edge is not called by what
+// that edge names, so it still says which module it is in.
+pub fn a_reversed_edge_does_not_hide_the_module_test() {
+  let g =
+    Graph(
+      nodes: [
+        Node(function: 0, flat: 5, cum: 100),
+        Node(function: 1, flat: 10, cum: 60),
+      ],
+      edges: [
+        Edge(from: 0, to: 1, weight: 60, kind: Direct, inline: NotInline),
+        Edge(from: 1, to: 0, weight: 50, kind: Direct, inline: NotInline),
+      ],
+      total: 100,
+      original_nodes: 2,
+      dropped_nodes: 0,
+      dropped_edges: 0,
+    )
+  let same_module = fn(id) {
+    case id {
+      0 -> "runtime@keeper:run/0"
+      _ -> "runtime@keeper:step/0"
+    }
+  }
+  let layout =
+    dag.layout(g, fn(id) { names.short(same_module(id)) }, dag.default_config)
+
+  // One edge was drawn against its direction to break the cycle.
+  assert list.any(layout.edges, fn(edge) { edge.direction == dag.Reversed })
+
+  let html =
+    call_graph.view(
+      layout:,
+      total: 100,
+      name_of: same_module,
+      unit: unit.Count,
+      selected: None,
+      on_select: fn(node) { key.to_string(node) },
+    )
+    |> element.to_string
+
+  // The caller of the upper node is only the reversed edge, so it names its
+  // module; the lower node's caller is in the same module, so it does not.
+  assert support.count(html, "class=\"node-module\"") == 1
+}

@@ -339,13 +339,18 @@ fn module_line(
 }
 
 // The module of the caller that sends the most weight to this node, or an
-// empty string for a node nobody calls.
+// empty string for a node nobody calls. Only forward edges count: a reversed
+// edge closes a cycle, so its "caller" is the node's callee in the drawing and
+// says nothing about who calls it.
 fn caller_module(
   layout: Layout,
   node: PlacedNode,
   name_of: fn(Int) -> String,
 ) -> String {
-  let callers = list.filter(layout.edges, fn(edge) { edge.to == node.function })
+  let callers =
+    list.filter(layout.edges, fn(edge) {
+      edge.to == node.function && edge.direction == dag.Forward
+    })
 
   case list.sort(callers, fn(a, b) { int.compare(b.weight, a.weight) }) {
     [heaviest, ..] -> names.split(name_of(heaviest.from)).module
