@@ -142,6 +142,8 @@ pub fn observation(seq: Int, at_ms: Int) -> Observation {
     totals: Error(observation.totals_not_recorded),
     owner_heaps: Error(observation.totals_not_recorded),
     system: Error(observation.system_skipped),
+    detail: Error(observation.detail_not_recorded),
+    ets: Error(observation.ets_not_recorded),
   )
 }
 
@@ -163,19 +165,37 @@ pub fn fake_remote(
   )
 }
 
+/// An `owners_detail` reply over these rows: no process has an initial call,
+/// no owner is listed and the ETS pass read nothing.
+pub fn owners_detail(
+  coverage: wire.CensusCoverage,
+  rows: List(wire.ProcessRow),
+  totals: wire.CensusTotals,
+) -> wire.Reply {
+  wire.OwnersDetailReport(wire.OwnersDetailSnapshot(
+    coverage:,
+    rows: list.map(rows, fn(row) { wire.DetailedRow(row:, initial_call: "") }),
+    owners: [],
+    totals:,
+    ets: wire.EtsPass(
+      tables: 0,
+      memory_bytes: 0,
+      skipped: 0,
+      stop: wire.EtsFinished,
+    ),
+  ))
+}
+
 /// The agent's answers for a healthy node.
 pub fn healthy(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
   case request {
     wire.AskMemory -> Ok(wire.MemoryReport(memory(2_000_000)))
-    wire.Extended(wire.AskOwners(..)) ->
-      Ok(
-        wire.OwnersReport(wire.OwnersSnapshot(
-          coverage: census_coverage(1),
-          rows: [row("<0.10.0>", 5000, wire.Unlabelled)],
-          owners: [],
-          totals: wire.CensusTotals(1, 5000, 0, 0, 100, 1, 1),
-        )),
-      )
+    wire.Extended(wire.AskOwnersDetail(..)) ->
+      Ok(owners_detail(
+        census_coverage(1),
+        [row("<0.10.0>", 5000, wire.Unlabelled)],
+        wire.CensusTotals(1, 5000, 0, 0, 100, 1, 1),
+      ))
     wire.Extended(_) ->
       Error(remote.Refusal("unexpected", "the fake agent has no such request"))
     wire.AskCensus(..) ->

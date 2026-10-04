@@ -2,7 +2,10 @@
 //// pass, with what it could not gather said in words.
 ////
 //// A pass asks the agent for three things: the memory categories, one
-//// bounded census, and the scheduler wall-time readings. Each answer is a
+//// bounded census, and the scheduler wall-time readings. The census is the
+//// `owners_detail` request, so the same answer also carries each process's
+//// `proc_lib` initial call and each owner's ETS tables, and every few passes
+//// the largest ETS tables are listed as well. Each answer is a
 //// `Result`, so a reading that failed is an explicit `Error` carrying the
 //// reason and never a zero or an empty table. The pages draw an `Error`
 //// section as the reason, the capture writer records it as a coverage
@@ -17,6 +20,7 @@ import gleam/list
 import gleam/result
 import pickglass/os_reader
 import pickglass/remote.{type Remote}
+import pickglass_core/readings
 import pickglass_core/wire
 
 /// How long each ask in a pass waits, in milliseconds.
@@ -50,8 +54,29 @@ pub type Observation {
     /// expensive thing the agent does for the viewer; `Error` on the others.
     /// Not part of a capture: its facts go into the capture's header.
     system: Result(wire.SystemSnapshot, String),
+    /// What the owners reply adds to the census: initial calls, each owner's
+    /// ETS and the ETS pass's totals. Captured as an `owners_detail` record.
+    detail: Result(readings.OwnersDetail, String),
+    /// The largest ETS tables by memory, properties only. Read on the first
+    /// pass and every `ets_every` passes after, since it walks every table;
+    /// `Error` on the others.
+    ets: Result(readings.EtsListing, String),
   )
 }
+
+/// How many passes apart the ETS table listing is read.
+pub const ets_every = 5
+
+/// The reason a pass that did not list the ETS tables gives.
+pub const ets_skipped = "not read in this pass"
+
+/// The reason an observation read back from a capture gives for the owners
+/// detail it did not keep.
+pub const detail_not_recorded = "the capture holds no owners_detail reading"
+
+/// The reason an observation read back from a capture gives for a table
+/// listing it did not keep.
+pub const ets_not_recorded = "the capture holds no ets_tables reading"
 
 /// How many passes apart the node facts are read.
 pub const system_every = 15
@@ -112,22 +137,25 @@ pub fn collect(
     Ok(wire.MemoryReport(snapshot)) -> Ok(snapshot)
     other -> Error(reason_of(other, "memory"))
   }
-  let owners = case
+  let detailed = case
     remote.ask(
-      wire.Extended(wire.AskOwners(budget.max_scanned, budget.top_k)),
+      wire.Extended(wire.AskOwnersDetail(budget.max_scanned, budget.top_k)),
       ask_deadline_ms,
     )
   {
-    Ok(wire.OwnersReport(snapshot)) -> Ok(snapshot)
+    Ok(wire.OwnersDetailReport(snapshot)) -> Ok(snapshot)
     other -> Error(reason_of(other, "census"))
   }
+  let owners = result.map(detailed, owners_of)
 
-  // One owners reply feeds three readings of the pass: the census rows, the
-  // totals over every scanned process, and each owner's heap. They stand or
-  // fall together, so a failed reply is the same reason in all three.
+  // One reply feeds four readings of the pass: the census rows, the totals
+  // over every scanned process, each owner's heap, and the detail the census
+  // has no place for. They stand or fall together, so a failed reply is the
+  // same reason in all four.
   let census = result.map(owners, census_of)
   let totals = result.map(owners, fn(snapshot) { snapshot.totals })
   let owner_heaps = result.map(owners, fn(snapshot) { snapshot.owners })
+  let detail = result.map(detailed, detail_of(_, started))
 
   // The node's facts and carriers are the dearest read, so they are taken on
   // the first pass and every `system_every` passes after.
@@ -138,6 +166,20 @@ pub fn collect(
         other -> Error(reason_of(other, "system"))
       }
     _ -> Error(system_skipped)
+  }
+  let ets = case seq % ets_every {
+    0 ->
+      case
+        remote.ask(
+          wire.Extended(wire.AskEtsTables(wire.default_ets_top_k)),
+          ask_deadline_ms,
+        )
+      {
+        Ok(wire.EtsTablesReport(snapshot)) ->
+          Ok(readings.EtsListing(at_ms: started, snapshot:))
+        other -> Error(reason_of(other, "ets_tables"))
+      }
+    _ -> Error(ets_skipped)
   }
   let scheduler = read_scheduler(remote, step)
   let os = os()
@@ -153,6 +195,44 @@ pub fn collect(
     totals:,
     owner_heaps:,
     system:,
+    detail:,
+    ets:,
+  )
+}
+
+// The `owners` shape inside an `owners_detail` reply: the rows without their
+// initial calls and the owners without their ETS.
+fn owners_of(snapshot: wire.OwnersDetailSnapshot) -> wire.OwnersSnapshot {
+  wire.OwnersSnapshot(
+    coverage: snapshot.coverage,
+    rows: list.map(snapshot.rows, fn(detailed) { detailed.row }),
+    owners: list.map(snapshot.owners, fn(entry) { entry.owner }),
+    totals: snapshot.totals,
+  )
+}
+
+// What the census cannot hold: the initial call of each process that has one,
+// each owner's ETS and the pass's totals.
+fn detail_of(
+  snapshot: wire.OwnersDetailSnapshot,
+  at_ms: Int,
+) -> readings.OwnersDetail {
+  readings.OwnersDetail(
+    at_ms:,
+    initial_calls: list.filter_map(snapshot.rows, fn(detailed) {
+      case detailed.initial_call {
+        "" -> Error(Nil)
+        call -> Ok(#(detailed.row.pid_text, call))
+      }
+    }),
+    owners: list.map(snapshot.owners, fn(entry) {
+      readings.OwnerEts(
+        owner: entry.owner.total.owner,
+        tables: entry.ets_tables,
+        bytes: entry.ets_bytes,
+      )
+    }),
+    ets: snapshot.ets,
   )
 }
 

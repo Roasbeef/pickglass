@@ -352,6 +352,7 @@ fn save_capture(dir: String, workload: String, total_seq: Int) -> String {
       [],
       [],
       [],
+      [],
     )
   let path = dir <> "/" <> workload <> ".pgcap"
   let assert Ok(Nil) = capture_file.write(path, header, records)

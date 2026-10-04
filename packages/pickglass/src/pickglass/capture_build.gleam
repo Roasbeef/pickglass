@@ -43,6 +43,7 @@ import pickglass_core/measure.{type Cadence}
 import pickglass_core/policy.{type AuditEntry}
 import pickglass_core/profile.{type Profile}
 import pickglass_core/provenance
+import pickglass_core/readings
 import pickglass_core/wire
 
 /// What the viewer knows about the target outside the observations.
@@ -75,14 +76,15 @@ pub type Facts {
 pub const redaction = "none; the agent reads no message contents"
 
 /// Build the header and the records of a capture. `observations` is oldest
-/// first, and `entries` newest first as `audit.tail` returns them. `Error`
+/// first, and `entries` newest first as `audit.tail` returns them. `binaries`
+/// are the binaries reads the operator made, oldest first. `Error`
 /// when no observation has a memory report, because the
 /// header's runtime block comes from one.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// capture_build.assemble(facts, "id", observations, OneShot, [], [], [])
+/// capture_build.assemble(facts, "id", observations, OneShot, [], [], [], [])
 /// ```
 pub fn assemble(
   facts: Facts,
@@ -92,6 +94,7 @@ pub fn assemble(
   checkpoints: List(capture.Checkpoint),
   entries: List(audit.Entry),
   probes: List(ProbeRecord),
+  binaries: List(readings.BinariesReading),
 ) -> Result(#(Header, List(Record(Profile))), String) {
   use memory <- result.try(
     list.find_map(observations, fn(observation) { observation.memory })
@@ -125,6 +128,7 @@ pub fn assemble(
       observation_codec.to_records(observations, cadence, memory.word_size),
       list.map(checkpoints, capture.CheckpointRecord),
       probe_book.to_records(probes),
+      list.map(binaries, capture.BinariesRecord),
       list.map(decisions(entries), capture.AuditRecord),
     ]),
   ))

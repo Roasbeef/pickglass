@@ -77,6 +77,9 @@ pub type Outcome {
   /// The spawn edges of the node.
   SupervisionRead(snapshot: wire.SupervisionSnapshot)
 
+  /// The reference-counted binaries one pinned process holds.
+  BinariesRead(snapshot: wire.BinariesSnapshot)
+
   /// The agent was told to detach.
   DetachRequested
 
@@ -117,9 +120,11 @@ pub fn run(
     policy.SelfMeasure(token:) -> measure(remote, token)
     policy.ReadProcess(token:) -> read_process(remote, token)
     policy.ReadSupervision -> read_supervision(remote)
+    policy.ReadBinaries(token:) -> read_binaries(remote, token)
 
     policy.ReadCensus(_)
     | policy.ReadOwners
+    | policy.ReadEtsTables
     | policy.ReadMemory
     | policy.ReadAudit(_)
     | policy.ExportCapture(..)
@@ -364,6 +369,28 @@ fn read_supervision(remote: Remote) -> Outcome {
     Error(failure) -> Failed(failure)
   }
 }
+
+// How many of a process's largest binaries the read lists. The agent counts
+// every binary either way; this is how many it names.
+const binaries_listed = 20
+
+// The read builds one tuple per reference in the target and copies the list
+// into the agent's worker, so it gets the worker's own two-second deadline
+// with a margin for the answer to travel.
+fn read_binaries(remote: Remote, token: PinToken) -> Outcome {
+  case
+    remote.ask(
+      wire.Extended(wire.AskBinaries(token, binaries_listed)),
+      binaries_deadline_ms,
+    )
+  {
+    Ok(wire.BinariesReport(snapshot)) -> BinariesRead(snapshot)
+    Ok(other) -> Unexpected(string.inspect(other))
+    Error(failure) -> Failed(failure)
+  }
+}
+
+const binaries_deadline_ms = 5000
 
 /// What asking a running probe how it is doing gave.
 pub type Poll {

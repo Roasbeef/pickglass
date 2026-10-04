@@ -123,6 +123,7 @@ fn capture_once(
       [],
       [],
       [],
+      [],
     ),
   )
   use _ <- result.try(capture_file.write(request.out, header, records))

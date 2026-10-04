@@ -440,6 +440,7 @@ pub fn both_probe_kinds_survive_a_capture_file_test() {
       [],
       [],
       probes,
+      [],
     )
 
   // What was written: one cost record per probe, the call tree's profile, and

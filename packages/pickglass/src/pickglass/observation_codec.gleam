@@ -54,6 +54,7 @@ import pickglass_core/measure.{
 }
 import pickglass_core/owner
 import pickglass_core/profile.{type Profile}
+import pickglass_core/readings
 import pickglass_core/unit
 import pickglass_core/wire
 
@@ -157,7 +158,28 @@ pub fn to_records(
     }),
     event_records(observations, procs),
     list.flat_map(observations, coverage_of),
+    reading_records(observations),
   ])
+}
+
+// What a pass read beyond the census: the initial calls and per-owner ETS of
+// the owners reply, and the table listing on the passes that made one. A pass
+// whose reading failed or was not made writes nothing, and a capture that
+// has no such records reads back as the passes that never had them, so a
+// capture written before these readings existed is read as it always was.
+fn reading_records(observations: List(Observation)) -> List(Record(Profile)) {
+  list.flat_map(observations, fn(observation) {
+    list.flatten([
+      case observation.detail {
+        Ok(detail) -> [capture.OwnersDetailRecord(detail)]
+        Error(_) -> []
+      },
+      case observation.ets {
+        Ok(listing) -> [capture.EtsRecord(listing)]
+        Error(_) -> []
+      },
+    ])
+  })
 }
 
 fn series_of(spec: Spec, id: Int, cadence: Cadence) -> Series {
@@ -863,6 +885,9 @@ type Index {
     strings: Dict(Int, String),
     events: Dict(#(Int, String), Dict(Int, #(Int, String))),
     coverage: List(measure.Coverage),
+    /// The owners detail and table listing of each pass, by the pass's time.
+    details: Dict(Int, readings.OwnersDetail),
+    listings: Dict(Int, readings.EtsListing),
     runtime: Runtime,
   )
 }
@@ -878,6 +903,8 @@ fn index_of(records: List(Record(Profile)), runtime: Runtime) -> Index {
       strings: dict.new(),
       events: dict.new(),
       coverage: [],
+      details: dict.new(),
+      listings: dict.new(),
       runtime:,
     )
 
@@ -931,6 +958,17 @@ fn index_of(records: List(Record(Profile)), runtime: Runtime) -> Index {
           )
         capture.CoverageRecord(coverage) ->
           Index(..index, coverage: [coverage, ..index.coverage])
+        capture.OwnersDetailRecord(detail) ->
+          Index(
+            ..index,
+            details: dict.insert(index.details, detail.at_ms, detail),
+          )
+        capture.EtsRecord(listing) ->
+          Index(
+            ..index,
+            listings: dict.insert(index.listings, listing.at_ms, listing),
+          )
+        capture.BinariesRecord(_) -> index
 
         capture.HeaderRecord(_)
         | capture.ClockRecord(_)
@@ -1018,6 +1056,10 @@ fn observation_at(
         totals: Error(observation.totals_not_recorded),
         owner_heaps: Error(observation.totals_not_recorded),
         system: Error(observation.system_skipped),
+        detail: dict.get(index.details, at_ms)
+          |> result.replace_error(observation.detail_not_recorded),
+        ets: dict.get(index.listings, at_ms)
+          |> result.replace_error(observation.ets_not_recorded),
       ))
     _ -> Error("a pass needs three coverage records")
   }

@@ -173,17 +173,14 @@ fn agent(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
   ]
 
   case request {
-    wire.Extended(wire.AskOwners(..)) -> {
+    wire.Extended(wire.AskOwnersDetail(..)) -> {
       let census = fixture.census(rows)
 
-      Ok(
-        wire.OwnersReport(wire.OwnersSnapshot(
-          coverage: census.coverage,
-          rows: census.rows,
-          owners: [],
-          totals: wire.CensusTotals(3, 14_000, 0, 0, 900, 2, 2),
-        )),
-      )
+      Ok(fixture.owners_detail(
+        census.coverage,
+        census.rows,
+        wire.CensusTotals(3, 14_000, 0, 0, 900, 2, 2),
+      ))
     }
     wire.AskPin(text) -> {
       let serial = case string.split(text, ".") {

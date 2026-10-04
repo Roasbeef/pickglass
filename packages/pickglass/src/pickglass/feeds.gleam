@@ -30,6 +30,7 @@
 //// - `row_key`, `pin_key` and `plan_key` derive the keys a browser may
 ////   send from the things they name.
 
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -54,12 +55,14 @@ import pickglass_core/owner
 import pickglass_core/policy
 import pickglass_core/profile
 import pickglass_core/profile/activity
+import pickglass_core/readings
 import pickglass_core/unit
 import pickglass_core/wire
 import pickglass_web/build/profile as profile_page
 import pickglass_web/census/owners as owners_builder
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
+import pickglass_web/memory_model
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/timeline_model
@@ -357,7 +360,13 @@ fn strip(inputs: Inputs) -> model.StripModel {
     banner: model.CapabilityBanner(
       role:,
       grants: page.grants,
-      source_line: line,
+      source_line: case inputs.lost, source {
+        Some(reason), model.Live ->
+          "Detached from the target ("
+          <> reason
+          <> "). The readings on the page are the last ones; no command can run."
+        _, _ -> line
+      },
     ),
     observer: observer(inputs),
     probes: active_probes(inputs),
@@ -1021,6 +1030,8 @@ fn owners_page(inputs: Inputs, newest: Observation) -> model.OwnersModel {
     Error(_) -> 0
   }
 
+  let page = with_owner_ets(page, newest)
+
   case newest.totals {
     Ok(totals) -> {
       // Totals cover every process scanned; the listed rows are the part
@@ -1038,6 +1049,7 @@ fn owners_page(inputs: Inputs, newest: Observation) -> model.OwnersModel {
           0,
           totals.total_heap_words * word_size - listed_heap,
         )),
+        ets_bytes: remainder_ets(newest),
       )
     }
     Error(_) ->
@@ -1045,7 +1057,127 @@ fn owners_page(inputs: Inputs, newest: Observation) -> model.OwnersModel {
         page,
         procs: int.max(0, left_out),
         heap_cap: Missing(measure.UnsupportedOnRuntime),
+        ets_bytes: remainder_ets(newest),
       )
+  }
+}
+
+// ------------------------------------------------------------- owner ETS
+
+// The ETS column of the owners page, from the agent's per-owner aggregate.
+// An aggregate is keyed by a process label: its whole path and its role. A
+// group row takes the aggregates whose path starts with the group's first
+// segment, a role row those that also have its role, and the unknown row the
+// aggregates of unlabelled processes, which is how the agent attributes a
+// table whose owner has no label.
+fn with_owner_ets(
+  page: model.OwnersModel,
+  newest: Observation,
+) -> model.OwnersModel {
+  case newest.detail {
+    Error(reason) ->
+      owners_builder.with_ets(page, memory_model.EtsNotRead(reason), fn(_) {
+        owners_builder.EtsCell(
+          bytes: Missing(measure.NotCollected),
+          tables: Missing(measure.NotCollected),
+        )
+      })
+    Ok(detail) -> {
+      let tracked_listed = owner_counts(newest, detail)
+      let reach = case detail.ets.stop {
+        wire.EtsFinished -> memory_model.EveryTable
+        wire.EtsDeadline -> memory_model.StoppedAtDeadline
+      }
+
+      owners_builder.with_ets(
+        page,
+        memory_model.EtsPassRead(
+          tables: detail.ets.tables,
+          bytes: detail.ets.memory_bytes,
+          skipped: detail.ets.skipped,
+          reach:,
+          owners: tracked_listed.1,
+          tracked: tracked_listed.0,
+        ),
+        fn(row) { ets_cell(detail, reach, tracked_listed, row) },
+      )
+    }
+  }
+}
+
+// How many owners the agent tracked and how many it listed aggregates for.
+// The pass's totals say so when they were read; without them every owner the
+// reply carries is all that is known to exist.
+fn owner_counts(
+  newest: Observation,
+  detail: readings.OwnersDetail,
+) -> #(Int, Int) {
+  case newest.totals {
+    Ok(totals) -> #(totals.owners_tracked, totals.owners_listed)
+    Error(_) -> #(list.length(detail.owners), list.length(detail.owners))
+  }
+}
+
+fn ets_cell(
+  detail: readings.OwnersDetail,
+  reach: memory_model.EtsReach,
+  counts: #(Int, Int),
+  row: owners_builder.EtsRowKey,
+) -> owners_builder.EtsCell {
+  let matching =
+    list.filter(detail.owners, fn(entry) { covers(row, entry.owner) })
+
+  case matching {
+    [] -> {
+      // No aggregate covers the row. That is a real zero only when the agent
+      // listed every owner it saw and read every table; otherwise the row's
+      // tables may be in an owner it did not list or in a table it did not
+      // read, and the cell says which.
+      let word = case counts.0 > counts.1, reach {
+        True, _ -> Some(measure.BudgetExhausted)
+        False, memory_model.StoppedAtDeadline -> Some(measure.DeadlineReached)
+        False, memory_model.EveryTable -> None
+      }
+
+      case word {
+        Some(reason) -> owners_builder.EtsCell(Missing(reason), Missing(reason))
+        None -> owners_builder.EtsCell(Known(0), Known(0))
+      }
+    }
+    _ ->
+      owners_builder.EtsCell(
+        Known(list.fold(matching, 0, fn(sum, entry) { sum + entry.bytes })),
+        Known(list.fold(matching, 0, fn(sum, entry) { sum + entry.tables })),
+      )
+  }
+}
+
+// Whether an aggregate's owner label belongs to a row of the page.
+fn covers(row: owners_builder.EtsRowKey, label: wire.OwnerReading) -> Bool {
+  case row, label {
+    owners_builder.EtsUnknown, wire.Unlabelled -> True
+    owners_builder.EtsUnknown, wire.Labelled(..) -> False
+    owners_builder.EtsOwner(_), wire.Unlabelled -> False
+    owners_builder.EtsRole(..), wire.Unlabelled -> False
+    owners_builder.EtsOwner(label: group), wire.Labelled(path:, ..) ->
+      owner.path_to_string(list.take(path, 1)) == group
+    owners_builder.EtsRole(owner: group, role: wanted),
+      wire.Labelled(path:, role:)
+    -> owner.path_to_string(list.take(path, 1)) == group && role == wanted
+  }
+}
+
+// The ETS bytes outside every aggregate the agent listed: the pass's total
+// less the listed owners'. With nothing read it is a word.
+fn remainder_ets(newest: Observation) -> Measurement {
+  case newest.detail {
+    Error(_) -> Missing(measure.NotCollected)
+    Ok(detail) ->
+      Known(int.max(
+        0,
+        detail.ets.memory_bytes
+          - list.fold(detail.owners, 0, fn(sum, entry) { sum + entry.bytes }),
+      ))
   }
 }
 
@@ -1173,6 +1305,99 @@ fn memory(inputs: Inputs, newest: Observation) -> model.MemoryModel {
     ),
     allocators: allocators_panel(inputs, unread("allocators")),
     tables: unread("ets tables"),
+    ets: ets_panel(inputs, newest),
+  )
+}
+
+// The largest ETS tables from the newest pass that listed them. The listing
+// is read every few passes, so it can be older than the page's other
+// figures, and its age is on the panel.
+fn ets_panel(
+  inputs: Inputs,
+  newest: Observation,
+) -> model.Panel(memory_model.EtsListing) {
+  let read =
+    list.find_map(inputs.observations, fn(observation) {
+      case observation.ets {
+        Ok(listing) -> Ok(listing)
+        Error(_) -> Error(Nil)
+      }
+    })
+
+  case read {
+    Ok(listing) -> {
+      let snapshot = listing.snapshot
+      let coverage = snapshot.coverage
+
+      model.Panel(
+        info: info(
+          inputs,
+          "ets_tables",
+          "ets:info/1 over every table; properties only, never contents",
+          "tables",
+          coverage.total,
+          coverage.counted,
+          case coverage.stop {
+            wire.EtsFinished -> measure.Complete
+            wire.EtsDeadline ->
+              measure.Partial(measure.Truncated(measure.DeadlineHit))
+          },
+          Some(coverage.elapsed_ms),
+        ),
+        body: memory_model.EtsListed(
+          rows: list.map(snapshot.tables, ets_row),
+          total: coverage.total,
+          read: coverage.counted,
+          skipped: coverage.skipped,
+          reach: case coverage.stop {
+            wire.EtsFinished -> memory_model.EveryTable
+            wire.EtsDeadline -> memory_model.StoppedAtDeadline
+          },
+          objects: Known(snapshot.totals.objects),
+          bytes: Known(snapshot.totals.memory_bytes),
+          age_ms: int.max(0, inputs.now_ms - listing.at_ms),
+        ),
+      )
+    }
+    Error(Nil) -> {
+      let reason = case newest.ets {
+        Error(why) if why != observation.ets_skipped -> why
+        Error(_) | Ok(_) ->
+          "no pass has listed the tables yet; the agent lists them every "
+          <> int.to_string(observation.ets_every)
+          <> " passes"
+      }
+
+      model.Panel(
+        info: info(
+          inputs,
+          "ets_tables",
+          "ets:info/1 over every table",
+          "tables",
+          1,
+          0,
+          measure.Errored(reason),
+          None,
+        ),
+        body: memory_model.EtsListingMissing(reason),
+      )
+    }
+  }
+}
+
+fn ets_row(table: wire.EtsTable) -> memory_model.EtsRow {
+  memory_model.EtsRow(
+    label: case table.name {
+      "" -> table.id_text
+      name -> name
+    },
+    id: table.id_text,
+    owner_pid: table.owner_pid_text,
+    owner_label: label_of(attribution_of(table.owner)),
+    kind: table.kind,
+    objects: Known(table.objects),
+    bytes: Known(table.memory_bytes),
+    protection: table.protection,
   )
 }
 
@@ -1323,8 +1548,10 @@ fn plan_cards(
       policy.StartProbe(spec:) -> card(model.ProbePlan(spec.kind), spec.targets)
       policy.TargetedGc(token:) -> card(model.GcPlan, [token])
       policy.SelfMeasure(token:) -> card(model.MeasurePlan, [token])
+      policy.ReadBinaries(token:) -> card(model.BinariesPlan, [token])
       policy.ReadCensus(_)
       | policy.ReadOwners
+      | policy.ReadEtsTables
       | policy.ReadMemory
       | policy.ReadSupervision
       | policy.ReadAudit(_)
@@ -1366,16 +1593,12 @@ fn flow(inputs: Inputs) -> model.FlowModel {
       rated_rows_of(inputs.observations, word_size_of(newest, inputs)).0
     [] -> []
   }
-  let probe_plans =
-    list.filter(plan_cards(inputs, rows), fn(card) {
-      case card.what {
-        model.ProbePlan(_) -> True
-        model.GcPlan | model.MeasurePlan -> False
-      }
-    })
 
+  // Every plan the principal made is confirmed where its button was, so a
+  // collection or a binaries read planned on the process page is drawn there
+  // and not only on the Probes page.
   model.FlowModel(
-    pending: list.first(probe_plans) |> option.from_result,
+    pending: list.first(plan_cards(inputs, rows)) |> option.from_result,
     running: active_probes(inputs),
     ready: ready_profile(inputs),
     refused: inputs.refusal,
@@ -1870,9 +2093,24 @@ fn supervision_feed(inputs: Inputs) -> List(msg.Feed) {
           Some(snapshot.coverage.elapsed_ms),
         ),
         snapshot,
+        initial_calls_of(inputs.observations),
       )),
     ]
     Some(Error(_)) | None -> []
+  }
+}
+
+// The `proc_lib` initial call of each process the newest pass that read them
+// listed, by pid text. It is how the supervision page tells a supervisor from
+// a worker without guessing from a name, for the processes the census lists.
+fn initial_calls_of(observations: List(Observation)) -> Dict(String, String) {
+  case observations {
+    [newest, ..] ->
+      case newest.detail {
+        Ok(detail) -> dict.from_list(detail.initial_calls)
+        Error(_) -> dict.new()
+      }
+    [] -> dict.new()
   }
 }
 
@@ -1969,7 +2207,55 @@ fn process_detail(
         }
       None -> model.Unavailable
     },
+    binaries: binaries_of(inputs, row, pin),
   )
+}
+
+// The newest binaries read of this process, or its refusal, whichever came
+// last. A read is keyed by the pid in its reply, and a refusal by the pin it
+// was made over, which the process's live pin names.
+fn binaries_of(
+  inputs: Inputs,
+  row: model.ProcRow,
+  pin: Result(seam.PinCard, Nil),
+) -> memory_model.Binaries {
+  let found =
+    list.find_map(inputs.results, fn(result) {
+      case result {
+        seam.BinariesRan(snapshot:, at_ms:)
+          if snapshot.pid_text == row.pid_text
+        ->
+          Ok(memory_model.BinariesListed(
+            distinct: snapshot.distinct,
+            bytes: snapshot.bytes,
+            references: snapshot.references,
+            largest: list.map(snapshot.binaries, fn(binary) {
+              memory_model.BinaryRow(
+                address: binary.address_text,
+                bytes: Known(binary.bytes),
+                refc: Known(binary.refc),
+              )
+            }),
+            age_ms: int.max(0, inputs.now_ms - at_ms),
+          ))
+        seam.BinariesRefused(token:, reason:, at_ms:) ->
+          case pin {
+            Ok(card) if card.token == token ->
+              Ok(memory_model.BinariesRefused(
+                reason:,
+                age_ms: int.max(0, inputs.now_ms - at_ms),
+              ))
+            Ok(_) | Error(Nil) -> Error(Nil)
+          }
+        seam.BinariesRan(..) | seam.GcRan(..) | seam.SelfMeasured(..) ->
+          Error(Nil)
+      }
+    })
+
+  case found {
+    Ok(binaries) -> binaries
+    Error(Nil) -> memory_model.BinariesNotRead
+  }
 }
 
 fn birth_text(detail: Option(wire.ProcessDetail)) -> String {
@@ -2062,7 +2348,10 @@ fn collection_counters(
       case result {
         seam.GcRan(snapshot:, ..) if snapshot.pid_text == row.pid_text ->
           Ok(snapshot)
-        seam.GcRan(..) | seam.SelfMeasured(..) -> Error(Nil)
+        seam.GcRan(..)
+        | seam.SelfMeasured(..)
+        | seam.BinariesRan(..)
+        | seam.BinariesRefused(..) -> Error(Nil)
       }
     })
 
@@ -2102,7 +2391,10 @@ fn measured_counters(
       case result {
         seam.SelfMeasured(snapshot:, ..) if snapshot.pid_text == row.pid_text ->
           Ok(snapshot)
-        seam.SelfMeasured(..) | seam.GcRan(..) -> Error(Nil)
+        seam.SelfMeasured(..)
+        | seam.GcRan(..)
+        | seam.BinariesRan(..)
+        | seam.BinariesRefused(..) -> Error(Nil)
       }
     })
 

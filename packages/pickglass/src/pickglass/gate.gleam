@@ -183,8 +183,20 @@ pub fn estimate_for(command: Command) -> Estimate {
         wall_ms: 2000,
       )
 
+    // The agent holds the worker to two seconds and 50,000 references, and
+    // builds one tuple per reference, so the cost is bounded by wall time and
+    // not by an event count.
+    policy.ReadBinaries(_) ->
+      policy.Estimate(
+        events_low: 0,
+        events_high: 0,
+        bytes_high: 0,
+        wall_ms: 2000,
+      )
+
     policy.ReadCensus(_)
     | policy.ReadOwners
+    | policy.ReadEtsTables
     | policy.ReadMemory
     | policy.ReadSupervision
     | policy.ReadAudit(_)

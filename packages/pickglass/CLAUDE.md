@@ -47,6 +47,24 @@ scheduler readings), each section a `Result` so a failed reading says why.
 pages, a `ring.Ring` of recent observations, `Subscribe`, and `TargetLost`
 after three empty passes. A replay hub (`start_replay`) serves a capture.
 
+Memory readings: a pass asks `owners_detail` and not `owners`, so one reply feeds
+the census, the totals, each owner's heap and `Observation.detail` (each
+process's `proc_lib` initial call, each owner's ETS tables and bytes, the ETS
+pass's totals), and every `ets_every` (5th) pass also lists the largest ETS
+tables as `Observation.ets`. `observation_codec` writes them as `owners_detail`
+and `ets_tables` records and reads them back; a capture without them gives
+`Error(detail_not_recorded)`. `feeds` draws the owners page's ETS column from
+the aggregates (a row with none is a word unless the agent listed every owner
+and read every table), the memory page's table panel from the newest listing,
+and `supervision_build` takes the pass's initial calls so a process whose
+`$initial_call` is known is a supervisor or a `Worker` and one the census did
+not list keeps the name hints. `ReadBinaries(token)` is plan-first: `exec`
+asks `binaries`, `service` keeps a `BinariesRan` or `BinariesRefused` result,
+`capture_build` writes the reads as `binaries` records, and `feeds` shows the
+newest on the process page. `feeds.flow` carries every pending plan, so the
+plan of a collection or a binaries read is confirmed on the page that planned
+it.
+
 Authority: `gate.Gate` is the pure state behind `policy`: the pin table (only
 tokens the agent issued this boot and that are still live become a
 `LivePin`), the `plans.Store` (a plan is consumed by its owner's confirm,
@@ -82,7 +100,10 @@ page models (`feeds`) and sends `Fed` messages, and resolves the
 application's `msg.Request` keys against current data into `seam.Request`s.
 
 One-click profiles: `profile_scope` (pure) chooses at most sixteen processes by
-reductions per second, then heap, and words the choice. `service.profile` is
+reductions per second, then heap, and words the choice. A node-wide choice
+leaves out pickglass's own agent processes (owner `tool:pickglass`,
+`without_own`) and the sentence says how many; profiling that owner by name or
+one process is not filtered. `service.profile` is
 the one request that is several commands: it pins what is not pinned, plans a
 stack probe over the pins (`seam.PlanProbe` carries `rate_hz`), and records what
 it pinned as `service.Held` against the plan. The service releases those pins

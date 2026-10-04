@@ -241,8 +241,10 @@ process was running or runnable are counted, since on an idle node the others
 find processes waiting for a message; --include-waiting counts them too, and
 the summary states how the samples split.
 
---trace-calls traces the calls of the modules named with --module (exact
-names of loaded modules, repeated or separated by commas) in at most 4
+--trace-calls traces the calls of the modules named with --module (names of
+loaded modules, or a prefix ending in one *, as in my_app*, which stands for
+every loaded module that starts with it; repeated or separated by commas) in
+at most 4
 processes for at most 10 seconds (default 5) and builds a call tree from the
 exact calls and their times. At least one module is required, because the
 agent refuses to trace every function of a node. --rate and --include-waiting

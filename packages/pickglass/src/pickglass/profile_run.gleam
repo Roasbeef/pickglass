@@ -331,12 +331,16 @@ fn choose(
   }
 
   let chosen = case target {
-    cli.TopTarget(count) ->
-      profile_scope.choose(
-        profile_scope.candidates_of(rows),
+    cli.TopTarget(count) -> {
+      let #(others, own) = profile_scope.without_own(rows)
+
+      profile_scope.choose_excluding(
+        profile_scope.candidates_of(others),
         count,
         profile_scope.WholeNode,
+        own,
       )
+    }
     cli.OwnerTarget(text) ->
       profile_scope.choose(
         profile_scope.candidates_of(list.filter(rows, owned_by(text))),
@@ -660,6 +664,7 @@ fn write(
           [],
           entries,
           [probe],
+          [],
         )
         |> result.map_error(WriteFailed),
       )

@@ -86,6 +86,11 @@ pub type Request {
   /// Ask for a plan for asking one pinned process to measure itself.
   PlanSelfMeasure(token: String)
 
+  /// Ask for a plan to read the reference-counted binaries one pinned process
+  /// holds. The read is costly for a process holding many, so it waits for
+  /// Confirm like a probe.
+  PlanReadBinaries(token: String)
+
   /// Read one pinned process in detail.
   ReadProcess(token: String)
 
@@ -254,6 +259,9 @@ pub type Reply {
   /// The spawn edges of the node.
   SupervisionRead(snapshot: wire.SupervisionSnapshot)
 
+  /// The binaries one process holds.
+  BinariesRead(snapshot: wire.BinariesSnapshot)
+
   /// The newest audit entries, newest first.
   AuditTail(entries: List(audit.Entry))
 
@@ -276,6 +284,14 @@ pub type ProcessResult {
 
   /// A process measured itself.
   SelfMeasured(snapshot: wire.MeasureSnapshot, at_ms: Int)
+
+  /// A process's binaries were read.
+  BinariesRan(snapshot: wire.BinariesSnapshot, at_ms: Int)
+
+  /// A read of a process's binaries was confirmed and the agent refused or
+  /// failed it, for example a process that holds too many. `token` names the
+  /// pin it was made over and `reason` is the agent's, in its words.
+  BinariesRefused(token: String, reason: String, at_ms: Int)
 }
 
 /// Whether a pin can still be used.
@@ -422,6 +438,9 @@ pub fn intent(request: Request) -> Result(Intent, String) {
     PlanSelfMeasure(token) ->
       token_of(token)
       |> result.map(fn(token) { Plan(policy.SelfMeasure(token)) })
+    PlanReadBinaries(token) ->
+      token_of(token)
+      |> result.map(fn(token) { Plan(policy.ReadBinaries(token)) })
     ReadProcess(token) ->
       token_of(token)
       |> result.map(fn(token) { Run(policy.ReadProcess(token), NoFollow) })

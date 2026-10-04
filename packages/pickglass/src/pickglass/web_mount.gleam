@@ -573,6 +573,8 @@ pub fn ask(state: State, request: msg.Request) -> State {
 
     msg.RequestSelfMeasure(pin) ->
       submit_with(state, resolve_pin(current, pin), seam.PlanSelfMeasure)
+    msg.PlanBinaries(pin) ->
+      submit_with(state, resolve_pin(current, pin), seam.PlanReadBinaries)
 
     msg.ProfileOwner(owner) -> profile_owner(state, current, owner)
     msg.ProfileBusiest -> profile_busiest(state, current)
@@ -654,6 +656,7 @@ fn profile_owner(state: State, current: feeds.Inputs, owner: Key) -> State {
             state,
             profile_scope.OwnerScope(label),
             profile_scope.candidates_of(members),
+            0,
           )
       }
   }
@@ -666,11 +669,13 @@ fn profile_busiest(state: State, current: feeds.Inputs) -> State {
     [newest, ..] -> {
       let #(rows, _) =
         feeds.rated_rows_of(current.observations, word_size(newest, current))
+      let #(others, own) = profile_scope.without_own(rows)
 
       choose_and_plan(
         state,
         profile_scope.WholeNode,
-        profile_scope.candidates_of(rows),
+        profile_scope.candidates_of(others),
+        own,
       )
     }
   }
@@ -751,9 +756,12 @@ fn profile_process(state: State, current: feeds.Inputs, row: Key) -> State {
   case resolve_row(current, row) {
     Error(Nil) -> state
     Ok(pid_text) ->
-      choose_and_plan(state, profile_scope.OneProcess(pid_text), [
-        profile_scope.Candidate(pid_text:, rate: None, heap_bytes: 0),
-      ])
+      choose_and_plan(
+        state,
+        profile_scope.OneProcess(pid_text),
+        [profile_scope.Candidate(pid_text:, rate: None, heap_bytes: 0)],
+        0,
+      )
   }
 }
 
@@ -774,8 +782,11 @@ fn choose_and_plan(
   state: State,
   scope: profile_scope.Scope,
   candidates: List(profile_scope.Candidate),
+  own: Int,
 ) -> State {
-  case profile_scope.choose(candidates, seam.profile_limit, scope) {
+  case
+    profile_scope.choose_excluding(candidates, seam.profile_limit, scope, own)
+  {
     Error(profile_scope.NothingToProfile(reason:)) ->
       State(..state, refusal: Some(reason))
     Ok(chosen) ->

@@ -67,6 +67,7 @@ fn round_trip(observations: List(Observation)) -> List(Observation) {
       [],
       [],
       [],
+      [],
     )
   let assert Ok(text) = capture_file.render(header, records)
   let assert Ok(loaded) = capture_file.parse(text)
@@ -149,6 +150,7 @@ pub fn memory_categories_are_declared_overlapping_test() {
       [],
       [],
       [],
+      [],
     )
   let memory_series =
     list.filter_map(records, fn(record) {
@@ -182,6 +184,7 @@ pub fn a_capture_needs_a_memory_report_test() {
       [],
       [],
       [],
+      [],
     )
     |> result_is_error
 }
@@ -201,6 +204,7 @@ fn text_of_capture() -> String {
       [rich(0, 1000)],
       measure.OneShot,
       [capture.Checkpoint("idle", 0, 1500)],
+      [],
       [],
       [],
     )
@@ -251,6 +255,7 @@ pub fn a_capture_written_to_disk_reads_back_gzipped_test() {
       "cap-disk",
       [rich(0, 1000)],
       measure.OneShot,
+      [],
       [],
       [],
       [],
@@ -383,6 +388,7 @@ pub fn the_os_series_are_declared_overlapping_and_scoped_to_the_os_test() {
         ),
       ],
       measure.OneShot,
+      [],
       [],
       [],
       [],

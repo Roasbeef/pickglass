@@ -76,6 +76,7 @@ import pickglass_core/capture
 import pickglass_core/identity
 import pickglass_core/measure
 import pickglass_core/policy.{type Command, type Principal}
+import pickglass_core/readings
 import pickglass_core/wire
 import simplifile
 import weft
@@ -695,6 +696,10 @@ fn apply(
       remember(state, seam.SelfMeasured(snapshot, now)),
       seam.Measured(snapshot),
     )
+    exec.BinariesRead(snapshot) -> #(
+      remember(state, seam.BinariesRan(snapshot, now)),
+      seam.BinariesRead(snapshot),
+    )
     exec.ProcessRead(detail) -> #(state, seam.ProcessRead(detail))
     exec.SupervisionRead(snapshot) -> #(state, seam.SupervisionRead(snapshot))
 
@@ -726,7 +731,12 @@ fn apply(
     exec.Unsupported(reason) -> #(state, seam.Rejected(reason))
 
     exec.Failed(failure) -> #(
-      invalidate_if_dead(state, command, failure, now),
+      invalidate_if_dead(
+        remember_refused_binaries(state, command, failure, now),
+        command,
+        failure,
+        now,
+      ),
       seam.Rejected(remote.describe(failure)),
     )
 
@@ -734,6 +744,44 @@ fn apply(
       state,
       seam.Rejected("the agent answered with something unexpected: " <> reply),
     )
+  }
+}
+
+// A confirmed binaries read the agent refused leaves its reason beside the
+// process, so the page that asked can say so after the reply has gone. The
+// agent's refusal is kept in its own words; the page adds what the code means.
+fn remember_refused_binaries(
+  state: State,
+  command: Command,
+  failure: remote.Failure,
+  now: Int,
+) -> State {
+  case command {
+    policy.ReadBinaries(token:) ->
+      remember(
+        state,
+        seam.BinariesRefused(
+          identity.pin_to_string(token),
+          remote.describe(failure),
+          now,
+        ),
+      )
+    policy.ReadCensus(_)
+    | policy.ReadOwners
+    | policy.ReadEtsTables
+    | policy.ReadMemory
+    | policy.ReadSupervision
+    | policy.ReadAudit(_)
+    | policy.PinProcess(_)
+    | policy.UnpinProcess(_)
+    | policy.ReadProcess(_)
+    | policy.StartProbe(_)
+    | policy.StopProbe(_)
+    | policy.TargetedGc(_)
+    | policy.SelfMeasure(_)
+    | policy.ExportCapture(..)
+    | policy.Checkpoint(_)
+    | policy.Detach -> state
   }
 }
 
@@ -835,6 +883,7 @@ fn save(state: State) -> Result(String, String) {
     list.reverse(list.map(state.marks, fn(mark) { mark.checkpoint })),
     audit.tail(state.config.audit, audit.capacity),
     state.probes,
+    binaries_reads(state.results),
   ))
 
   let path = saver.directory <> "/" <> id <> ".pgcap"
@@ -853,6 +902,23 @@ fn save(state: State) -> Result(String, String) {
 
   capture_file.write(path, header, records)
   |> result.replace(path)
+}
+
+// The binaries reads the viewer remembers, oldest first, as the capture's
+// records. A refused read left no reading and is in the audit trail.
+fn binaries_reads(
+  results: List(seam.ProcessResult),
+) -> List(readings.BinariesReading) {
+  results
+  |> list.filter_map(fn(result) {
+    case result {
+      seam.BinariesRan(snapshot:, at_ms:) ->
+        Ok(readings.BinariesReading(at_ms:, snapshot:))
+      seam.GcRan(..) | seam.SelfMeasured(..) | seam.BinariesRefused(..) ->
+        Error(Nil)
+    }
+  })
+  |> list.reverse
 }
 
 // A checkpoint's place on the agent's clock, from the clock record a ping

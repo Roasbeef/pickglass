@@ -31,17 +31,14 @@ fn agent(
   fn(request) {
     case request {
       wire.AskCensus(..) -> Ok(wire.CensusReport(fixture.census(rows)))
-      wire.Extended(wire.AskOwners(..)) -> {
+      wire.Extended(wire.AskOwnersDetail(..)) -> {
         let census = fixture.census(rows)
 
-        Ok(
-          wire.OwnersReport(wire.OwnersSnapshot(
-            coverage: census.coverage,
-            rows: census.rows,
-            owners: [],
-            totals: wire.CensusTotals(list.length(rows), 5000, 0, 0, 100, 1, 1),
-          )),
-        )
+        Ok(fixture.owners_detail(
+          census.coverage,
+          census.rows,
+          wire.CensusTotals(list.length(rows), 5000, 0, 0, 100, 1, 1),
+        ))
       }
       wire.AskPin(text) -> {
         let serial = case string.split(text, ".") {
@@ -478,4 +475,100 @@ pub fn a_probe_the_agent_refuses_at_start_is_shown_on_the_page_that_asked_test()
   assert string.contains(notice, "unknown_module")
   assert page.probes() == []
   assert web_mount.refused_starts_of(state) == [notice]
+}
+
+// ------------------------------------------------- the agent's own processes
+
+fn agent_process(n: Int) -> wire.ProcessRow {
+  fixture.row(pid(n), 9_000_000, fixture.labelled("tool", "pickglass", "agent"))
+}
+
+// The busiest-of-the-node button leaves pickglass's own agent processes out
+// of its sixteen and says how many it left out.
+pub fn the_busiest_button_leaves_the_agents_own_processes_out_test() {
+  let rows =
+    list.append(list.map(fixture.numbers(3), session), [
+      agent_process(90),
+      agent_process(91),
+    ])
+  let #(_, page) = page_over(rows)
+  let state = web_mount.ask(on(page, "overview"), msg.ProfileBusiest)
+
+  assert targets(page) == 3
+  assert web_mount.refusal_of(state) == None
+
+  let assert [note] = page.profile_notes()
+  assert string.contains(note.chosen, "all 3 listed processes of the node")
+  assert string.contains(
+    note.chosen,
+    "leaving out 2 of pickglass's own agent processes (tool:pickglass)",
+  )
+
+  let assert [#(_, plan)] = page.plans()
+  let assert policy.StartProbe(spec:) = policy.plan_command(plan)
+
+  // The agent's own processes are named by no pin of the plan: every target
+  // is one of the session's.
+  assert list.length(spec.targets) == 3
+}
+
+// Profiling that owner by name is a request for those processes, so nothing
+// is left out.
+pub fn the_owner_button_still_profiles_the_agents_own_processes_test() {
+  let #(_, page) = page_over([session(1), agent_process(90), agent_process(91)])
+  let _ =
+    web_mount.ask(
+      on(page, "owners"),
+      msg.ProfileOwner(key.make("owner:tool:pickglass")),
+    )
+
+  assert targets(page) == 2
+
+  let assert [note] = page.profile_notes()
+  assert !string.contains(note.chosen, "leaving out")
+}
+
+pub fn a_node_with_only_the_agents_own_processes_says_so_test() {
+  let #(_, page) = page_over([agent_process(90)])
+  let state = web_mount.ask(on(page, "overview"), msg.ProfileBusiest)
+
+  assert page.plans() == []
+  assert web_mount.refusal_of(state)
+    == Some(
+      "the last pass lists only pickglass's own agent processes (tool:pickglass), which a node-wide profile leaves out",
+    )
+}
+
+pub fn without_own_splits_the_rows_by_owner_test() {
+  let #(_, page) = page_over([session(1), agent_process(90)])
+  let assert [newest, ..] = page.latest()
+  let rows = feeds.rows_of(newest, 8)
+  let #(others, own) = profile_scope.without_own(rows)
+
+  assert own == 1
+  assert list.map(others, fn(row) { row.pid_text }) == [pid(1)]
+}
+
+pub fn the_sentence_names_what_was_left_out_test() {
+  let assert Ok(chosen) =
+    profile_scope.choose_excluding(
+      [Candidate("<0.1.0>", Some(1), 1)],
+      16,
+      profile_scope.WholeNode,
+      2,
+    )
+
+  assert chosen.sentence
+    == "all 1 listed processes of the node, leaving out 2 of pickglass's own agent processes (tool:pickglass)"
+  assert profile_scope.choose(
+      [Candidate("<0.1.0>", Some(1), 1)],
+      16,
+      profile_scope.WholeNode,
+    )
+    == profile_scope.choose_excluding(
+      [Candidate("<0.1.0>", Some(1), 1)],
+      16,
+      profile_scope.WholeNode,
+      0,
+    )
 }

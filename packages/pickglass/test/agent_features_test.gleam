@@ -3,6 +3,7 @@
 //// process detail, supervision, node facts and the owners totals.
 
 import fixture
+import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -431,7 +432,7 @@ fn info() -> model.PanelInfo {
 }
 
 pub fn the_spawn_tree_has_roots_for_parents_outside_the_walk_test() {
-  let page = supervision_build.build(info(), supervision())
+  let page = supervision_build.build(info(), supervision(), dict.new())
 
   // `<0.1.0>` has no parent, and `<0.4.0>`'s parent was not scanned.
   assert list.map(page.roots, fn(node) { node.label }) == ["<0.1.0>", "<0.4.0>"]
@@ -470,6 +471,7 @@ pub fn a_huge_tree_is_cut_and_the_rest_is_counted_test() {
         ),
         edges: wide,
       ),
+      dict.new(),
     )
 
   assert supervision_build.drawn(page) == supervision_build.max_nodes
@@ -636,6 +638,7 @@ pub fn the_owners_remainder_is_the_totals_minus_the_listed_rows_test() {
     == model.Remainder(
       procs: Known(48),
       heap_cap: Known(100_000 * 8 - { 5000 / 16 * 8 + 4000 / 16 * 8 }),
+      ets_bytes: Missing(measure.NotCollected),
     )
 }
 
@@ -676,6 +679,7 @@ pub fn a_supervisor_is_recognised_by_its_initial_call_or_its_name_test() {
           edge("<0.3.0>", "<0.1.0>", "", "m:run/1"),
         ],
       ),
+      dict.new(),
     )
   let assert [root] = page.roots
 

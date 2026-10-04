@@ -14,6 +14,13 @@
 //// one, and is not given a rate of zero. When no process has a rate at all
 //// the order is by heap alone, and the sentence says why.
 ////
+//// The processes of the node include pickglass's own agent, which labels
+//// everything it starts as owner `tool:pickglass`. A profile of "the busiest
+//// processes of the node" would otherwise spend part of its sixteen on the
+//// instrument, so the node-wide choice leaves those out (`without_own`) and
+//// the sentence says how many it left out. A profile of that owner by name,
+//// or of one process, is a request for them and is not filtered.
+////
 //// The module is pure. The web mount builds `Candidate`s from the census
 //// rows it holds and the command line builds them from its own observations,
 //// so the two choose by the same rule and word the result the same way.
@@ -76,6 +83,29 @@ pub type Refusal {
   NothingToProfile(reason: String)
 }
 
+/// The owner pickglass's own agent processes carry.
+pub const own_owner = "tool:pickglass"
+
+/// The rows that are not pickglass's own agent processes, and how many were
+/// left out. A node-wide choice is made from the first.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_scope.without_own(rows)
+/// // -> #(rows_of_the_node, 2)
+/// ```
+pub fn without_own(rows: List(model.ProcRow)) -> #(List(model.ProcRow), Int) {
+  let #(own, others) = list.partition(rows, is_own)
+
+  #(others, list.length(own))
+}
+
+fn is_own(row: model.ProcRow) -> Bool {
+  row.owner_label == own_owner
+  || string.starts_with(row.owner_label, own_owner <> " ")
+}
+
 /// The candidates among the rows of a census pass.
 ///
 /// ## Examples
@@ -107,8 +137,28 @@ pub fn choose(
   limit: Int,
   scope: Scope,
 ) -> Result(Chosen, Refusal) {
+  choose_excluding(candidates, limit, scope, 0)
+}
+
+/// `choose` over candidates from which `excluded` of pickglass's own agent
+/// processes were already removed. The sentence says so, because a plan that
+/// names the busiest of "the node" and leaves some out must not read as
+/// all of it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_scope.choose_excluding(candidates, 16, WholeNode, 2)
+/// // -> Ok(Chosen(.., "16 of 31 listed processes of the node, the busiest by reductions/s, leaving out 2 of pickglass's own (tool:pickglass)"))
+/// ```
+pub fn choose_excluding(
+  candidates: List(Candidate),
+  limit: Int,
+  scope: Scope,
+  excluded: Int,
+) -> Result(Chosen, Refusal) {
   case candidates {
-    [] -> Error(NothingToProfile(none_text(scope)))
+    [] -> Error(NothingToProfile(none_text(scope, excluded)))
     _ -> {
       let ranked = list.sort(candidates, busiest_first)
       let chosen = list.take(ranked, limit)
@@ -121,7 +171,8 @@ pub fn choose(
       Ok(Chosen(
         pids: list.map(chosen, fn(candidate) { candidate.pid_text }),
         listed:,
-        sentence: describe(scope, list.length(chosen), listed, ranking),
+        sentence: describe(scope, list.length(chosen), listed, ranking)
+          <> left_out_text(excluded),
       ))
     }
   }
@@ -154,7 +205,30 @@ fn compare_rates(a: Option(Int), b: Option(Int)) -> order.Order {
   }
 }
 
-fn none_text(scope: Scope) -> String {
+// What the sentence adds when pickglass's own processes were left out.
+fn left_out_text(excluded: Int) -> String {
+  case excluded {
+    0 -> ""
+    n ->
+      ", leaving out "
+      <> int.to_string(n)
+      <> " of pickglass's own agent processes ("
+      <> own_owner
+      <> ")"
+  }
+}
+
+fn none_text(scope: Scope, excluded: Int) -> String {
+  case scope, excluded {
+    WholeNode, n if n > 0 ->
+      "the last pass lists only pickglass's own agent processes ("
+      <> own_owner
+      <> "), which a node-wide profile leaves out"
+    _, _ -> none_text_of(scope)
+  }
+}
+
+fn none_text_of(scope: Scope) -> String {
   case scope {
     OwnerScope(label:) ->
       "the last pass lists no live process of " <> owner_name(label)

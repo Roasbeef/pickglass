@@ -55,6 +55,7 @@ fn capture_with(
       [],
       [],
       probes,
+      [],
     )
   let assert Ok(text) = capture_file.render(header, records)
   let assert Ok(loaded) = capture_file.parse(text)

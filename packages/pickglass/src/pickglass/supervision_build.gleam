@@ -14,15 +14,21 @@
 //// `max_nodes` nodes the rest is counted in `omitted`, because a node of
 //// thousands of processes would otherwise be thousands of elements.
 ////
-//// A node's kind is read from its initial call, which is a hint and nothing
-//// stronger: a supervisor's initial call names a supervisor module, or its
-//// registered name ends in `_sup`, which is how OTP's own are named. A
-//// process with no children and no such hint is a `Leaf`, and the page does
-//// not call it a worker because a supervisor with nothing to supervise looks
-//// the same. A process with children and no hint is `UnknownKind`. The
-//// initial call the agent reads is what `process_info` reports, which for an
-//// OTP process is `proc_lib:init_p/5`; the module in the process dictionary's
-//// `$initial_call` is the stronger evidence and is not read yet.
+//// A node's kind is read from its initial call. Where the census listed the
+//// process, its `proc_lib` `$initial_call` is known (the `owners_detail`
+//// rows carry it): a supervisor's is `supervisor:my_sup/1`, and a process
+//// whose call is anything else is a `Worker`, even when something it spawned
+//// shows below it. That is evidence about the process and not a guess from
+//// its name.
+////
+//// Where the census did not list the process (it lists only its top rows) or
+//// `proc_lib` did not start it, there is only the call `process_info`
+//// reports, which for an OTP process is `proc_lib:init_p/5`, and the
+//// registered name: a name ending in `_sup` is how OTP's own supervisors are
+//// named. That is a hint and nothing stronger. A process with no children and
+//// no hint is a `Leaf`, and the page does not call it a worker because a
+//// supervisor with nothing to supervise looks the same. A process with
+//// children and no hint is `UnknownKind`.
 
 import gleam/dict.{type Dict}
 import gleam/int
@@ -48,11 +54,12 @@ pub const caveat =
 /// ## Examples
 ///
 /// ```gleam
-/// supervision_build.build(info, snapshot)
+/// supervision_build.build(info, snapshot, dict.new())
 /// ```
 pub fn build(
   info: model.PanelInfo,
   snapshot: wire.SupervisionSnapshot,
+  initial_calls: Dict(String, String),
 ) -> model.SupervisionModel {
   let edges = snapshot.edges
   let known =
@@ -67,7 +74,7 @@ pub fn build(
   let #(drawn, budget) =
     list.fold(roots, #([], max_nodes), fn(state, edge) {
       let #(nodes, left) = state
-      let #(node, left) = node_of(edge, children, left)
+      let #(node, left) = node_of(edge, children, initial_calls, left)
 
       case node {
         Some(found) -> #([found, ..nodes], left)
@@ -106,6 +113,7 @@ fn children_of(
 fn node_of(
   edge: wire.SpawnEdge,
   children: Dict(String, List(wire.SpawnEdge)),
+  initial_calls: Dict(String, String),
   budget: Int,
 ) -> #(option.Option(model.SupNode), Int) {
   case budget <= 0 {
@@ -119,7 +127,7 @@ fn node_of(
       let #(drawn, left) =
         list.fold(below, #([], budget - 1), fn(state, child) {
           let #(nodes, left) = state
-          let #(node, left) = node_of(child, children, left)
+          let #(node, left) = node_of(child, children, initial_calls, left)
 
           case node {
             Some(found) -> #([found, ..nodes], left)
@@ -131,7 +139,7 @@ fn node_of(
         Some(model.SupNode(
           key: key.make(edge.child_pid_text),
           label: label_of(edge),
-          kind: kind_of(edge, below),
+          kind: kind_of(edge, below, initial_calls),
           owner_label: owner_label(edge.owner),
           children: list.reverse(drawn),
         )),
@@ -148,15 +156,41 @@ fn label_of(edge: wire.SpawnEdge) -> String {
   }
 }
 
-fn kind_of(edge: wire.SpawnEdge, below: List(wire.SpawnEdge)) -> model.SupKind {
-  let named = string.contains(edge.initial_call, "supervisor")
-  let supervisor = named || string.ends_with(edge.registered_name, "_sup")
+fn kind_of(
+  edge: wire.SpawnEdge,
+  below: List(wire.SpawnEdge),
+  initial_calls: Dict(String, String),
+) -> model.SupKind {
+  case dict.get(initial_calls, edge.child_pid_text) {
+    // The process's own `$initial_call` is known, so its kind is read from
+    // it and not guessed from a name.
+    Ok(call) ->
+      case is_supervisor_call(call) {
+        True -> model.Supervisor
+        False -> model.Worker
+      }
 
-  case supervisor, below {
-    True, _ -> model.Supervisor
-    False, [] -> model.Leaf
-    False, [_, ..] -> model.UnknownKind
+    // The census did not list it, or `proc_lib` did not start it: only the
+    // hints are left.
+    Error(Nil) -> {
+      let named = string.contains(edge.initial_call, "supervisor")
+      let supervisor = named || string.ends_with(edge.registered_name, "_sup")
+
+      case supervisor, below {
+        True, _ -> model.Supervisor
+        False, [] -> model.Leaf
+        False, [_, ..] -> model.UnknownKind
+      }
+    }
   }
+}
+
+// A `proc_lib` initial call is `module:function/arity`, and a supervisor's
+// module is `supervisor` (or `supervisor_bridge`), whatever callback module
+// it runs, which is the function's name.
+fn is_supervisor_call(call: String) -> Bool {
+  string.starts_with(call, "supervisor:")
+  || string.starts_with(call, "supervisor_bridge:")
 }
 
 fn owner_label(reading: wire.OwnerReading) -> option.Option(String) {
