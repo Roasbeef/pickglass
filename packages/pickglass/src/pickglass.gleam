@@ -17,6 +17,7 @@ import pickglass/cli
 import pickglass/compare_report
 import pickglass/internal/ffi_os
 import pickglass/once
+import pickglass/profile_run
 import pickglass/serve
 
 /// The package version, kept equal to the `version` in `gleam.toml`.
@@ -70,6 +71,7 @@ pub fn main() -> Nil {
     Ok(cli.Attach(options)) -> ffi_os.halt(cli.run_attach(options))
     Ok(cli.Open(options)) -> ffi_os.halt(serve.run_open(options, version))
     Ok(cli.View(options)) -> ffi_os.halt(serve.run_view(options))
+    Ok(cli.Profile(options)) -> ffi_os.halt(profile_run.run(options, version))
     Ok(cli.Compare(baseline:, candidate:)) ->
       ffi_os.halt(compare_report.run(baseline, candidate))
     Error(message) -> {

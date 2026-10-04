@@ -60,6 +60,58 @@ pub type Command {
 
   /// Print two captures side by side.
   Compare(baseline: String, candidate: String)
+
+  /// Attach, run one stack probe through the gate, write the profile and
+  /// detach.
+  Profile(ProfileOptions)
+}
+
+/// What `pickglass profile` samples.
+pub type ProfileTarget {
+  /// The processes of one owner, as `kind:id` segments joined by `/`, or the
+  /// word `unknown` for the processes nobody claimed.
+  OwnerTarget(owner: String)
+
+  /// The busiest processes of the node by reductions per second.
+  TopTarget(count: Int)
+
+  /// One process, by the pid text a census shows.
+  ProcessTarget(pid_text: String)
+}
+
+/// The file `pickglass profile` writes.
+pub type ProfileFormat {
+  /// speedscope JSON, which opens at speedscope.app.
+  SpeedscopeFormat
+
+  /// Collapsed stacks, for flamegraph.pl and its relatives.
+  CollapsedFormat
+
+  /// A Chrome trace of the profile's function totals.
+  ChromeFormat
+
+  /// A `pickglass.capture/1` file holding the observations and the profile.
+  PgcapFormat
+
+  /// The summary and an indented call tree as text.
+  TextFormat
+}
+
+/// Options of `pickglass profile`.
+pub type ProfileOptions {
+  ProfileOptions(
+    selector: Selector,
+    agent_ebin: Option(String),
+    target: ProfileTarget,
+    /// How long to sample, in seconds.
+    seconds: Int,
+    /// Samples per second per process, as asked.
+    rate_hz: Int,
+    /// Where to write the file, or `None` for the format's default name in
+    /// the current directory. The text format with no file prints only.
+    out: Option(String),
+    format: ProfileFormat,
+  )
 }
 
 /// How the target is found.
@@ -129,6 +181,9 @@ pub const usage =
        pickglass attach TARGET [--agent-ebin DIR]
                         [--probe-counters MODULE --seconds N]
        pickglass attach TARGET --once --out FILE
+       pickglass profile TARGET (--owner KIND:ID | --top N | --pid-text PID)
+                         [--seconds S] [--rate HZ] [--out FILE]
+                         [--format speedscope|collapsed|chrome|pgcap|text]
 
 TARGET is one of
   [--state-dir DIR] [--pid PID]
@@ -144,6 +199,15 @@ environment, because argument lists and environments are readable by other
 local users and end up in shell history. --cookie and --setcookie are
 refused. The file must be readable by its owner alone. Without
 --cookie-file the cookie is read from ~/.erlang.cookie.
+
+profile samples the stacks of an owner's processes (--owner session:abc, a
+path such as session:abc/strand:def, or unknown), of the busiest N processes
+(--top N, at most 16), or of one process (--pid-text <0.123.0>) for S
+seconds (default 10) at HZ samples a second per process (default 100). It
+goes through the same plan, confirm and audit path as the pages, as the
+local owner, writes the profile (speedscope JSON by default, which opens at
+speedscope.app) and prints a summary. --format text prints an indented call
+tree instead of writing a file.
 
 open attaches, serves the pages on 127.0.0.1 and prints a single-use URL.
 view serves the pages over a capture file with no target. compare prints two
@@ -191,6 +255,12 @@ pub fn parse(arguments: List(String)) -> Result(Command, String) {
         False -> Ok(Compare(baseline:, candidate:))
       }
     ["compare", ..] -> Error("compare needs two capture files")
+    ["profile", ..rest] -> {
+      use #(selection, rest) <- result.try(extract_selection(rest))
+      use selector <- result.try(selector_of(selection))
+
+      parse_profile(rest, selector)
+    }
     [other, ..] -> Error("unknown command: " <> other)
   }
 }
@@ -363,6 +433,146 @@ fn parse_view(
       }
     [flag, ..] -> Error("unknown or incomplete option: " <> flag)
   }
+}
+
+// `pickglass profile` takes exactly one of --owner, --top and --pid-text.
+fn parse_profile(
+  arguments: List(String),
+  selector: Selector,
+) -> Result(Command, String) {
+  profile_options(
+    arguments,
+    ProfileOptions(
+      selector:,
+      agent_ebin: None,
+      target: TopTarget(0),
+      seconds: 10,
+      rate_hz: 100,
+      out: None,
+      format: SpeedscopeFormat,
+    ),
+    [],
+  )
+}
+
+fn profile_options(
+  arguments: List(String),
+  options: ProfileOptions,
+  targets: List(ProfileTarget),
+) -> Result(Command, String) {
+  case arguments {
+    [] ->
+      case targets {
+        [one] -> Ok(Profile(ProfileOptions(..options, target: one)))
+        [] -> Error("profile needs one of --owner, --top and --pid-text")
+        _ -> Error("profile takes only one of --owner, --top and --pid-text")
+      }
+    ["--agent-ebin", value, ..rest] ->
+      profile_options(
+        rest,
+        ProfileOptions(..options, agent_ebin: Some(value)),
+        targets,
+      )
+    ["--out", value, ..rest] ->
+      profile_options(
+        rest,
+        ProfileOptions(..options, out: Some(value)),
+        targets,
+      )
+    ["--owner", value, ..rest] -> {
+      use owner_text <- result.try(owner_argument(value))
+
+      profile_options(rest, options, [OwnerTarget(owner_text), ..targets])
+    }
+    ["--top", value, ..rest] ->
+      case int.parse(value) {
+        Ok(count) if count >= 1 && count <= 16 ->
+          profile_options(rest, options, [TopTarget(count), ..targets])
+        _ -> Error("--top must be between 1 and 16, the agent's limit")
+      }
+    ["--pid-text", value, ..rest] ->
+      case pid_text_shaped(value) {
+        True ->
+          profile_options(rest, options, [ProcessTarget(value), ..targets])
+        False -> Error("--pid-text must look like <0.123.0>")
+      }
+    ["--seconds", value, ..rest] ->
+      case int.parse(value) {
+        Ok(count) if count >= 1 && count <= 60 ->
+          profile_options(
+            rest,
+            ProfileOptions(..options, seconds: count),
+            targets,
+          )
+        _ -> Error("--seconds must be between 1 and 60 for a stack probe")
+      }
+    ["--rate", value, ..rest] ->
+      case int.parse(value) {
+        Ok(hz) if hz >= 1 && hz <= 1000 ->
+          profile_options(rest, ProfileOptions(..options, rate_hz: hz), targets)
+        _ -> Error("--rate must be between 1 and 1000 samples a second")
+      }
+    ["--format", value, ..rest] ->
+      case profile_format(value) {
+        Ok(format) ->
+          profile_options(rest, ProfileOptions(..options, format:), targets)
+        Error(Nil) ->
+          Error(
+            "--format must be one of speedscope, collapsed, chrome, pgcap, text",
+          )
+      }
+    [flag, ..] -> Error("unknown or incomplete option: " <> flag)
+  }
+}
+
+fn profile_format(text: String) -> Result(ProfileFormat, Nil) {
+  case text {
+    "speedscope" -> Ok(SpeedscopeFormat)
+    "collapsed" -> Ok(CollapsedFormat)
+    "chrome" -> Ok(ChromeFormat)
+    "pgcap" -> Ok(PgcapFormat)
+    "text" -> Ok(TextFormat)
+    _ -> Error(Nil)
+  }
+}
+
+// An owner is `unknown` or one or more `kind:id` segments joined by `/`, the
+// way the owners page writes a path. Each segment must be one core accepts.
+fn owner_argument(text: String) -> Result(String, String) {
+  case text {
+    "unknown" -> Ok(text)
+    _ ->
+      case
+        list.try_map(string.split(text, "/"), fn(segment) {
+          case string.split_once(segment, ":") {
+            Ok(#(kind, id)) -> owner.segment(kind, id)
+            Error(Nil) -> Error(Nil)
+          }
+        })
+      {
+        Ok(_) -> Ok(text)
+        Error(Nil) ->
+          Error(
+            "--owner must be unknown or KIND:ID segments joined by /, such as session:abc",
+          )
+      }
+  }
+}
+
+// A pid as the census prints it: `<` three numbers joined by dots `>`.
+fn pid_text_shaped(text: String) -> Bool {
+  case string.starts_with(text, "<") && string.ends_with(text, ">") {
+    False -> False
+    True ->
+      case string.split(string.slice(text, 1, string.length(text) - 2), ".") {
+        [a, b, c] -> list.all([a, b, c], digits)
+        _ -> False
+      }
+  }
+}
+
+fn digits(text: String) -> Bool {
+  text != "" && result.is_ok(int.parse(text)) && !string.starts_with(text, "-")
 }
 
 /// Find the target and attach to it. A Loom target is discovered under the
