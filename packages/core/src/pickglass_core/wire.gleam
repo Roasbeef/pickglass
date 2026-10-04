@@ -88,8 +88,10 @@ pub type MemorySnapshot {
 pub type CensusStop {
   /// Every process alive for the whole walk was seen.
   WalkFinished
+
   /// The scan budget was reached with processes unvisited.
   ScanBudgetReached
+
   /// The deadline passed with processes unvisited.
   DeadlineReached
 }
@@ -103,6 +105,7 @@ pub type CensusCoverage {
 pub type OwnerReading {
   /// No label, or one that is not an ownership label.
   Unlabelled
+
   /// A well-formed ownership label.
   Labelled(path: List(Segment), role: String)
 }
@@ -514,6 +517,7 @@ pub type SchedulerAction {
 pub type Targets {
   /// Every process on the node except the agent.
   AllProcesses
+
   /// Only the processes behind these pins.
   PinnedProcesses(tokens: List(PinToken))
 }
