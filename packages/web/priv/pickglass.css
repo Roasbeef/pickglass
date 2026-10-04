@@ -385,6 +385,8 @@ input.text { width: 100%; }
 .profile-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .btn-profile { border-color: var(--accent); color: var(--accent); }
 .btn-profile:hover { background: var(--accent-soft); }
+.btn-record { border-color: var(--ink-3); color: var(--ink-2); }
+.btn-record:hover { background: var(--paper-2); }
 .btn-current { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .dialog-adjust { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 10px 14px 0; }
 .dialog-adjust .field-label { margin-left: 10px; }
@@ -399,6 +401,33 @@ input.text { width: 100%; }
 
 /* ------------------------------------------------------------ profile */
 
+.activity { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; padding: 9px 14px; }
+.activity-line { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.activity .notice { margin: 0; }
+.inline-form { display: inline-flex; align-items: center; gap: 6px; }
+.inline-form .text { min-width: 18em; }
+.legend-line { margin: 6px 14px; font-size: 12.5px; color: var(--ink-2); }
+.swatch { display: inline-block; width: 12px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-left: 6px; }
+.swatch-run { background: var(--accent); }
+.swatch-gc-minor { background: var(--warn); opacity: 0.7; }
+.swatch-gc-major { background: var(--bad); }
+.swatch-window { background: var(--accent-soft); border: 1px solid var(--rule-2); }
+.act { stroke: none; }
+.act-run { fill: var(--accent); }
+.act-gc-minor { fill: var(--warn); opacity: 0.75; }
+.act-gc-major { fill: var(--bad); }
+.act:hover { stroke: var(--ink); stroke-width: 1; }
+.act-window-band { fill: var(--accent-soft); opacity: 0.45; }
+.long-gc { fill: var(--bad); stroke: var(--card); stroke-width: 1; }
+.long-schedule { fill: var(--warn); stroke: var(--card); stroke-width: 1; }
+.call { stroke: var(--card); stroke-width: 0.5; }
+.call-d0 { fill: var(--accent); opacity: 0.9; }
+.call-d1 { fill: var(--accent); opacity: 0.7; }
+.call-d2 { fill: var(--accent); opacity: 0.5; }
+.call-d3 { fill: var(--accent); opacity: 0.35; }
+.call:hover { stroke: var(--ink); stroke-width: 1; }
+.call-label { font: 10px var(--font-mono); fill: var(--ink); pointer-events: none; }
+svg.events, svg.calls { min-width: 900px; }
 .caveats { margin: 4px 14px 12px; padding-left: 18px; color: var(--ink-2); font-size: 12.5px; }
 .crumbs { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0 0 10px; align-items: stretch; }
 .crumb {

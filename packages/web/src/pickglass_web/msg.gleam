@@ -27,8 +27,10 @@
 //// the viewer, or refuses it.
 
 import pickglass_core/policy
+import pickglass_core/profile/activity
 import pickglass_web/key.{type Key}
 import pickglass_web/model
+import pickglass_web/timeline_model
 
 /// One browser-visible message.
 pub type Msg {
@@ -75,7 +77,7 @@ pub type Feed {
   FedProfile(model.ProfileModel)
 
   /// The timeline page.
-  FedTimeline(model.TimelineModel)
+  FedTimeline(timeline_model.TimelineModel)
 
   /// The compare page.
   FedCompare(model.CompareModel)
@@ -119,6 +121,9 @@ pub type ProfileTab {
 
 /// How long a probe may run, as a closed choice.
 pub type DurationChoice {
+  /// Five seconds.
+  Seconds5
+
   /// Ten seconds.
   Seconds10
 
@@ -188,6 +193,15 @@ pub type ExportChoice {
   AsChromeTrace
 }
 
+/// Which tracing probe's timeline to export.
+pub type TraceExport {
+  /// The newest scheduling and collection probe.
+  EventsTrace
+
+  /// The newest call tree probe that kept call slices.
+  CallsTrace
+}
+
 /// A change to page-local view state. None of these reaches the node.
 pub type UiEvent {
   /// Show another tab of the profile page.
@@ -222,6 +236,15 @@ pub type UiEvent {
 
   /// Send the plan form as a request, if it passes `update`'s checks.
   SubmitDraft
+
+  /// Send the module patterns typed in the plan form as a request to trace
+  /// the calls of a pending profile's processes, if they pass `update`'s
+  /// checks. The key names the pending plan.
+  SubmitTraceInstead(plan: Key)
+
+  /// Send the module patterns typed in the plan form as a request to trace
+  /// the calls of one process, if they pass `update`'s checks.
+  SubmitTraceProcess(process: Key)
 
   /// The kind of the filter being added.
   FilterKindChosen(FilterKind)
@@ -312,11 +335,39 @@ pub type Request {
   /// names the pending plan a profile button made.
   AdjustProfile(plan: Key, duration: DurationChoice, rate: RateChoice)
 
+  /// Plan the processes of a pending profile as a call trace of these
+  /// modules instead. The modules are patterns already checked against the
+  /// pattern alphabet; the processes are the plan's own.
+  TraceCallsInstead(plan: Key, modules: List(String))
+
+  /// Plan the processes of a pending call trace as a stack profile instead.
+  SampleStacksInstead(plan: Key)
+
+  /// Trace the calls of these modules in one process, pinning it if it is
+  /// not pinned, and show the plan.
+  TraceProcess(process: Key, modules: List(String))
+
+  /// Record the scheduling and garbage collection of one process, pinning it
+  /// if it is not pinned, and show the plan.
+  RecordProcess(process: Key)
+
+  /// Record the scheduling and garbage collection of the busiest processes
+  /// of an owner row and show the plan.
+  RecordOwner(owner: Key)
+
   /// Drop every chain step from this index on.
   TruncateChain(from: Int)
 
+  /// Show the profile's running and runnable samples only, or include the
+  /// ones taken while a process waited. It is a choice about which samples
+  /// the page draws; nothing reaches the node.
+  ChooseSamples(inclusion: activity.Inclusion)
+
   /// Export the profile in a format.
   ExportProfile(choice: ExportChoice)
+
+  /// Export a tracing probe's timeline as a Chrome trace.
+  ExportTrace(which: TraceExport)
 }
 
 /// A probe the operator drafted. Targets are keys; the viewer turns them into
@@ -341,6 +392,7 @@ pub const profile_limit = 16
 /// The duration in milliseconds.
 pub fn duration_ms(choice: DurationChoice) -> Int {
   case choice {
+    Seconds5 -> 5000
     Seconds10 -> 10_000
     Seconds30 -> 30_000
     Seconds60 -> 60_000
@@ -378,6 +430,7 @@ pub fn rate_choice(hz: Int) -> Result(RateChoice, Nil) {
 /// The duration choice that is exactly `ms` milliseconds, when there is one.
 pub fn duration_choice(ms: Int) -> Result(DurationChoice, Nil) {
   case ms {
+    5000 -> Ok(Seconds5)
     10_000 -> Ok(Seconds10)
     30_000 -> Ok(Seconds30)
     60_000 -> Ok(Seconds60)
@@ -389,6 +442,7 @@ pub fn duration_choice(ms: Int) -> Result(DurationChoice, Nil) {
 /// The text of a duration choice, for the select and for its code.
 pub fn duration_code(choice: DurationChoice) -> String {
   case choice {
+    Seconds5 -> "5s"
     Seconds10 -> "10s"
     Seconds30 -> "30s"
     Seconds60 -> "60s"
@@ -399,11 +453,30 @@ pub fn duration_code(choice: DurationChoice) -> String {
 /// Parse a duration code written by `duration_code`.
 pub fn parse_duration(code: String) -> Result(DurationChoice, Nil) {
   case code {
+    "5s" -> Ok(Seconds5)
     "10s" -> Ok(Seconds10)
     "30s" -> Ok(Seconds30)
     "60s" -> Ok(Seconds60)
     "300s" -> Ok(Seconds300)
     _ -> Error(Nil)
+  }
+}
+
+/// The durations the plan form offers for a kind of probe, shortest first.
+/// They are what the agent runs: a call tree for at most ten seconds, a stack
+/// or events probe for at most a minute, a counters probe for any.
+///
+/// ## Examples
+///
+/// ```gleam
+/// msg.durations_for(policy.CallTree)
+/// // -> [Seconds5, Seconds10]
+/// ```
+pub fn durations_for(kind: policy.ProbeKind) -> List(DurationChoice) {
+  case kind {
+    policy.CallTree -> [Seconds5, Seconds10]
+    policy.Sampling | policy.SchedulingGc -> [Seconds10, Seconds30, Seconds60]
+    policy.Counters -> [Seconds10, Seconds30, Seconds60, Seconds300]
   }
 }
 

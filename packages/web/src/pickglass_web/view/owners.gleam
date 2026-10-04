@@ -256,6 +256,14 @@ fn group_row(
           <> " and plan one stack probe over them",
         msg.ProfileOwner(row.key),
       ),
+      ui.record_button(
+        grants,
+        "Record",
+        "Pin the busiest processes of "
+          <> row.label
+          <> " and plan a recording of when they run and collect garbage",
+        msg.RecordOwner(row.key),
+      ),
     ]),
     ui.num(row.procs, unit.Count),
     heap_cell(row),

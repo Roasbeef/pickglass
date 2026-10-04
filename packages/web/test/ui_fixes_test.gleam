@@ -30,6 +30,7 @@ import pickglass_web/key
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/page
+import pickglass_web/timeline_model
 import pickglass_web/view/compare
 import pickglass_web/view/overview
 import pickglass_web/view/probes
@@ -468,7 +469,7 @@ pub fn each_counter_track_prints_its_scale_at_the_right_edge_test() {
 pub fn a_level_track_prints_its_range_in_one_unit_test() {
   let steps = fn(values) {
     list.map(values, fn(value) {
-      model.Step(at_ms: 0, width_ms: 10, value: measure.Known(value))
+      timeline_model.Step(at_ms: 0, width_ms: 10, value: measure.Known(value))
     })
   }
   let mib = 1_048_576
@@ -488,7 +489,7 @@ pub fn a_ratio_below_the_first_decimal_is_not_written_as_zero_test() {
 
 pub fn a_track_with_no_reading_says_so_instead_of_a_peak_test() {
   let steps = [
-    model.Step(
+    timeline_model.Step(
       at_ms: 0,
       width_ms: 10,
       value: measure.Missing(measure.BudgetExhausted),

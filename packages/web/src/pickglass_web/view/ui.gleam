@@ -296,6 +296,34 @@ pub fn profile_button(
   title: String,
   request: msg.Request,
 ) -> Element(Msg) {
+  plan_button("btn btn-small btn-profile", grants, label, title, request)
+}
+
+/// A button that plans a recording of when processes run and collect garbage,
+/// offered on the same terms as `profile_button`: only to a principal that
+/// holds the capabilities, and only as a request for a plan.
+///
+/// ## Examples
+///
+/// ```gleam
+/// ui.record_button(grants, "Record", "Record this owner", request)
+/// ```
+pub fn record_button(
+  grants: List(Capability),
+  label: String,
+  title: String,
+  request: msg.Request,
+) -> Element(Msg) {
+  plan_button("btn btn-small btn-record", grants, label, title, request)
+}
+
+fn plan_button(
+  class: String,
+  grants: List(Capability),
+  label: String,
+  title: String,
+  request: msg.Request,
+) -> Element(Msg) {
   case
     list.contains(grants, policy.Profile),
     list.contains(grants, policy.Observe)
@@ -303,7 +331,7 @@ pub fn profile_button(
     True, True ->
       html.button(
         [
-          attribute.class("btn btn-small btn-profile"),
+          attribute.class(class),
           attribute.type_("button"),
           attribute.title(title),
           wire.click(msg.Ask(request)),

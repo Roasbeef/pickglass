@@ -112,10 +112,15 @@ fn kind_action(kind: policy.ProbeKind) -> String {
       "Reads the current stack of each target at a fixed rate and merges "
       <> "the stacks into a profile."
     policy.CallTree ->
-      "Records call and return events in the targets and builds a call "
-      <> "tree from them."
+      "Traces calls and returns to the caller of the named modules' "
+      <> "functions in the targets, and folds them as they arrive into a "
+      <> "call tree with exact call counts and times. Nothing is kept per "
+      <> "event; the probe stops at its event budget."
     policy.SchedulingGc ->
-      "Records scheduling and garbage-collection events for the targets."
+      "Records when each target runs on a scheduler and when it collects "
+      <> "garbage, as slices on a timeline with per-process totals, and "
+      <> "reports any collection or timeslice on the node longer than the "
+      <> "thresholds."
   }
 }
 
@@ -161,11 +166,14 @@ fn does_not_prove(kind: policy.ProbeKind) -> String {
       "That time was spent where samples landed: long BIFs and NIFs are "
       <> "under-sampled. Width is a share of samples, not of time."
     policy.CallTree ->
-      "That the call tree is complete: calls to modules reloaded during the "
-      <> "probe are lost."
+      "That untraced callees are cheap: their time counts as the caller's. "
+      <> "That the window was complete: calls to modules reloaded during it "
+      <> "are lost, and a target that calls faster than the collector folds "
+      <> "stops the probe early."
     policy.SchedulingGc ->
-      "That events dropped under the budget did not matter; each gap is "
-      <> "reported where it happened."
+      "That time on a scheduler is CPU time: it includes any time the "
+      <> "operating system took the scheduler thread away. That every "
+      <> "threshold event was kept: the agent keeps the first 200."
   }
 }
 
@@ -178,7 +186,8 @@ pub fn perturbation_text(level: policy.Perturbation) -> String {
       "light: the VM counts calls and call time in the matched functions; "
       <> "no trace message is sent"
     policy.Tracing ->
-      "moderate: every traced event is sent to a collector process"
+      "moderate: every traced event is sent to a collector process, and "
+      <> "a target that calls very fast stops the probe early"
     policy.ForcedGc -> "intrusive: the process is stopped for the collection"
   }
 }
@@ -209,7 +218,7 @@ pub fn view(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
   }
 
   let pending = case data.pending {
-    Some(card) -> [plan_dialog(card)]
+    Some(card) -> [plan_dialog(card, ui_state.plan.modules)]
     None -> []
   }
 
@@ -268,15 +277,7 @@ fn draft_form(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
           }),
         ),
       ]),
-      field("Module patterns", [
-        html.input([
-          attribute.class("text mono"),
-          attribute.type_("text"),
-          attribute.placeholder("loom@runtime@keeper  loom@*"),
-          attribute.value(draft.modules),
-          wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
-        ]),
-      ]),
+      modules_field(draft),
       field("Duration", [
         html.select(
           [
@@ -284,18 +285,15 @@ fn draft_form(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
               msg.Ui(msg.DraftDuration(choice))
             }),
           ],
-          list.map(
-            [msg.Seconds10, msg.Seconds30, msg.Seconds60, msg.Seconds300],
-            fn(choice) {
-              html.option(
-                [
-                  attribute.value(msg.duration_code(choice)),
-                  attribute.selected(choice == draft.duration),
-                ],
-                fmt.duration_ms(msg.duration_ms(choice)),
-              )
-            },
-          ),
+          list.map(msg.durations_for(draft.kind), fn(choice) {
+            html.option(
+              [
+                attribute.value(msg.duration_code(choice)),
+                attribute.selected(choice == draft.duration),
+              ],
+              fmt.duration_ms(msg.duration_ms(choice)),
+            )
+          }),
         ),
       ]),
     ]),
@@ -315,6 +313,24 @@ fn draft_form(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
       <> "would do and must be confirmed.",
     ),
   ])
+}
+
+// A stack or events probe names no modules, so its form has no field for
+// them; a counters or call tree probe names the modules it traces.
+fn modules_field(draft: state.PlanDraft) -> Element(Msg) {
+  case policy.needs_modules(draft.kind) {
+    False -> element.none()
+    True ->
+      field("Module patterns", [
+        html.input([
+          attribute.class("text mono"),
+          attribute.type_("text"),
+          attribute.placeholder("loom@runtime@keeper  loom@*"),
+          attribute.value(draft.modules),
+          wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
+        ]),
+      ])
+  }
 }
 
 fn field(label: String, controls: List(Element(Msg))) -> Element(Msg) {
@@ -341,12 +357,15 @@ fn notice(text: Option(String)) -> Element(Msg) {
 /// one-click flow draw the same dialog, so a plan reads the same wherever it
 /// is confirmed.
 ///
+/// `modules` is the module pattern text the operator has typed in the plan
+/// form, which a stack profile's "trace calls instead" control sends.
+///
 /// ## Examples
 ///
 /// ```gleam
-/// probes.plan_dialog(card)
+/// probes.plan_dialog(card, "")
 /// ```
-pub fn plan_dialog(card: PlanCard) -> Element(Msg) {
+pub fn plan_dialog(card: PlanCard, modules: String) -> Element(Msg) {
   let scope = policy.plan_scope(card.plan)
   let estimate = policy.plan_estimate(card.plan)
   let needs =
@@ -371,6 +390,7 @@ pub fn plan_dialog(card: PlanCard) -> Element(Msg) {
         list.flatten([
           scope_rows(card, scope),
           sampling_rows(card),
+          trace_rows(card),
           [
             html.dt([], [element.text("Action")]),
             html.dd([], [element.text(what_action(card.what))]),
@@ -395,7 +415,7 @@ pub fn plan_dialog(card: PlanCard) -> Element(Msg) {
           ],
         ]),
       ),
-      adjust_controls(card),
+      adjust_controls(card, modules),
       html.div([attribute.class("dialog-actions")], [
         html.button(
           [
@@ -436,7 +456,8 @@ fn scope_rows(card: PlanCard, scope: policy.PlanScope) -> List(Element(Msg)) {
   }
 
   let modules = case card.what {
-    model.ProbePlan(kind: policy.Sampling) -> ""
+    model.ProbePlan(kind: policy.Sampling)
+    | model.ProbePlan(kind: policy.SchedulingGc) -> ""
     model.ProbePlan(..) | model.GcPlan | model.MeasurePlan ->
       " · modules "
       <> list.fold(scope.modules, "", join_words)
@@ -502,16 +523,71 @@ fn sampling_rows(card: PlanCard) -> List(Element(Msg)) {
   }
 }
 
-// The duration and rate of a plan a profile button made, as buttons. Each is
-// a fixed request to plan the same processes again, so nothing the browser
-// sends names a duration or a rate; the current choices are marked.
-fn adjust_controls(card: PlanCard) -> Element(Msg) {
+// What a tracing probe will run, stated apart from the cost line: its window,
+// the budget of events it folds before it stops itself, and for an events
+// probe the thresholds it sets on the whole node.
+fn trace_rows(card: PlanCard) -> List(Element(Msg)) {
+  case policy.plan_command(card.plan) {
+    policy.StartProbe(spec: policy.ProbeSpec(kind: policy.CallTree, ..) as spec) -> [
+      html.dt([], [element.text("Window")]),
+      html.dd([attribute.class("num")], [
+        element.text(fmt.duration_ms(spec.duration_ms)),
+      ]),
+      html.dt([], [element.text("Event budget")]),
+      html.dd([attribute.class("num")], [
+        element.text(
+          "stops after "
+          <> fmt.count(policy.trace_event_budget)
+          <> " call and return events, or when the collector falls behind",
+        ),
+      ]),
+    ]
+    policy.StartProbe(
+      spec: policy.ProbeSpec(kind: policy.SchedulingGc, ..) as spec,
+    ) -> [
+      html.dt([], [element.text("Window")]),
+      html.dd([attribute.class("num")], [
+        element.text(fmt.duration_ms(spec.duration_ms)),
+      ]),
+      html.dt([], [element.text("Event budget")]),
+      html.dd([attribute.class("num")], [
+        element.text(
+          "stops after "
+          <> fmt.count(policy.trace_event_budget)
+          <> " scheduling and collection events; up to "
+          <> fmt.count(policy.timeline_slice_limit)
+          <> " slices are kept for the timeline",
+        ),
+      ]),
+      html.dt([], [element.text("Node-wide thresholds")]),
+      html.dd([attribute.class("num")], [
+        element.text(
+          "collections of "
+          <> int.to_string(policy.long_gc_ms)
+          <> " ms or more and timeslices of "
+          <> int.to_string(policy.long_schedule_ms)
+          <> " ms or more, of any process on the node; on a node older than "
+          <> "OTP 28 the probe runs without them",
+        ),
+      ]),
+    ]
+    _ -> []
+  }
+}
+
+// The controls of a plan a profile button made, as buttons. Each is a fixed
+// request to plan the same processes again, so nothing the browser sends names
+// a duration or a rate; the current choices are marked. A stack profile of few
+// enough processes also offers the call trace, which needs the modules to
+// trace: the field takes them and the button sends them as a request the
+// viewer checks again.
+fn adjust_controls(card: PlanCard, modules: String) -> Element(Msg) {
   case card.adjust {
     model.NotAdjustable -> element.none()
-    model.Adjustable(duration_ms:, rate_hz:) ->
+    model.AdjustStacks(duration_ms:, rate_hz:, processes:) ->
       html.div([attribute.class("dialog-adjust")], [
         html.span([attribute.class("field-label")], [element.text("Duration")]),
-        ..list.append(
+        ..list.flatten([
           list.map([msg.Seconds10, msg.Seconds30, msg.Seconds60], fn(choice) {
             adjust_button(
               int.to_string(msg.duration_ms(choice) / 1000) <> " s",
@@ -529,8 +605,49 @@ fn adjust_controls(card: PlanCard) -> Element(Msg) {
               )
             })
           ],
-        )
+          trace_instead(card.key, processes, modules),
+        ])
       ])
+    model.AdjustCalls(processes: _, duration_ms: _) ->
+      html.div([attribute.class("dialog-adjust")], [
+        adjust_button(
+          "Sample stacks instead",
+          Offered,
+          msg.SampleStacksInstead(card.key),
+        ),
+      ])
+  }
+}
+
+fn trace_instead(
+  plan: Key,
+  processes: Int,
+  modules: String,
+) -> List(Element(Msg)) {
+  case processes <= policy.target_limit(policy.CallTree) {
+    False -> []
+    True -> [
+      html.span([attribute.class("field-label")], [
+        element.text("Or trace calls of"),
+      ]),
+      html.input([
+        attribute.class("text mono"),
+        attribute.type_("text"),
+        attribute.placeholder("loom@runtime@keeper"),
+        attribute.value(modules),
+        attribute.aria("label", "Modules to trace"),
+        wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
+      ]),
+      html.button(
+        [
+          attribute.class("btn btn-small"),
+          attribute.type_("button"),
+          attribute.data("test-id", "trace-calls-instead"),
+          wire.click(msg.Ui(msg.SubmitTraceInstead(plan))),
+        ],
+        [element.text("Trace calls instead")],
+      ),
+    ]
   }
 }
 

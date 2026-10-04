@@ -49,7 +49,9 @@ import pickglass_core/unit.{type Unit}
 import pickglass_web/chart/svg_util
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
-import pickglass_web/model.{type CoverageGap, type Span, type Step, type Track}
+import pickglass_web/timeline_model.{
+  type CoverageGap, type Span, type Step, type Track,
+}
 
 const label_width: Int = 170
 
@@ -150,7 +152,7 @@ fn track_group(
   let y = index * row_height
 
   case track {
-    model.CounterTrack(label:, unit: u, steps:) ->
+    timeline_model.CounterTrack(label:, unit: u, steps:) ->
       svg.g([attribute.class("track")], [
         track_label(label, y),
         scale_label(steps, u, y),
@@ -158,7 +160,7 @@ fn track_group(
         ..counter_steps(steps, u, index, window, selected, on_select)
       ])
 
-    model.SpanTrack(label:, spans:) ->
+    timeline_model.SpanTrack(label:, spans:) ->
       svg.g([attribute.class("track")], [
         track_label(label, y),
         ..list.index_map(spans, fn(span, position) {
@@ -295,7 +297,7 @@ pub fn describe(tracks: List(Track), chosen: Key) -> Result(String, Nil) {
     let #(index, track) = entry
 
     case track {
-      model.CounterTrack(label:, unit: u, steps:) ->
+      timeline_model.CounterTrack(label:, unit: u, steps:) ->
         steps
         |> list.index_map(fn(step, position) { #(position, step) })
         |> list.find_map(fn(item) {
@@ -312,7 +314,7 @@ pub fn describe(tracks: List(Track), chosen: Key) -> Result(String, Nil) {
           }
         })
 
-      model.SpanTrack(label:, spans:) ->
+      timeline_model.SpanTrack(label:, spans:) ->
         spans
         |> list.index_map(fn(span, position) { #(position, span) })
         |> list.find_map(fn(item) {

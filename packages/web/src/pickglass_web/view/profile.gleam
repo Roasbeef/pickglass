@@ -43,6 +43,7 @@ import pickglass_core/analysis/transform.{type StepReport}
 import pickglass_core/layout/dag
 import pickglass_core/layout/flame
 import pickglass_core/profile
+import pickglass_core/profile/activity
 import pickglass_core/unit.{type Unit}
 import pickglass_web/chart/call_graph
 import pickglass_web/chart/flame as flame_chart
@@ -152,14 +153,142 @@ fn escape(text: String) -> String {
 pub fn view(data: ProfileModel, ui_state: UiState) -> Element(Msg) {
   let u = unit_of(data)
 
-  html.div([attribute.class("stack")], [
-    header(data),
-    chain_panel(data, ui_state, u),
-    html.section([attribute.class("panel tabbed")], [
-      tab_bar(data, ui_state),
-      html.div([attribute.class("panel-body")], [tab_body(data, ui_state, u)]),
-    ]),
-  ])
+  case all_waiting(data) {
+    // Not one sample caught a process on a scheduler, so there is nothing to
+    // draw. The page says so, and offers the samples it left out.
+    True ->
+      html.div([attribute.class("stack")], [
+        header(data),
+        activity_panel(data),
+      ])
+    False ->
+      html.div([attribute.class("stack")], [
+        header(data),
+        activity_panel(data),
+        chain_panel(data, ui_state, u),
+        html.section([attribute.class("panel tabbed")], [
+          tab_bar(data, ui_state),
+          html.div([attribute.class("panel-body")], [
+            tab_body(data, ui_state, u),
+          ]),
+        ]),
+      ])
+  }
+}
+
+/// Whether the page is showing running and runnable samples only and the
+/// profile has none: every sample was taken while its process waited.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.all_waiting(data)
+/// // -> True for a profile of idle processes
+/// ```
+pub fn all_waiting(data: ProfileModel) -> Bool {
+  case data.activity {
+    model.Statuses(inclusion: activity.OnSchedulerOnly, split:, ..) ->
+      split.on_scheduler == 0 && split.unstated == 0 && split.waiting > 0
+    model.Statuses(inclusion: activity.IncludeWaiting, ..) | model.NoStatuses ->
+      False
+  }
+}
+
+/// The coverage sentence that splits a sampled profile by what its processes
+/// were doing: the total, then how many samples were on a scheduler or ready
+/// to run and how many were waiting.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.split_text(activity.Split(412, 2596, 0))
+/// // -> "3,008 samples: 412 running/runnable, 2,596 waiting"
+/// ```
+pub fn split_text(split: activity.Split) -> String {
+  fmt.count(activity.split_total(split))
+  <> " samples: "
+  <> fmt.count(split.on_scheduler)
+  <> " running/runnable, "
+  <> fmt.count(split.waiting)
+  <> " waiting"
+  <> case split.unstated {
+    0 -> ""
+    count -> ", " <> fmt.count(count) <> " with no status recorded"
+  }
+}
+
+/// The sentence for a profile in which no sample caught a process on a
+/// scheduler.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_view.idle_text(Some(16))
+/// // -> "All 16 processes were waiting for messages for the whole window."
+/// ```
+pub fn idle_text(processes: Option(Int)) -> String {
+  case processes {
+    Some(1) -> "The process was waiting for a message for the whole window."
+    Some(count) ->
+      "All "
+      <> int.to_string(count)
+      <> " processes were waiting for messages for the whole window."
+    None -> "Every process was waiting for a message for the whole window."
+  }
+}
+
+// The split of the samples, and the one control that changes which are
+// drawn. A profile with no statuses has nothing to split and draws nothing.
+fn activity_panel(data: ProfileModel) -> Element(Msg) {
+  case data.activity {
+    model.NoStatuses -> element.none()
+    model.Statuses(inclusion:, split:, processes:) -> {
+      let #(shown, toggle_label, toggle_to) = case inclusion {
+        activity.OnSchedulerOnly -> #(
+          "Showing running and runnable samples only.",
+          "Include waiting samples (" <> fmt.count(split.waiting) <> ")",
+          activity.IncludeWaiting,
+        )
+        activity.IncludeWaiting -> #(
+          "Showing every sample, waiting ones included: the heaviest functions on an idle node are often waits.",
+          "Show running and runnable only",
+          activity.OnSchedulerOnly,
+        )
+      }
+
+      html.section(
+        [
+          attribute.class("panel activity"),
+          attribute.data("test-id", "activity-split"),
+        ],
+        [
+          html.p([attribute.class("activity-line")], [
+            element.text(split_text(split) <> ". " <> shown),
+          ]),
+          case all_waiting(data) {
+            True ->
+              html.p(
+                [
+                  attribute.class("notice"),
+                  attribute.role("status"),
+                  attribute.data("test-id", "all-waiting"),
+                ],
+                [element.text(idle_text(processes))],
+              )
+            False -> element.none()
+          },
+          html.button(
+            [
+              attribute.class("btn btn-small"),
+              attribute.type_("button"),
+              wire.click(msg.Ask(msg.ChooseSamples(toggle_to))),
+            ],
+            [element.text(toggle_label)],
+          ),
+        ],
+      )
+    }
+  }
 }
 
 fn unit_of(data: ProfileModel) -> Unit {
@@ -269,7 +398,14 @@ fn chain_panel(data: ProfileModel, ui_state: UiState, u: Unit) -> Element(Msg) {
   ui.plain_panel(title: "Filter chain", body: [
     html.ol([attribute.class("crumbs")], [
       html.li([attribute.class("crumb crumb-root")], [
-        html.span([attribute.class("crumb-name")], [element.text("all")]),
+        html.span([attribute.class("crumb-name")], [
+          element.text(case data.activity {
+            model.Statuses(inclusion: activity.OnSchedulerOnly, ..) ->
+              "running/runnable"
+            model.Statuses(inclusion: activity.IncludeWaiting, ..)
+            | model.NoStatuses -> "all"
+          }),
+        ]),
         html.span([attribute.class("crumb-total num")], [
           element.text(fmt.known(root_total(data), u)),
         ]),

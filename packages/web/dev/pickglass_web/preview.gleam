@@ -42,6 +42,7 @@ import pickglass_web/key
 import pickglass_web/model
 import pickglass_web/msg.{type Msg}
 import pickglass_web/page
+import pickglass_web/timeline_model
 import simplifile
 
 /// One file of the preview.
@@ -255,6 +256,18 @@ fn entries() -> List(Entry) {
       ]),
     ),
     Entry(
+      "timeline-traced.html",
+      "Timeline · traced",
+      "scheduling and collection slices, threshold events, call slices",
+      traced_timeline(fixture.timeline_traced()),
+    ),
+    Entry(
+      "timeline-overrun.html",
+      "Timeline · cut short",
+      "a recording the collector could not keep up with",
+      traced_timeline(fixture.timeline_overrun()),
+    ),
+    Entry(
       "compare.html",
       "Compare",
       "one blocking mismatch and a diff flame",
@@ -267,6 +280,13 @@ fn entries() -> List(Entry) {
       base(page.Audit),
     ),
   ]
+}
+
+// The timeline page with the tracing probes the fixture holds.
+fn traced_timeline(data: timeline_model.TimelineModel) -> Model {
+  let model = base(page.Timeline)
+
+  app.Model(..model, timeline: app.Ready(data))
 }
 
 fn owners_open() -> Model {

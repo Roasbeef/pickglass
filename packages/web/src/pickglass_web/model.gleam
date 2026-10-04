@@ -39,6 +39,7 @@ import pickglass_core/measure.{
 import pickglass_core/owner
 import pickglass_core/policy
 import pickglass_core/profile
+import pickglass_core/profile/activity
 import pickglass_core/provenance
 import pickglass_core/unit.{type Unit}
 import pickglass_web/key.{type Key}
@@ -643,14 +644,21 @@ pub type PlanWhat {
   MeasurePlan
 }
 
-/// Whether a plan can be made again for another duration and rate. Only the
-/// plans a profile button made can: they remember the processes they chose.
+/// Whether a plan can be made again by another method. Only the plans a
+/// profile button made can: they remember the processes they chose.
 pub type Adjust {
-  /// The plan was drafted by hand in the form.
+  /// The plan was drafted by hand in the form, or is not one a profile
+  /// button remakes.
   NotAdjustable
 
-  /// A profile button made it with this duration and requested rate.
-  Adjustable(duration_ms: Int, rate_hz: Int)
+  /// A profile button made a stack probe with this duration and requested
+  /// rate over this many processes. It can be remade for another duration or
+  /// rate, and as a call trace when the processes are few enough.
+  AdjustStacks(duration_ms: Int, rate_hz: Int, processes: Int)
+
+  /// A profile button made a call trace over this many processes. It can be
+  /// remade as a stack probe.
+  AdjustCalls(duration_ms: Int, processes: Int)
 }
 
 /// A plan waiting for confirmation.
@@ -675,15 +683,26 @@ pub type PlanCard {
   )
 }
 
-/// A profile that has finished, for the link that opens it.
+/// The page a finished probe's result is read on.
+pub type ReadyPage {
+  /// A profile of stacks or traced calls.
+  OpensProfile
+
+  /// A scheduling and collection timeline.
+  OpensTimeline
+}
+
+/// A probe that has finished, for the link that opens its result.
 pub type ReadyProfile {
   ReadyProfile(
     /// The probe's id.
     probe: String,
     /// How long ago it finished, in milliseconds.
     age_ms: Int,
-    /// What it holds, in a sentence: samples and rate.
+    /// What it holds, in a sentence: samples and rate, or processes traced.
     summary: String,
+    /// The page that shows it.
+    opens: ReadyPage,
   )
 }
 
@@ -693,9 +712,9 @@ pub type FlowModel {
   FlowModel(
     /// A plan waiting for confirmation.
     pending: Option(PlanCard),
-    /// Stack probes running, with the time each has left.
+    /// Probes running, with the time each has left.
     running: List(ActiveProbe),
-    /// The newest finished stack profile, while it is recent.
+    /// The newest finished probe that has a result, while it is recent.
     ready: Option(ReadyProfile),
     /// Why the last profile button planned nothing, when it did not: an
     /// owner with no live process, a full pin table, a refusal by the gate.
@@ -768,11 +787,35 @@ pub type ProfileModel {
     chain: List(transform.StepReport),
     /// The views that need call stacks, or the reason there are none.
     stacks: Stacks,
+    /// What the profile's process statuses say, and which samples the page
+    /// is showing.
+    activity: ActivityView,
     /// The Top table.
     top: top.Table,
     /// What the operator asked to export and what became of each request,
     /// newest first.
     exports: List(ExportNote),
+  )
+}
+
+/// How the samples of a profile split by what their process was doing, and
+/// which of them the page draws.
+pub type ActivityView {
+  /// The profile carries no process status: it came from counters or traced
+  /// calls, or from a capture written before statuses were kept. Nothing is
+  /// filtered and nothing is said about waiting.
+  NoStatuses
+
+  /// The profile's samples carry a status. `split` counts every sample the
+  /// probe took, whichever are drawn, so the coverage line can state both.
+  /// `processes` is how many processes the probe sampled, when it says.
+  Statuses(
+    /// The samples the page draws.
+    inclusion: activity.Inclusion,
+    /// The whole profile's samples by activity.
+    split: activity.Split,
+    /// How many processes the probe sampled.
+    processes: Option(Int),
   )
 }
 
@@ -806,71 +849,6 @@ pub type Stacks {
   /// The source has no call stacks, so flame, icicle, graph and peek are not
   /// offered.
   NoStacks(source: profile.Source)
-}
-
-// ------------------------------------------------------------ timeline
-
-/// A stretch where evidence was lost.
-pub type CoverageGap {
-  CoverageGap(
-    /// Start, in milliseconds from the window start.
-    from_ms: Int,
-    /// End, in milliseconds from the window start.
-    to_ms: Int,
-    /// Events dropped inside the gap, when known.
-    dropped: Measurement,
-    /// Why it was lost.
-    reason: String,
-  )
-}
-
-/// A reading with the width of time it stands for.
-pub type Step {
-  Step(
-    /// When the reading was taken, in milliseconds from the window start.
-    at_ms: Int,
-    /// How long it stands for: the sampling interval.
-    width_ms: Int,
-    /// The reading.
-    value: Measurement,
-  )
-}
-
-/// A span of an operation.
-pub type Span {
-  Span(
-    /// Start, in milliseconds from the window start.
-    at_ms: Int,
-    /// Length in milliseconds.
-    length_ms: Int,
-    /// The operation name.
-    label: String,
-  )
-}
-
-/// A row of the timeline.
-pub type Track {
-  /// A polled counter, drawn as steps and never interpolated.
-  CounterTrack(label: String, unit: Unit, steps: List(Step))
-
-  /// Operation spans reported by the host.
-  SpanTrack(label: String, spans: List(Span))
-}
-
-/// The timeline page.
-pub type TimelineModel {
-  TimelineModel(
-    /// Where the timeline came from.
-    info: PanelInfo,
-    /// The window length in milliseconds.
-    window_ms: Int,
-    /// The clock the tracks share and its error.
-    clock_note: String,
-    /// The tracks.
-    tracks: List(Track),
-    /// Where evidence was dropped.
-    gaps: List(CoverageGap),
-  )
 }
 
 // ------------------------------------------------------------ compare

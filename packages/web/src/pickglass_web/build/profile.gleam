@@ -10,6 +10,14 @@
 //// why instead of drawing an empty picture, and the Top table is still
 //// built, because function totals need no stacks.
 ////
+//// A profile of sampled stacks is first cut to the samples the operator asked
+//// to see (`profile/activity`): by default those taken while a process was
+//// running or runnable, since on an idle node most samples find processes
+//// waiting in `receive` and the heaviest functions are then the waits. The
+//// cut is made before the chain, so every total, percentage and layout below
+//// describes the samples drawn, and the model still carries the split of the
+//// whole profile so the page can state both.
+////
 //// The module is pure and lives in `src` so the viewer can build the page
 //// from a profile it measured; the preview's fixture builds its profile the
 //// same way by hand.
@@ -21,7 +29,7 @@
 ////   step that broke the chain.
 
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{type Option, None}
 import gleam/result
 import pickglass_core/analysis/graph
 import pickglass_core/analysis/peek
@@ -30,6 +38,7 @@ import pickglass_core/analysis/transform
 import pickglass_core/layout/dag
 import pickglass_core/layout/flame
 import pickglass_core/profile.{type Column, type Profile}
+import pickglass_core/profile/activity
 import pickglass_web/model
 
 /// Why the model could not be built.
@@ -44,7 +53,8 @@ pub type Failure {
   GraphRefused(graph.BuildError)
 }
 
-/// Build the page's model of `base` after `chain`, drawn from `column`.
+/// Build the page's model of `base` after `chain`, drawn from `column`, with
+/// every sample included.
 ///
 /// ## Examples
 ///
@@ -58,8 +68,46 @@ pub fn build(
   chain: List(transform.Step),
   exports: List(model.ExportNote),
 ) -> Result(model.ProfileModel, Failure) {
+  build_with(
+    header,
+    base,
+    column,
+    activity.IncludeWaiting,
+    None,
+    chain,
+    exports,
+  )
+}
+
+/// Build the page's model drawing only the samples `inclusion` admits.
+/// `processes` is how many processes the probe sampled, for the sentence the
+/// page writes when none of them was running.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_page.build_with(
+///   header,
+///   base,
+///   column,
+///   activity.OnSchedulerOnly,
+///   Some(16),
+///   [],
+///   [],
+/// )
+/// ```
+pub fn build_with(
+  header: model.ProfileHeader,
+  base: Profile,
+  column: Column,
+  inclusion: activity.Inclusion,
+  processes: Option(Int),
+  chain: List(transform.Step),
+  exports: List(model.ExportNote),
+) -> Result(model.ProfileModel, Failure) {
   use applied <- result.try(
-    transform.apply(base, chain, column) |> result.map_error(ChainRefused),
+    transform.apply(activity.restrict(base, inclusion), chain, column)
+    |> result.map_error(ChainRefused),
   )
   use table <- result.try(
     top.table(applied.profile, None, top.Sort(column:, key: top.ByFlat))
@@ -76,6 +124,15 @@ pub fn build(
     column:,
     chain: applied.reports,
     stacks:,
+    activity: case activity.has_status(base) {
+      True ->
+        model.Statuses(
+          inclusion:,
+          split: activity.split(base, column),
+          processes:,
+        )
+      False -> model.NoStatuses
+    },
     top: table,
     exports:,
   ))

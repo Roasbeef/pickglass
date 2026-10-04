@@ -450,6 +450,11 @@ fn diff_panel(
           ),
         ]),
         legend(blocking),
+        ui.note(
+          "Compared on the samples taken while a process was running or "
+          <> "runnable; samples taken while one waited are left out of both "
+          <> "sides, as the Profile page leaves them out by default.",
+        ),
       ])
     }
   }

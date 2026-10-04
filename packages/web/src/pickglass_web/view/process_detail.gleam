@@ -40,14 +40,17 @@ import pickglass_web/page.{type Links}
 import pickglass_web/view/ui
 import pickglass_web/wire
 
-/// Draw the process detail page for a principal holding `grants`.
+/// Draw the process detail page for a principal holding `grants`. `modules`
+/// is the module pattern text the operator has typed in the plan form, which
+/// the call trace button sends.
 pub fn view(
   data: ProcessDetailModel,
   grants: List(Capability),
   links: Links,
+  modules: String,
 ) -> Element(Msg) {
   html.div([attribute.class("stack")], [
-    header(data, grants),
+    header(data, grants, modules),
     html.div([attribute.class("grid two")], [
       ownership_panel(data, links),
       evidence_panel(data),
@@ -65,7 +68,11 @@ pub fn view(
   ])
 }
 
-fn header(data: ProcessDetailModel, grants: List(Capability)) -> Element(Msg) {
+fn header(
+  data: ProcessDetailModel,
+  grants: List(Capability),
+  modules: String,
+) -> Element(Msg) {
   let life = case data.liveness {
     model.Alive -> ui.badge("ok", "alive")
     model.Exited(at:) -> ui.badge("warn", "exited " <> at)
@@ -85,7 +92,7 @@ fn header(data: ProcessDetailModel, grants: List(Capability)) -> Element(Msg) {
       life,
       pin,
     ]),
-    html.div([attribute.class("actions")], actions(data, grants)),
+    html.div([attribute.class("actions")], actions(data, grants, modules)),
   ])
 }
 
@@ -94,6 +101,7 @@ fn header(data: ProcessDetailModel, grants: List(Capability)) -> Element(Msg) {
 fn actions(
   data: ProcessDetailModel,
   grants: List(Capability),
+  modules: String,
 ) -> List(Element(Msg)) {
   let pin_button = case data.pin {
     model.NotPinned -> button("Pin", "btn", msg.Ask(msg.RequestPin(data.key)))
@@ -139,7 +147,39 @@ fn actions(
     ),
   ]
 
-  [pin_button, ..list.flatten([profile, probe, gc, summary])]
+  [
+    pin_button,
+    ..list.flatten([profile, tracing(data, grants, modules), probe, gc, summary])
+  ]
+}
+
+// The two probes that watch one process more closely than a stack profile.
+// Each pins the process when it is not pinned and ends in a plan that waits
+// for Confirm. A recording needs nothing more; a call trace names the modules
+// whose functions to trace, because the agent will not trace every function of
+// a node, so it has a field for them.
+fn tracing(
+  data: ProcessDetailModel,
+  grants: List(Capability),
+  modules: String,
+) -> List(Element(Msg)) {
+  case list.contains(grants, policy.Profile) {
+    False -> []
+    True -> [
+      button("Record scheduling…", "btn", msg.Ask(msg.RecordProcess(data.key))),
+      html.span([attribute.class("inline-form")], [
+        html.input([
+          attribute.class("text mono"),
+          attribute.type_("text"),
+          attribute.placeholder("modules to trace, such as loom@runtime@keeper"),
+          attribute.aria("label", "Modules to trace"),
+          attribute.value(modules),
+          wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
+        ]),
+        button("Trace calls…", "btn", msg.Ui(msg.SubmitTraceProcess(data.key))),
+      ]),
+    ]
+  }
 }
 
 fn button(label: String, class: String, message: Msg) -> Element(Msg) {

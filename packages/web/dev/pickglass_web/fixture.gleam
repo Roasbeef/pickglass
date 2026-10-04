@@ -45,11 +45,13 @@ import pickglass_core/unit
 import pickglass_web/app
 import pickglass_web/census/owners as owners_builder
 import pickglass_web/fixture/stacks
+import pickglass_web/fixture/traced
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/page.{type Links, type Page}
+import pickglass_web/timeline_model
 import pickglass_web/view/overview as overview_view
 
 // ------------------------------------------------------------ helpers
@@ -1060,15 +1062,32 @@ fn live_pin() -> Result(identity.LivePin, Nil) {
 }
 
 fn plan_card() -> Option(model.PlanCard) {
+  plan_card_of(policy.Counters, ["loom@runtime@keeper"], 30_000)
+}
+
+/// A plan card for a probe of any kind over the keeper, for the dialog's
+/// tests: the same plan the Probes page draws, with the kind, modules and
+/// duration given.
+///
+/// ## Examples
+///
+/// ```gleam
+/// fixture.plan_card_of(policy.CallTree, ["lists"], 5000)
+/// ```
+pub fn plan_card_of(
+  kind: policy.ProbeKind,
+  modules: List(String),
+  duration_ms: Int,
+) -> Option(model.PlanCard) {
   let planned = {
     use pin <- result.try(live_pin())
 
     let spec =
       policy.ProbeSpec(
-        kind: policy.Counters,
+        kind:,
         targets: [identity.live_token(pin)],
-        modules: ["loom@runtime@keeper"],
-        duration_ms: 30_000,
+        modules:,
+        duration_ms:,
         rate_hz: 0,
       )
 
@@ -1088,7 +1107,7 @@ fn plan_card() -> Option(model.PlanCard) {
     Ok(plan) ->
       Some(model.PlanCard(
         key: key.make("plan.1"),
-        what: model.ProbePlan(policy.Counters),
+        what: model.ProbePlan(kind),
         plan:,
         matched: Known(23),
         target_labels: ["<0.4411.0> session s-12 / restart_keeper (pin p-17)"],
@@ -1158,7 +1177,11 @@ fn profile_plan_card() -> Option(model.PlanCard) {
           "<0.4413.0> session s-12 / worker",
         ],
         chosen: "3 of 3 processes of session s-12, the busiest by reductions/s",
-        adjust: model.Adjustable(duration_ms: 10_000, rate_hz: 100),
+        adjust: model.AdjustStacks(
+          duration_ms: 10_000,
+          rate_hz: 100,
+          processes: 2,
+        ),
       ))
     Error(Nil) -> None
   }
@@ -1180,6 +1203,7 @@ pub fn flow() -> model.FlowModel {
       probe: "p-40",
       age_ms: 12_000,
       summary: "1,840 samples at 100 Hz",
+      opens: model.OpensProfile,
     )),
     refused: None,
   )
@@ -1324,6 +1348,7 @@ pub fn profile() -> Result(model.ProfileModel, String) {
       column:,
       chain: applied.reports,
       stacks: model.HasStacks(layout:, graph: call_graph, dag: placed, peeks:),
+      activity: model.NoStatuses,
       top: table,
       exports: [],
     ),
@@ -1332,17 +1357,20 @@ pub fn profile() -> Result(model.ProfileModel, String) {
 
 // ------------------------------------------------------------ timeline
 
-fn steps(values: List(Measurement), width_ms: Int) -> List(model.Step) {
+fn steps(
+  values: List(Measurement),
+  width_ms: Int,
+) -> List(timeline_model.Step) {
   list.index_map(values, fn(value, index) {
-    model.Step(at_ms: index * width_ms, width_ms:, value:)
+    timeline_model.Step(at_ms: index * width_ms, width_ms:, value:)
   })
 }
 
 /// The timeline page's data: scheduler counters polled at two seconds, a heap
 /// counter polled at ten, spans from the host and a gap where the collector
 /// went over budget.
-pub fn timeline() -> model.TimelineModel {
-  model.TimelineModel(
+pub fn timeline() -> timeline_model.TimelineModel {
+  timeline_model.TimelineModel(
     info: model.PanelInfo(
       ..info(
         "agent rings",
@@ -1356,7 +1384,7 @@ pub fn timeline() -> model.TimelineModel {
     window_ms: 60_000,
     clock_note: "agent monotonic clock, viewer readings ±0.4 ms",
     tracks: [
-      model.CounterTrack(
+      timeline_model.CounterTrack(
         label: "scheduler util",
         unit: unit.Ratio(per: 10_000),
         steps: steps(
@@ -1398,7 +1426,7 @@ pub fn timeline() -> model.TimelineModel {
           2000,
         ),
       ),
-      model.CounterTrack(
+      timeline_model.CounterTrack(
         label: "run queue",
         unit: unit.Count,
         steps: steps(
@@ -1437,27 +1465,60 @@ pub fn timeline() -> model.TimelineModel {
           2000,
         ),
       ),
-      model.CounterTrack(
+      timeline_model.CounterTrack(
         label: "s-12 keeper heap",
         unit: unit.Bytes,
         steps: steps(scale_mib(counts([5, 7, 181, 181, 181, 181])), 10_000),
       ),
-      model.SpanTrack(label: "s-12 operations", spans: [
-        model.Span(at_ms: 1000, length_ms: 6000, label: "provider call"),
-        model.Span(at_ms: 8200, length_ms: 2300, label: "tool exec"),
-        model.Span(at_ms: 14_000, length_ms: 9000, label: "provider call"),
-        model.Span(at_ms: 26_000, length_ms: 1500, label: "tool exec"),
-        model.Span(at_ms: 41_000, length_ms: 12_000, label: "provider call"),
+      timeline_model.SpanTrack(label: "s-12 operations", spans: [
+        timeline_model.Span(
+          at_ms: 1000,
+          length_ms: 6000,
+          label: "provider call",
+        ),
+        timeline_model.Span(at_ms: 8200, length_ms: 2300, label: "tool exec"),
+        timeline_model.Span(
+          at_ms: 14_000,
+          length_ms: 9000,
+          label: "provider call",
+        ),
+        timeline_model.Span(at_ms: 26_000, length_ms: 1500, label: "tool exec"),
+        timeline_model.Span(
+          at_ms: 41_000,
+          length_ms: 12_000,
+          label: "provider call",
+        ),
       ]),
     ],
     gaps: [
-      model.CoverageGap(
+      timeline_model.CoverageGap(
         from_ms: 42_000,
         to_ms: 46_000,
         dropped: Known(1204),
         reason: "collector over its event budget",
       ),
     ],
+    events: None,
+    calls: None,
+  )
+}
+
+/// The timeline with a scheduling and collection probe and a call tree
+/// probe drawn below the polled tracks.
+pub fn timeline_traced() -> timeline_model.TimelineModel {
+  timeline_model.TimelineModel(
+    ..timeline(),
+    events: Some(traced.events()),
+    calls: Some(traced.calls()),
+  )
+}
+
+/// The timeline with a scheduling probe that stopped before its window did.
+pub fn timeline_overrun() -> timeline_model.TimelineModel {
+  timeline_model.TimelineModel(
+    ..timeline(),
+    events: Some(traced.events_overrun()),
+    calls: None,
   )
 }
 

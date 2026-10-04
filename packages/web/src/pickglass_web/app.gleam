@@ -42,6 +42,7 @@ import pickglass_web/model
 import pickglass_web/msg.{type Feed, type Msg, type Request}
 import pickglass_web/page.{type Links, type Page}
 import pickglass_web/state.{type UiState}
+import pickglass_web/timeline_model
 import pickglass_web/view/audit
 import pickglass_web/view/compare
 import pickglass_web/view/flow
@@ -109,7 +110,7 @@ pub type Model {
     /// The profile data.
     profile: Loadable(model.ProfileModel),
     /// The timeline data.
-    timeline: Loadable(model.TimelineModel),
+    timeline: Loadable(timeline_model.TimelineModel),
     /// The compare data.
     compare: Loadable(model.CompareModel),
     /// The capture files offered on the compare page.
@@ -273,10 +274,28 @@ fn ui_event(
 
     msg.Search(text) -> with_ui(model, state.UiState(..current, search: text))
 
+    // A kind of probe runs for some durations and not others, so a duration
+    // the new kind cannot run is replaced by its shortest.
     msg.DraftKind(kind) ->
       with_ui(
         model,
-        state.UiState(..current, plan: state.PlanDraft(..current.plan, kind:)),
+        state.UiState(
+          ..current,
+          plan: state.PlanDraft(
+            ..current.plan,
+            kind:,
+            duration: case
+              list.contains(msg.durations_for(kind), current.plan.duration)
+            {
+              True -> current.plan.duration
+              False ->
+                case msg.durations_for(kind) {
+                  [shortest, ..] -> shortest
+                  [] -> current.plan.duration
+                }
+            },
+          ),
+        ),
       )
 
     msg.DraftModules(text) ->
@@ -312,6 +331,16 @@ fn ui_event(
 
     msg.SubmitDraft -> submit_draft(on_request, model)
 
+    msg.SubmitTraceInstead(plan) ->
+      with_modules(model, fn(modules) {
+        ask(on_request, model, msg.TraceCallsInstead(plan, modules))
+      })
+
+    msg.SubmitTraceProcess(process) ->
+      with_modules(model, fn(modules) {
+        ask(on_request, model, msg.TraceProcess(process, modules))
+      })
+
     msg.FilterKindChosen(kind) ->
       with_ui(
         model,
@@ -342,40 +371,63 @@ fn toggle(rows: set.Set(Key), row: Key) -> set.Set(Key) {
 }
 
 // The plan form becomes a request only when it names a target the page
-// offered and module patterns that pass the pattern alphabet. The duration
-// and kind are closed types already.
+// offered and, for a kind of probe that traces named modules, module patterns
+// that pass the pattern alphabet. The duration and kind are closed types
+// already. A stack or events probe names no modules, so whatever is typed in
+// the field is not sent with it.
 fn submit_draft(
   on_request: fn(Request) -> Effect(Msg),
   model: Model,
 ) -> #(Model, Effect(Msg)) {
   let draft = model.ui.plan
 
-  case draft.target, wire.module_patterns(draft.modules) {
-    None, _ -> refuse(model, "Choose a target process first.")
+  case draft.target {
+    None -> refuse(model, "Choose a target process first.")
 
-    Some(_), Error(wire.NoPatterns) ->
+    Some(target) ->
+      case policy.needs_modules(draft.kind) {
+        False -> ask(on_request, model, plan_draft(draft, target, []))
+        True ->
+          with_modules(model, fn(modules) {
+            ask(on_request, model, plan_draft(draft, target, modules))
+          })
+      }
+  }
+}
+
+fn plan_draft(
+  draft: state.PlanDraft,
+  target: Key,
+  modules: List(String),
+) -> Request {
+  msg.PlanProbe(msg.ProbeDraft(
+    kind: draft.kind,
+    targets: [target],
+    modules:,
+    duration: draft.duration,
+  ))
+}
+
+// Run a request that needs module patterns with the ones typed in the plan
+// form, or say what is wrong with them.
+fn with_modules(
+  model: Model,
+  next: fn(List(String)) -> #(Model, Effect(Msg)),
+) -> #(Model, Effect(Msg)) {
+  case wire.module_patterns(model.ui.plan.modules) {
+    Ok(modules) -> next(modules)
+
+    Error(wire.NoPatterns) ->
       refuse(model, "Enter at least one module pattern.")
 
-    Some(_), Error(wire.TooManyPatterns) ->
+    Error(wire.TooManyPatterns) ->
       refuse(model, "Too many module patterns for one probe.")
 
-    Some(_), Error(wire.BadPattern(text:)) ->
+    Error(wire.BadPattern(text:)) ->
       refuse(
         model,
         "Module patterns use letters, digits, _, @ and * only; refused: "
           <> text,
-      )
-
-    Some(target), Ok(modules) ->
-      ask(
-        on_request,
-        model,
-        msg.PlanProbe(msg.ProbeDraft(
-          kind: draft.kind,
-          targets: [target],
-          modules:,
-          duration: draft.duration,
-        )),
       )
   }
 }
@@ -455,8 +507,15 @@ pub fn describe(request: Request) -> String {
     msg.ProfileBusiest -> "plan a profile of the busiest processes"
     msg.ProfileProcess(_) -> "plan a profile of this process"
     msg.AdjustProfile(..) -> "plan the profile again with another setting"
+    msg.TraceCallsInstead(..) -> "plan a call trace of the same processes"
+    msg.SampleStacksInstead(_) -> "plan a stack profile of the same processes"
+    msg.TraceProcess(..) -> "plan a call trace of this process"
+    msg.RecordProcess(_) -> "plan a scheduling and collection recording"
+    msg.RecordOwner(_) -> "plan a scheduling recording of this owner"
     msg.TruncateChain(_) -> "remove filter steps"
+    msg.ChooseSamples(_) -> "change which samples the profile draws"
     msg.ExportProfile(_) -> "export the profile"
+    msg.ExportTrace(_) -> "export the timeline"
   }
 
   "Requested: " <> what <> ". The viewer decides whether to allow it."
@@ -507,14 +566,35 @@ fn check_request(model: Model, request: Request) -> Result(Nil, String) {
       )
     msg.AdjustProfile(plan:, ..) ->
       require(plan_known(model, plan), "That plan is not the one shown.")
+    msg.TraceCallsInstead(plan:, ..) ->
+      require(plan_known(model, plan), "That plan is not the one shown.")
+    msg.SampleStacksInstead(plan) ->
+      require(plan_known(model, plan), "That plan is not the one shown.")
+    msg.TraceProcess(process:, ..) ->
+      require(
+        process_known(model, process),
+        "That process is not on this page.",
+      )
+    msg.RecordProcess(process) ->
+      require(
+        process_known(model, process),
+        "That process is not on this page.",
+      )
+    msg.RecordOwner(owner) ->
+      require(
+        bool_presence(owner_key_known(model, owner)),
+        "That owner is not on this page.",
+      )
     msg.AddFilterAt(kind:, frame:) -> check_filter_at(model, kind, frame)
     msg.TruncateChain(from:) -> check_chain_index(model, from)
+    msg.ChooseSamples(_) -> Ok(Nil)
     msg.TakeCheckpoint -> Ok(Nil)
     msg.SaveCapture -> Ok(Nil)
     msg.SortProcesses(_) -> Ok(Nil)
     msg.MovePage(_) -> Ok(Nil)
     msg.AddFilter(..) -> Ok(Nil)
     msg.ExportProfile(_) -> Ok(Nil)
+    msg.ExportTrace(_) -> Ok(Nil)
   }
 }
 
@@ -798,7 +878,7 @@ fn toast(ui_state: UiState) -> Element(Msg) {
 // The one-click profile above the page body, once the viewer has fed it.
 fn flow_view(model: Model) -> Element(Msg) {
   case model.flow {
-    Ready(data) -> flow.view(data, model.links, model.page)
+    Ready(data) -> flow.view(data, model.links, model.page, model.ui)
     Waiting -> element.none()
   }
 }
@@ -833,7 +913,12 @@ fn page_body(model: Model) -> Element(Msg) {
       })
     page.ProcessDetail ->
       loaded("Process", model.process_detail, fn(data) {
-        process_detail.view(data, grants(model), model.links)
+        process_detail.view(
+          data,
+          grants(model),
+          model.links,
+          model.ui.plan.modules,
+        )
       })
     page.Memory -> loaded("Memory", model.memory, memory.view)
     page.Supervision ->
