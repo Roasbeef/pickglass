@@ -170,7 +170,7 @@ ebin_dir() -> get(ebin).
 beams(Ebin) ->
     put(ebin, Ebin),
     [{list_to_atom(filename:basename(F, ".beam")), F}
-     || F <- filelib:wildcard(filename:join(Ebin, "*.beam")),
+     || F <- filelib:wildcard(filename:join(Ebin, "pickglass_agent@*.beam")),
         filename:basename(F) =/= "pickglass_agent@@main.beam"].
 
 push(Target, Beams) ->
