@@ -80,6 +80,25 @@ pub type Reply {
     max_samples: Int,
   )
   StacksReport(StacksSnapshot)
+  CalltraceStarted(
+    probe_id: Int,
+    targets: Int,
+    matched_functions: Int,
+    duration_ms: Int,
+    max_events: Int,
+    timeline_limit: Int,
+  )
+  CalltraceReport(CalltraceSnapshot)
+  EventsStarted(
+    probe_id: Int,
+    targets: Int,
+    duration_ms: Int,
+    max_events: Int,
+    slice_limit: Int,
+    long_gc_ms: Int,
+    long_schedule_ms: Int,
+  )
+  EventsReport(EventsSnapshot)
   Detached(reason: String)
   Refused(code: String, detail: String)
 }
@@ -551,6 +570,172 @@ pub type StacksSnapshot {
   )
 }
 
+/// Why a call tree or an events probe stopped, or that it has not. The agent
+/// stops a probe itself at its window, at its event budget, and when the
+/// mailbox of its tracer grows past the limit (`TraceOverrun`): a traced
+/// process produces events faster than the tracer can fold them, and the
+/// probe ends instead of letting the backlog grow.
+pub type TraceStop {
+  TraceRunning
+  TraceDeadline
+  TraceBudget
+  TraceOverrun
+  TraceTargetsGone
+  TraceStopped
+}
+
+/// What an event probe measured about its own run. `events` were folded into
+/// the result and `max_events` is the budget. `dropped_events` arrived after
+/// the probe stopped and were discarded unread; `in_flight_at_stop` were
+/// already queued at the moment it stopped, so the two normally agree, and
+/// `dropped_events` is larger by the few that were sent while the stream was
+/// being cut. `peak_queue` is the longest tracer mailbox seen, against
+/// `queue_limit`.
+pub type TraceMeter {
+  TraceMeter(
+    elapsed_ms: Int,
+    events: Int,
+    max_events: Int,
+    dropped_events: Int,
+    in_flight_at_stop: Int,
+    peak_queue: Int,
+    queue_limit: Int,
+    targets_gone: Int,
+  )
+}
+
+/// A call tree probe's meter: the shared one, and what the call paths leave
+/// out. `forced_closes` frames were still open when the probe stopped and were
+/// closed at the latest timestamp seen. `dropped_calls` were on a path past
+/// the path table's bound, `elided_calls` were deeper than `depth_limit`, and
+/// `strays` were events the tree could not use.
+pub type CalltraceMeter {
+  CalltraceMeter(
+    trace: TraceMeter,
+    forced_closes: Int,
+    distinct_paths: Int,
+    dropped_calls: Int,
+    elided_calls: Int,
+    strays: Int,
+    depth_limit: Int,
+  )
+}
+
+/// One call path with its totals. `frames` index the snapshot's frame table,
+/// leaf first, as a sampled stack's do. Times are traced time in nanoseconds,
+/// which includes any time the process was descheduled: `exclusive_ns` is
+/// `inclusive_ns` less what the path's callees took, and the exclusive times
+/// of all paths sum to the traced time.
+pub type CallPath {
+  CallPath(calls: Int, inclusive_ns: Int, exclusive_ns: Int, frames: List(Int))
+}
+
+/// One closed call, for a timeline. `process` indexes the snapshot's
+/// `processes`, `frame` its frame table, and `start_ns` counts from the
+/// tracer's start.
+pub type CallSlice {
+  CallSlice(
+    process: Int,
+    frame: Int,
+    start_ns: Int,
+    duration_ns: Int,
+    depth: Int,
+  )
+}
+
+/// The answer to `read_calltrace` and `stop_calltrace`. Frames have the shape
+/// of a sampled stack's and no location, so one reader serves both, and the
+/// method is always traced `call` with `return_to`, each call carrying its
+/// caller. Directly recursive calls more than one level deep read as two
+/// levels, and time outside the traced functions is not seen.
+pub type CalltraceSnapshot {
+  CalltraceSnapshot(
+    probe_id: Int,
+    state: ProbeState,
+    stop: TraceStop,
+    meter: CalltraceMeter,
+    frames: List(StackFrame),
+    paths: List(CallPath),
+    processes: List(String),
+    slices: List(CallSlice),
+  )
+}
+
+/// An events probe's meter: the shared one, and what its results leave out.
+/// `unpaired_events` had no start or end to pair with, `dropped_slices` were
+/// past the slice limit, `long_events_seen` counts every node-wide threshold
+/// event including those past the list's bound, and `strays` were events the
+/// record could not use. The two thresholds are the ones in force, in
+/// milliseconds, and zero is off.
+pub type EventsMeter {
+  EventsMeter(
+    trace: TraceMeter,
+    unpaired_events: Int,
+    dropped_slices: Int,
+    long_events_seen: Int,
+    strays: Int,
+    long_gc_ms: Int,
+    long_schedule_ms: Int,
+  )
+}
+
+/// One traced process's scheduling and collection totals. `run_ns` is time
+/// on a scheduler, the closest the BEAM comes to a per-process CPU time.
+pub type TracedProcess {
+  TracedProcess(
+    pid_text: String,
+    runs: Int,
+    run_ns: Int,
+    minor_gcs: Int,
+    major_gcs: Int,
+    gc_ns: Int,
+  )
+}
+
+/// What an events slice describes.
+pub type ActivityKind {
+  RunSlice
+  MinorGcSlice
+  MajorGcSlice
+}
+
+/// One run or collection, for a timeline. `process` indexes the snapshot's
+/// `processes`, and `start_ns` counts from the tracer's start.
+pub type ActivitySlice {
+  ActivitySlice(
+    process: Int,
+    kind: ActivityKind,
+    start_ns: Int,
+    duration_ns: Int,
+  )
+}
+
+/// A node-wide threshold event, as the VM reported it. It concerns any
+/// process, not only the traced ones.
+pub type LongEvent {
+  /// A collection that took `duration_ms` and left `heap_words` of heap.
+  LongGc(pid_text: String, duration_ms: Int, heap_words: Int)
+
+  /// A timeslice that lasted `duration_ms` and ended in `function`, which is
+  /// empty when the VM named none.
+  LongSchedule(pid_text: String, duration_ms: Int, function: String)
+}
+
+/// The answer to `read_events` and `stop_events`. `processes` are the traced
+/// processes in the order the request named them, with their totals, and
+/// `slices` are the first runs and collections to close.
+pub type EventsSnapshot {
+  EventsSnapshot(
+    probe_id: Int,
+    state: ProbeState,
+    stop: TraceStop,
+    meter: EventsMeter,
+    processes: List(TracedProcess),
+    slices: List(ActivitySlice),
+    long: List(LongEvent),
+  )
+}
+
 /// Decode a reply envelope.
 ///
 /// ## Examples
@@ -632,6 +817,10 @@ fn reply_decoder() -> Decoder(Reply) {
       ))
     }
     "stacks" -> stacks_decoder()
+    "calltrace_started" -> calltrace_started_decoder()
+    "calltrace" -> calltrace_decoder()
+    "events_started" -> events_started_decoder()
+    "events" -> events_decoder()
     "detached" -> {
       use reason <- decode.field(1, decode.string)
       decode.success(Detached(reason))
@@ -1390,6 +1579,264 @@ fn sampled_stack_decoder() -> Decoder(SampledStack) {
   decode.success(SampledStack(count:, status:, frames:))
 }
 
+// ------------------------------------------------------------------ traces
+
+fn trace_stop_decoder() -> Decoder(TraceStop) {
+  use code <- decode.then(decode.string)
+
+  case code {
+    "running" -> decode.success(TraceRunning)
+    "deadline" -> decode.success(TraceDeadline)
+    "event_budget" -> decode.success(TraceBudget)
+    "overrun" -> decode.success(TraceOverrun)
+    "targets_gone" -> decode.success(TraceTargetsGone)
+    "stopped" -> decode.success(TraceStopped)
+    _ -> decode.failure(TraceRunning, "a trace stop reason")
+  }
+}
+
+fn calltrace_started_decoder() -> Decoder(Reply) {
+  use probe_id <- decode.field(1, decode.int)
+  use targets <- decode.field(2, decode.int)
+  use matched_functions <- decode.field(3, decode.int)
+  use duration_ms <- decode.field(4, decode.int)
+  use max_events <- decode.field(5, decode.int)
+  use timeline_limit <- decode.field(6, decode.int)
+
+  decode.success(CalltraceStarted(
+    probe_id:,
+    targets:,
+    matched_functions:,
+    duration_ms:,
+    max_events:,
+    timeline_limit:,
+  ))
+}
+
+fn events_started_decoder() -> Decoder(Reply) {
+  use probe_id <- decode.field(1, decode.int)
+  use targets <- decode.field(2, decode.int)
+  use duration_ms <- decode.field(3, decode.int)
+  use max_events <- decode.field(4, decode.int)
+  use slice_limit <- decode.field(5, decode.int)
+  use long_gc_ms <- decode.field(6, decode.int)
+  use long_schedule_ms <- decode.field(7, decode.int)
+
+  decode.success(EventsStarted(
+    probe_id:,
+    targets:,
+    duration_ms:,
+    max_events:,
+    slice_limit:,
+    long_gc_ms:,
+    long_schedule_ms:,
+  ))
+}
+
+// The first nine fields of a meter, after its method, are the same for both
+// probes. They sit at positions 1 to 8 of the meter tuple.
+fn trace_meter_decoder() -> Decoder(TraceMeter) {
+  use elapsed_ms <- decode.field(1, decode.int)
+  use events <- decode.field(2, decode.int)
+  use max_events <- decode.field(3, decode.int)
+  use dropped_events <- decode.field(4, decode.int)
+  use in_flight_at_stop <- decode.field(5, decode.int)
+  use peak_queue <- decode.field(6, decode.int)
+  use queue_limit <- decode.field(7, decode.int)
+  use targets_gone <- decode.field(8, decode.int)
+
+  decode.success(TraceMeter(
+    elapsed_ms:,
+    events:,
+    max_events:,
+    dropped_events:,
+    in_flight_at_stop:,
+    peak_queue:,
+    queue_limit:,
+    targets_gone:,
+  ))
+}
+
+fn calltrace_decoder() -> Decoder(Reply) {
+  use probe_id <- decode.field(1, decode.int)
+  use state <- decode.field(2, probe_state_decoder())
+  use stop <- decode.field(3, trace_stop_decoder())
+  use meter <- decode.field(4, calltrace_meter_decoder())
+  use frames <- decode.field(5, decode.list(stack_frame_decoder()))
+  use paths <- decode.field(6, decode.list(call_path_decoder()))
+  use processes <- decode.subfield([7, 0], decode.list(decode.string))
+  use slices <- decode.subfield([7, 1], decode.list(call_slice_decoder()))
+
+  decode.success(
+    CalltraceReport(CalltraceSnapshot(
+      probe_id:,
+      state:,
+      stop:,
+      meter:,
+      frames:,
+      paths:,
+      processes:,
+      slices:,
+    )),
+  )
+}
+
+// The method is fixed: traced `call` with `return_to`. A reply naming another
+// method would need a different caveat on screen, so it is an error here.
+fn calltrace_meter_decoder() -> Decoder(CalltraceMeter) {
+  use method <- decode.field(0, decode.string)
+  use trace <- decode.then(trace_meter_decoder())
+  use forced_closes <- decode.field(9, decode.int)
+  use distinct_paths <- decode.field(10, decode.int)
+  use dropped_calls <- decode.field(11, decode.int)
+  use elided_calls <- decode.field(12, decode.int)
+  use strays <- decode.field(13, decode.int)
+  use depth_limit <- decode.field(14, decode.int)
+
+  let meter =
+    CalltraceMeter(
+      trace:,
+      forced_closes:,
+      distinct_paths:,
+      dropped_calls:,
+      elided_calls:,
+      strays:,
+      depth_limit:,
+    )
+
+  case method {
+    "traced_call_return_to" -> decode.success(meter)
+    _ -> decode.failure(meter, "the traced call method")
+  }
+}
+
+fn call_path_decoder() -> Decoder(CallPath) {
+  use calls <- decode.field(0, decode.int)
+  use inclusive_ns <- decode.field(1, decode.int)
+  use exclusive_ns <- decode.field(2, decode.int)
+  use frames <- decode.field(3, decode.list(decode.int))
+
+  decode.success(CallPath(calls:, inclusive_ns:, exclusive_ns:, frames:))
+}
+
+fn call_slice_decoder() -> Decoder(CallSlice) {
+  use process <- decode.field(0, decode.int)
+  use frame <- decode.field(1, decode.int)
+  use start_ns <- decode.field(2, decode.int)
+  use duration_ns <- decode.field(3, decode.int)
+  use depth <- decode.field(4, decode.int)
+
+  decode.success(CallSlice(process:, frame:, start_ns:, duration_ns:, depth:))
+}
+
+fn events_decoder() -> Decoder(Reply) {
+  use probe_id <- decode.field(1, decode.int)
+  use state <- decode.field(2, probe_state_decoder())
+  use stop <- decode.field(3, trace_stop_decoder())
+  use meter <- decode.field(4, events_meter_decoder())
+  use processes <- decode.field(5, decode.list(traced_process_decoder()))
+  use slices <- decode.field(6, decode.list(activity_slice_decoder()))
+  use long <- decode.field(7, decode.list(long_event_decoder()))
+
+  decode.success(
+    EventsReport(EventsSnapshot(
+      probe_id:,
+      state:,
+      stop:,
+      meter:,
+      processes:,
+      slices:,
+      long:,
+    )),
+  )
+}
+
+fn events_meter_decoder() -> Decoder(EventsMeter) {
+  use method <- decode.field(0, decode.string)
+  use trace <- decode.then(trace_meter_decoder())
+  use unpaired_events <- decode.field(9, decode.int)
+  use dropped_slices <- decode.field(10, decode.int)
+  use long_events_seen <- decode.field(11, decode.int)
+  use strays <- decode.field(12, decode.int)
+  use long_gc_ms <- decode.field(13, decode.int)
+  use long_schedule_ms <- decode.field(14, decode.int)
+
+  let meter =
+    EventsMeter(
+      trace:,
+      unpaired_events:,
+      dropped_slices:,
+      long_events_seen:,
+      strays:,
+      long_gc_ms:,
+      long_schedule_ms:,
+    )
+
+  case method {
+    "traced_running_gc" -> decode.success(meter)
+    _ -> decode.failure(meter, "the traced running method")
+  }
+}
+
+fn traced_process_decoder() -> Decoder(TracedProcess) {
+  use pid_text <- decode.field(0, decode.string)
+  use runs <- decode.field(1, decode.int)
+  use run_ns <- decode.field(2, decode.int)
+  use minor_gcs <- decode.field(3, decode.int)
+  use major_gcs <- decode.field(4, decode.int)
+  use gc_ns <- decode.field(5, decode.int)
+
+  decode.success(TracedProcess(
+    pid_text:,
+    runs:,
+    run_ns:,
+    minor_gcs:,
+    major_gcs:,
+    gc_ns:,
+  ))
+}
+
+fn activity_slice_decoder() -> Decoder(ActivitySlice) {
+  use process <- decode.field(0, decode.int)
+  use kind <- decode.field(1, activity_kind_decoder())
+  use start_ns <- decode.field(2, decode.int)
+  use duration_ns <- decode.field(3, decode.int)
+
+  decode.success(ActivitySlice(process:, kind:, start_ns:, duration_ns:))
+}
+
+fn activity_kind_decoder() -> Decoder(ActivityKind) {
+  use code <- decode.then(decode.string)
+
+  case code {
+    "run" -> decode.success(RunSlice)
+    "gc_minor" -> decode.success(MinorGcSlice)
+    "gc_major" -> decode.success(MajorGcSlice)
+    _ -> decode.failure(RunSlice, "a slice kind")
+  }
+}
+
+// `{<<"long_gc">>, Pid, Ms, HeapWords}` or
+// `{<<"long_schedule">>, Pid, Ms, Function}`: the fourth field depends on
+// the kind.
+fn long_event_decoder() -> Decoder(LongEvent) {
+  use kind <- decode.field(0, decode.string)
+  use pid_text <- decode.field(1, decode.string)
+  use duration_ms <- decode.field(2, decode.int)
+
+  case kind {
+    "long_gc" -> {
+      use heap_words <- decode.field(3, decode.int)
+      decode.success(LongGc(pid_text:, duration_ms:, heap_words:))
+    }
+    "long_schedule" -> {
+      use function <- decode.field(3, decode.string)
+      decode.success(LongSchedule(pid_text:, duration_ms:, function:))
+    }
+    _ -> decode.failure(LongGc("", 0, 0), "a threshold event kind")
+  }
+}
+
 // ---------------------------------------------------------------- requests
 
 /// What to do with scheduler wall time accounting.
@@ -1572,6 +2019,45 @@ pub type ExtendedRequest {
 
   /// Stop a stack probe and return its result.
   AskStopStacks(probe_id: Int)
+
+  /// A call tree probe over one to four pinned processes and one to eight
+  /// patterns, with the same pattern rules as a counters probe. The window is
+  /// 100 ms to 10 s, the event budget up to 200,000, and `timeline_limit`
+  /// is how many raw call slices to keep, 0 to 2,000. Values outside the
+  /// bounds are clamped, and the reply says what was settled on.
+  AskStartCalltrace(
+    tokens: List(PinToken),
+    patterns: List(CounterPattern),
+    duration_ms: Int,
+    max_events: Int,
+    timeline_limit: Int,
+  )
+
+  /// Read a running or finished call tree probe.
+  AskReadCalltrace(probe_id: Int)
+
+  /// Stop a call tree probe and return its result.
+  AskStopCalltrace(probe_id: Int)
+
+  /// A scheduling and collection probe over one to eight pinned processes.
+  /// The window is 100 ms to 60 s, the event budget up to 200,000,
+  /// `slice_limit` is 0 to 5,000, and a threshold of 0 is off. The two
+  /// thresholds are node-wide and exist on OTP 28 and later; a node without
+  /// them refuses the probe when one is set.
+  AskStartEvents(
+    tokens: List(PinToken),
+    duration_ms: Int,
+    max_events: Int,
+    slice_limit: Int,
+    long_gc_ms: Int,
+    long_schedule_ms: Int,
+  )
+
+  /// Read a running or finished events probe.
+  AskReadEvents(probe_id: Int)
+
+  /// Stop an events probe and return its result.
+  AskStopEvents(probe_id: Int)
 }
 
 /// Write an extended request as the envelope the agent reads, exactly as
@@ -1626,6 +2112,34 @@ fn extended_body(request: ExtendedRequest) -> Dynamic {
       ])
     AskReadStacks(id) -> tagged("read_stacks", [dynamic.int(id)])
     AskStopStacks(id) -> tagged("stop_stacks", [dynamic.int(id)])
+    AskStartCalltrace(tokens, patterns, duration_ms, max_events, timeline_limit) ->
+      tagged("start_calltrace", [
+        dynamic.list(list.map(tokens, token_term)),
+        dynamic.list(list.map(patterns, pattern_term)),
+        dynamic.int(duration_ms),
+        dynamic.int(max_events),
+        dynamic.int(timeline_limit),
+      ])
+    AskReadCalltrace(id) -> tagged("read_calltrace", [dynamic.int(id)])
+    AskStopCalltrace(id) -> tagged("stop_calltrace", [dynamic.int(id)])
+    AskStartEvents(
+      tokens,
+      duration_ms,
+      max_events,
+      slice_limit,
+      long_gc_ms,
+      long_schedule_ms,
+    ) ->
+      tagged("start_events", [
+        dynamic.list(list.map(tokens, token_term)),
+        dynamic.int(duration_ms),
+        dynamic.int(max_events),
+        dynamic.int(slice_limit),
+        dynamic.int(long_gc_ms),
+        dynamic.int(long_schedule_ms),
+      ])
+    AskReadEvents(id) -> tagged("read_events", [dynamic.int(id)])
+    AskStopEvents(id) -> tagged("stop_events", [dynamic.int(id)])
   }
 }
 

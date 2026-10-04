@@ -1362,3 +1362,528 @@ pub fn extended_requests_encode_to_the_agent_shape_test() {
       ]),
     )
 }
+
+// ----------------------------------------------------------------- traces
+
+fn trace_stop() -> Generator(#(wire.TraceStop, String)) {
+  gen.one_of(#(wire.TraceRunning, "running"), [
+    #(wire.TraceDeadline, "deadline"),
+    #(wire.TraceBudget, "event_budget"),
+    #(wire.TraceOverrun, "overrun"),
+    #(wire.TraceTargetsGone, "targets_gone"),
+    #(wire.TraceStopped, "stopped"),
+  ])
+}
+
+fn probe_state() -> Generator(wire.ProbeState) {
+  gen.one_of(wire.ProbeRunning, [wire.ProbeFinished, wire.ProbeStopped])
+}
+
+fn trace_meter() -> Generator(wire.TraceMeter) {
+  qcheck.map3(
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    fn(a, b, c) { wire.TraceMeter(a.0, a.1, a.2, b.0, b.1, b.2, c.0, c.1) },
+  )
+}
+
+fn encode_trace_meter(method: String, meter: wire.TraceMeter) -> List(Dynamic) {
+  [
+    text(method),
+    num(meter.elapsed_ms),
+    num(meter.events),
+    num(meter.max_events),
+    num(meter.dropped_events),
+    num(meter.in_flight_at_stop),
+    num(meter.peak_queue),
+    num(meter.queue_limit),
+    num(meter.targets_gone),
+  ]
+}
+
+fn calltrace_meter() -> Generator(wire.CalltraceMeter) {
+  qcheck.map3(
+    trace_meter(),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    fn(trace, a, b) { wire.CalltraceMeter(trace, a.0, a.1, a.2, b.0, b.1, b.2) },
+  )
+}
+
+fn call_path() -> Generator(wire.CallPath) {
+  qcheck.map3(
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    gen.small_list(gen.non_negative()),
+    gen.non_negative(),
+    fn(totals, frames, _) {
+      wire.CallPath(totals.0, totals.1, totals.2, frames)
+    },
+  )
+}
+
+fn call_slice() -> Generator(wire.CallSlice) {
+  qcheck.map2(
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    fn(a, b) { wire.CallSlice(a.0, a.1, a.2, b.0, b.1) },
+  )
+}
+
+fn encode_calltrace(snapshot: wire.CalltraceSnapshot, stop: String) -> Dynamic {
+  let meter = snapshot.meter
+
+  tuple([
+    text("calltrace"),
+    num(snapshot.probe_id),
+    text(probe_state_text(snapshot.state)),
+    text(stop),
+    tuple(
+      list.append(encode_trace_meter("traced_call_return_to", meter.trace), [
+        num(meter.forced_closes),
+        num(meter.distinct_paths),
+        num(meter.dropped_calls),
+        num(meter.elided_calls),
+        num(meter.strays),
+        num(meter.depth_limit),
+      ]),
+    ),
+    dynamic.list(list.map(snapshot.frames, encode_frame)),
+    dynamic.list(
+      list.map(snapshot.paths, fn(path) {
+        tuple([
+          num(path.calls),
+          num(path.inclusive_ns),
+          num(path.exclusive_ns),
+          dynamic.list(list.map(path.frames, num)),
+        ])
+      }),
+    ),
+    tuple([
+      dynamic.list(list.map(snapshot.processes, text)),
+      dynamic.list(
+        list.map(snapshot.slices, fn(slice) {
+          tuple([
+            num(slice.process),
+            num(slice.frame),
+            num(slice.start_ns),
+            num(slice.duration_ns),
+            num(slice.depth),
+          ])
+        }),
+      ),
+    ]),
+  ])
+}
+
+// A call tree snapshot the agent could send decodes to exactly what was sent.
+pub fn property_calltrace_round_trips_test() {
+  use #(head, tail) <- gen.check(gen.tuple2(
+    qcheck.tuple4(
+      gen.non_negative(),
+      probe_state(),
+      trace_stop(),
+      calltrace_meter(),
+    ),
+    qcheck.tuple4(
+      gen.small_list(stack_frame()),
+      gen.small_list(call_path()),
+      gen.small_list(gen.ident()),
+      gen.small_list(call_slice()),
+    ),
+  ))
+  let #(id, state, stop, meter) = head
+  let #(frames, paths, processes, slices) = tail
+  let snapshot =
+    wire.CalltraceSnapshot(
+      id,
+      state,
+      stop.0,
+      meter,
+      frames,
+      paths,
+      processes,
+      slices,
+    )
+
+  assert wire.decode_envelope(envelope(encode_calltrace(snapshot, stop.1)))
+    == Ok(wire.Envelope(dynamic.string("ref"), wire.CalltraceReport(snapshot)))
+}
+
+fn traced_process() -> Generator(wire.TracedProcess) {
+  qcheck.map2(
+    gen.ident(),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    fn(pid, a) { wire.TracedProcess(pid, a.0, a.1, a.2, a.0, a.1) },
+  )
+}
+
+fn activity_slice() -> Generator(#(wire.ActivitySlice, String)) {
+  qcheck.map2(
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    gen.one_of(#(wire.RunSlice, "run"), [
+      #(wire.MinorGcSlice, "gc_minor"),
+      #(wire.MajorGcSlice, "gc_major"),
+    ]),
+    fn(a, kind) { #(wire.ActivitySlice(a.0, kind.0, a.1, a.2), kind.1) },
+  )
+}
+
+fn long_event() -> Generator(wire.LongEvent) {
+  qcheck.from_generators(
+    qcheck.map2(
+      gen.ident(),
+      gen.tuple2(gen.non_negative(), gen.non_negative()),
+      fn(pid, a) { wire.LongGc(pid, a.0, a.1) },
+    ),
+    [
+      qcheck.map2(
+        gen.ident(),
+        gen.tuple2(gen.non_negative(), qcheck.string()),
+        fn(pid, a) { wire.LongSchedule(pid, a.0, a.1) },
+      ),
+    ],
+  )
+}
+
+fn events_meter() -> Generator(wire.EventsMeter) {
+  qcheck.map3(
+    trace_meter(),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    gen.tuple3(gen.non_negative(), gen.non_negative(), gen.non_negative()),
+    fn(trace, a, b) { wire.EventsMeter(trace, a.0, a.1, a.2, b.0, b.1, b.2) },
+  )
+}
+
+fn encode_events(
+  snapshot: wire.EventsSnapshot,
+  stop: String,
+  kinds: List(String),
+) -> Dynamic {
+  let meter = snapshot.meter
+
+  tuple([
+    text("events"),
+    num(snapshot.probe_id),
+    text(probe_state_text(snapshot.state)),
+    text(stop),
+    tuple(
+      list.append(encode_trace_meter("traced_running_gc", meter.trace), [
+        num(meter.unpaired_events),
+        num(meter.dropped_slices),
+        num(meter.long_events_seen),
+        num(meter.strays),
+        num(meter.long_gc_ms),
+        num(meter.long_schedule_ms),
+      ]),
+    ),
+    dynamic.list(
+      list.map(snapshot.processes, fn(process) {
+        tuple([
+          text(process.pid_text),
+          num(process.runs),
+          num(process.run_ns),
+          num(process.minor_gcs),
+          num(process.major_gcs),
+          num(process.gc_ns),
+        ])
+      }),
+    ),
+    dynamic.list(
+      list.map(list.zip(snapshot.slices, kinds), fn(pair) {
+        tuple([
+          num({ pair.0 }.process),
+          text(pair.1),
+          num({ pair.0 }.start_ns),
+          num({ pair.0 }.duration_ns),
+        ])
+      }),
+    ),
+    dynamic.list(
+      list.map(snapshot.long, fn(event) {
+        case event {
+          wire.LongGc(pid, ms, words) ->
+            tuple([text("long_gc"), text(pid), num(ms), num(words)])
+          wire.LongSchedule(pid, ms, function) ->
+            tuple([text("long_schedule"), text(pid), num(ms), text(function)])
+        }
+      }),
+    ),
+  ])
+}
+
+// An events snapshot the agent could send decodes to exactly what was sent,
+// including both kinds of threshold event.
+pub fn property_events_round_trips_test() {
+  use #(head, tail) <- gen.check(gen.tuple2(
+    qcheck.tuple4(
+      gen.non_negative(),
+      probe_state(),
+      trace_stop(),
+      events_meter(),
+    ),
+    qcheck.tuple3(
+      gen.small_list(traced_process()),
+      gen.small_list(activity_slice()),
+      gen.small_list(long_event()),
+    ),
+  ))
+  let #(id, state, stop, meter) = head
+  let #(processes, slices, long) = tail
+  let snapshot =
+    wire.EventsSnapshot(
+      id,
+      state,
+      stop.0,
+      meter,
+      processes,
+      list.map(slices, fn(pair) { pair.0 }),
+      long,
+    )
+
+  assert wire.decode_envelope(
+      envelope(encode_events(
+        snapshot,
+        stop.1,
+        list.map(slices, fn(pair) { pair.1 }),
+      )),
+    )
+    == Ok(wire.Envelope(dynamic.string("ref"), wire.EventsReport(snapshot)))
+}
+
+pub fn trace_started_replies_decode_test() {
+  assert wire.decode_reply(
+      tuple([
+        text("calltrace_started"),
+        num(3),
+        num(2),
+        num(11),
+        num(500),
+        num(1000),
+        num(100),
+      ]),
+    )
+    == Ok(wire.CalltraceStarted(3, 2, 11, 500, 1000, 100))
+  assert wire.decode_reply(
+      tuple([
+        text("events_started"),
+        num(3),
+        num(2),
+        num(500),
+        num(1000),
+        num(100),
+        num(5),
+        num(0),
+      ]),
+    )
+    == Ok(wire.EventsStarted(3, 2, 500, 1000, 100, 5, 0))
+}
+
+// A well-formed example of each trace reply, to be cut and broken below.
+fn trace_examples() -> List(Dynamic) {
+  let meter = wire.TraceMeter(1, 2, 3, 4, 5, 6, 7, 8)
+  let calltrace =
+    wire.CalltraceSnapshot(
+      1,
+      wire.ProbeRunning,
+      wire.TraceRunning,
+      wire.CalltraceMeter(meter, 1, 2, 3, 4, 5, 6),
+      [],
+      [],
+      [],
+      [],
+    )
+  let events =
+    wire.EventsSnapshot(
+      1,
+      wire.ProbeRunning,
+      wire.TraceRunning,
+      wire.EventsMeter(meter, 1, 2, 3, 4, 5, 6),
+      [],
+      [],
+      [],
+    )
+
+  [
+    encode_calltrace(calltrace, "running"),
+    encode_events(events, "running", []),
+    tuple([
+      text("calltrace_started"),
+      num(1),
+      num(1),
+      num(1),
+      num(1),
+      num(1),
+      num(1),
+    ]),
+    tuple([
+      text("events_started"),
+      num(1),
+      num(1),
+      num(1),
+      num(1),
+      num(1),
+      num(1),
+      num(1),
+    ]),
+  ]
+}
+
+pub fn truncated_trace_replies_are_errors_test() {
+  list.each(trace_examples(), fn(example) {
+    assert is_error(wire.decode_reply(truncated_tuple(example)))
+  })
+}
+
+// A trace reply that names another method, an unknown stop reason, an
+// unknown slice kind or an unknown threshold event is refused.
+pub fn trace_replies_are_checked_test() {
+  let meter = wire.TraceMeter(1, 2, 3, 4, 5, 6, 7, 8)
+  let calltrace = fn(method: String, stop: String) {
+    encode_calltrace(
+      wire.CalltraceSnapshot(
+        1,
+        wire.ProbeRunning,
+        wire.TraceRunning,
+        wire.CalltraceMeter(meter, 1, 2, 3, 4, 5, 6),
+        [],
+        [],
+        [],
+        [],
+      ),
+      stop,
+    )
+    |> replace_method(method)
+  }
+  let events = fn(method: String, kind: String, long: Dynamic) {
+    tuple([
+      text("events"),
+      num(1),
+      text("running"),
+      text("running"),
+      tuple(
+        list.append(encode_trace_meter(method, meter), [
+          num(0),
+          num(0),
+          num(0),
+          num(0),
+          num(0),
+          num(0),
+        ]),
+      ),
+      dynamic.list([]),
+      dynamic.list([tuple([num(0), text(kind), num(1), num(1)])]),
+      dynamic.list([long]),
+    ])
+  }
+  let good_long = tuple([text("long_gc"), text("<0.1.0>"), num(5), num(6)])
+
+  assert wire.decode_reply(calltrace("traced_call_return_to", "running"))
+    |> result_ok
+  assert is_error(wire.decode_reply(calltrace("sampled", "running")))
+  assert is_error(
+    wire.decode_reply(calltrace("traced_call_return_to", "sideways")),
+  )
+  assert wire.decode_reply(events("traced_running_gc", "run", good_long))
+    |> result_ok
+  assert is_error(wire.decode_reply(events("sampled", "run", good_long)))
+  assert is_error(
+    wire.decode_reply(events("traced_running_gc", "sleep", good_long)),
+  )
+  assert is_error(
+    wire.decode_reply(events(
+      "traced_running_gc",
+      "run",
+      tuple([text("long_port"), text("<0.1.0>"), num(5), num(6)]),
+    )),
+  )
+  assert is_error(
+    wire.decode_reply(events(
+      "traced_running_gc",
+      "run",
+      tuple([text("long_schedule"), text("<0.1.0>"), num(5), num(6)]),
+    )),
+  )
+}
+
+// The method is the first element of the meter, which is the fifth element
+// of the reply.
+fn replace_method(reply: Dynamic, method: String) -> Dynamic {
+  case decode.run(reply, decode.list(decode.dynamic)) {
+    Ok([tag, id, phase, stop, meter, ..rest]) ->
+      case decode.run(meter, decode.list(decode.dynamic)) {
+        Ok([_, ..fields]) ->
+          tuple([tag, id, phase, stop, tuple([text(method), ..fields]), ..rest])
+        _ -> reply
+      }
+    _ -> reply
+  }
+}
+
+pub fn property_junk_inside_trace_tags_never_crashes_test() {
+  use #(junk_a, junk_b) <- gen.check(gen.tuple2(junk(2), junk(2)))
+
+  list.each(
+    ["calltrace_started", "calltrace", "events_started", "events"],
+    fn(tag) {
+      assert is_error(
+        wire.decode_reply(tuple([text(tag), junk_a, junk_b, junk_a])),
+      )
+    },
+  )
+}
+
+pub fn trace_requests_encode_to_the_agent_shape_test() {
+  let reply_to = text("pid")
+  let reference = text("ref")
+  let envelope = fn(body: Dynamic) {
+    tuple([text("pg"), num(1), reply_to, reference, body])
+  }
+  let encode = fn(request) {
+    wire.encode_extended_request(reply_to, reference, request)
+  }
+  let assert Ok(boot) = identity.boot_id("boot-1") as "valid boot id"
+  let assert Ok(token) = identity.pin(boot, 4) as "valid serial"
+  let token_term = tuple([text("boot-1"), num(4)])
+
+  assert encode(wire.AskStartCalltrace(
+      [token],
+      [wire.CounterPattern("a", "run"), wire.CounterPattern("b", "_")],
+      2000,
+      100_000,
+      500,
+    ))
+    == envelope(
+      tuple([
+        text("start_calltrace"),
+        dynamic.list([token_term]),
+        dynamic.list([
+          tuple([text("a"), text("run")]),
+          tuple([text("b"), text("_")]),
+        ]),
+        num(2000),
+        num(100_000),
+        num(500),
+      ]),
+    )
+  assert encode(wire.AskReadCalltrace(3))
+    == envelope(tuple([text("read_calltrace"), num(3)]))
+  assert encode(wire.AskStopCalltrace(3))
+    == envelope(tuple([text("stop_calltrace"), num(3)]))
+  assert encode(wire.AskStartEvents([token, token], 5000, 200_000, 1000, 5, 0))
+    == envelope(
+      tuple([
+        text("start_events"),
+        dynamic.list([token_term, token_term]),
+        num(5000),
+        num(200_000),
+        num(1000),
+        num(5),
+        num(0),
+      ]),
+    )
+  assert encode(wire.AskReadEvents(3))
+    == envelope(tuple([text("read_events"), num(3)]))
+  assert encode(wire.AskStopEvents(3))
+    == envelope(tuple([text("stop_events"), num(3)]))
+}
