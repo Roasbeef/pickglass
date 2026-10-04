@@ -1,12 +1,15 @@
 import fixtures
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{Some}
+import gleam/string
 import pickglass_core/export
 import pickglass_core/export/chrome_trace.{Counter, Instant, Slice, Track}
 import pickglass_core/export/collapsed
 import pickglass_core/export/speedscope
+import pickglass_core/export/text
 import pickglass_core/profile
 import pickglass_core/unit
 
@@ -272,4 +275,172 @@ pub fn chrome_trace_slice_has_a_duration_in_microseconds_test() {
 pub fn chrome_trace_is_deterministic_test() {
   let tracks = [Track(1, "a", [Instant("i", 1, [])])]
   assert chrome_trace.export("p", tracks) == chrome_trace.export("p", tracks)
+}
+
+// ------------------------------------------------------------------ text
+
+fn shaped() -> profile.Profile {
+  fixtures.calls([
+    #(["a", "b", "c"], 50),
+    #(["a", "b", "d"], 30),
+    #(["a", "e"], 15),
+    #(["a"], 5),
+  ])
+}
+
+// The text for a hand-made profile, byte for byte: the function table with
+// flat and cumulative shares, then the tree with the heaviest child first.
+pub fn text_summary_matches_an_exact_string_test() {
+  let p = shaped()
+  let assert Ok(result) =
+    text.export(p, fixtures.column(p), text.default_config)
+
+  assert result.body
+    == "top 5 functions by samples of their own (100 samples in all)\n"
+    <> "   flat              cum           function\n"
+    <> "  50.0%       50   50.0%       50  m:c/0\n"
+    <> "  30.0%       30   30.0%       30  m:d/0\n"
+    <> "  15.0%       15   15.0%       15  m:e/0\n"
+    <> "   5.0%        5  100.0%      100  m:a/0\n"
+    <> "   0.0%        0   80.0%       80  m:b/0\n"
+    <> "\n"
+    <> "call tree (share of 100 samples)\n"
+    <> " 100.0%  m:a/0\n"
+    <> "  80.0%    m:b/0\n"
+    <> "  50.0%      m:c/0\n"
+    <> "  30.0%      m:d/0\n"
+    <> "  15.0%    m:e/0\n"
+}
+
+// A branch under the threshold is left out with its descendants, and a cap
+// on lines says how many it cut.
+pub fn text_tree_is_bounded_test() {
+  let p = shaped()
+  let column = fixtures.column(p)
+
+  let assert Ok(pruned) =
+    text.tree(p, column, text.Config(functions: 5, lines: 60, min_tenths: 200))
+  assert pruned
+    == "call tree (share of 100 samples)\n"
+    <> " 100.0%  m:a/0\n"
+    <> "  80.0%    m:b/0\n"
+    <> "  50.0%      m:c/0\n"
+    <> "  30.0%      m:d/0\n"
+
+  let assert Ok(cut) =
+    text.tree(p, column, text.Config(functions: 5, lines: 2, min_tenths: 0))
+  assert cut
+    == "call tree (share of 100 samples)\n"
+    <> " 100.0%  m:a/0\n"
+    <> "  80.0%    m:b/0\n"
+    <> "  ... 3 more lines left out\n"
+
+  assert text.functions(p, column, 2)
+    == "top 2 functions by samples of their own (100 samples in all)\n"
+    <> "   flat              cum           function\n"
+    <> "  50.0%       50   50.0%       50  m:c/0\n"
+    <> "  30.0%       30   30.0%       30  m:d/0\n"
+}
+
+// An empty profile has nothing to divide by, and says so.
+pub fn text_of_nothing_says_so_test() {
+  let p = fixtures.calls([])
+  let assert Ok(result) =
+    text.export(p, fixtures.column(p), text.default_config)
+
+  assert string.contains(result.body, "no samples")
+  assert !string.contains(result.body, "0.0%")
+}
+
+// A counters profile has no calling context, so there is no tree to print.
+pub fn text_needs_call_stacks_test() {
+  let assert Ok(p) =
+    profile.new(
+      profile.TracedCounters,
+      [profile.ValueType("calls", unit.Count)],
+      [
+        profile.Function(
+          0,
+          "m",
+          "f",
+          0,
+          option.None,
+          option.None,
+          profile.NoLine,
+        ),
+      ],
+      [profile.Sample([0], [4], [])],
+    )
+
+  assert text.export(p, fixtures.column(p), text.default_config)
+    == Error(export.NoCallStacks(profile.TracedCounters))
+}
+
+// -------------------------------------------------- speedscope schema shape
+
+// What speedscope's file-format schema requires of a sampled profile: the
+// schema address, a shared frame table of named frames, and for each profile
+// a type, a unit from its closed list, a start and end value, samples that
+// index the frame table, and one non-negative weight per sample that adds up
+// to the end value. This is the shape `pickglass profile` writes by default.
+pub fn speedscope_output_has_the_documented_shape_test() {
+  let p = shaped()
+  let assert Ok(result) = speedscope.export(p)
+  let assert Ok(document) = json.parse(result.body, shape_decoder())
+
+  assert document.schema == "https://www.speedscope.app/file-format-schema.json"
+  assert document.frames == ["m:a/0", "m:b/0", "m:c/0", "m:d/0", "m:e/0"]
+
+  let assert [only] = document.profiles
+  assert only.kind == "sampled"
+  assert list.contains(
+    ["none", "nanoseconds", "microseconds", "milliseconds", "seconds", "bytes"],
+    only.unit,
+  )
+  assert only.start == 0
+  assert only.end == 100
+  assert list.length(only.samples) == list.length(only.weights)
+  assert list.all(only.weights, fn(weight) { weight > 0 })
+  assert int.sum(only.weights) == only.end
+  assert list.all(only.samples, fn(stack) {
+    stack != []
+    && list.all(stack, fn(index) {
+      index >= 0 && index < list.length(document.frames)
+    })
+  })
+}
+
+type Shape {
+  Shape(schema: String, frames: List(String), profiles: List(ShapeProfile))
+}
+
+type ShapeProfile {
+  ShapeProfile(
+    kind: String,
+    unit: String,
+    start: Int,
+    end: Int,
+    samples: List(List(Int)),
+    weights: List(Int),
+  )
+}
+
+fn shape_decoder() -> decode.Decoder(Shape) {
+  use schema <- decode.field("$schema", decode.string)
+  use frames <- decode.subfield(
+    ["shared", "frames"],
+    decode.list(decode.at(["name"], decode.string)),
+  )
+  use profiles <- decode.field("profiles", decode.list(shape_profile()))
+  decode.success(Shape(schema:, frames:, profiles:))
+}
+
+fn shape_profile() -> decode.Decoder(ShapeProfile) {
+  use kind <- decode.field("type", decode.string)
+  use unit <- decode.field("unit", decode.string)
+  use start <- decode.field("startValue", decode.int)
+  use end <- decode.field("endValue", decode.int)
+  use samples <- decode.field("samples", decode.list(decode.list(decode.int)))
+  use weights <- decode.field("weights", decode.list(decode.int))
+  decode.success(ShapeProfile(kind:, unit:, start:, end:, samples:, weights:))
 }
