@@ -18,6 +18,7 @@ import pickglass_core/layout/flame
 import pickglass_core/measure.{Known}
 import pickglass_core/policy
 import pickglass_core/profile
+import pickglass_core/provenance
 import pickglass_core/unit
 import pickglass_web/app
 import pickglass_web/census/owners as owners_builder
@@ -396,6 +397,23 @@ pub fn comparable_captures_keep_their_direction_colour_test() {
   string.contains(html, "delta-down") |> should.be_true
   string.contains(html, "diff-down") |> should.be_true
   string.contains(html, "withheld: ") |> should.be_false
+}
+
+// A difference no larger than the figure's own swing inside a capture is not
+// called a direction, and the band is printed beside the reading.
+pub fn a_difference_inside_the_variation_seen_is_not_called_higher_test() {
+  let assert Ok(data) = fixture.compare() as "the compare fixture"
+  let same = model.CompareModel(..data, candidate: data.baseline)
+  let wide = provenance.Band(low: 0, high: 400 * 1_048_576)
+  let rows =
+    list.map(same.rows, fn(row) {
+      model.CompareRow(..row, baseline_band: Some(wide))
+    })
+
+  let html = element.to_string(compare.view(model.CompareModel(..same, rows:)))
+
+  string.contains(html, "within variation (400 MiB)") |> should.be_true
+  string.contains(html, "class=\"band\"") |> should.be_true
 }
 
 // ------------------------------------------------------------ memory

@@ -869,6 +869,11 @@ pub type CompareRow {
     baseline: Measurement,
     /// The candidate reading.
     candidate: Measurement,
+    /// The lowest and highest baseline reading over the passes its capture
+    /// holds, for a gauge that has more than one known reading.
+    baseline_band: Option(provenance.Band),
+    /// The same for the candidate.
+    candidate_band: Option(provenance.Band),
   )
 }
 

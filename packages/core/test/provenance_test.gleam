@@ -1,5 +1,5 @@
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import pg_data_gen as gen
 import pickglass_core/identity
 import pickglass_core/measure.{
@@ -234,8 +234,47 @@ pub fn property_direction_requires_no_blocking_field_test() {
     provenance.Withheld(fields) -> {
       assert fields != []
     }
+    provenance.InsideNoise(..) -> panic as "no band was given"
     provenance.NoReading -> panic as "both readings are known"
   }
+}
+
+fn gauge_judged(
+  before: Int,
+  after: Int,
+  baseline_band: Option(provenance.Band),
+  candidate_band: Option(provenance.Band),
+) -> provenance.Judgement {
+  let same = provenance.comparability(base(), base())
+
+  provenance.compare_against_noise(
+    same,
+    Gauge,
+    Known(before),
+    Known(after),
+    baseline_band,
+    candidate_band,
+  )
+}
+
+pub fn a_difference_inside_the_band_has_no_direction_test() {
+  assert gauge_judged(100, 130, Some(provenance.Band(90, 150)), None)
+    == provenance.InsideNoise(provenance.Increased, 60)
+
+  // The wider of the two bands counts, and the difference may be negative.
+  assert gauge_judged(130, 100, None, Some(provenance.Band(80, 140)))
+    == provenance.InsideNoise(provenance.Decreased, 60)
+}
+
+pub fn a_difference_beyond_the_band_keeps_its_direction_test() {
+  assert gauge_judged(100, 200, Some(provenance.Band(90, 150)), None)
+    == provenance.Moved(provenance.Increased)
+
+  // No band, as for a capture of one pass, adds no doubt.
+  assert gauge_judged(100, 101, None, None)
+    == provenance.Moved(provenance.Increased)
+  assert gauge_judged(5, 5, Some(provenance.Band(1, 9)), None)
+    == provenance.Moved(provenance.Unchanged)
 }
 
 pub fn property_a_provenance_is_comparable_with_itself_test() {

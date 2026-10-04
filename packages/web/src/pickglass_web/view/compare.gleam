@@ -30,7 +30,7 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
@@ -40,7 +40,7 @@ import pickglass_core/profile
 import pickglass_core/provenance.{
   type Comparability, type Field, type Provenance,
 }
-import pickglass_core/unit
+import pickglass_core/unit.{type Unit}
 import pickglass_web/chart/flame as flame_chart
 import pickglass_web/fmt
 import pickglass_web/model.{
@@ -207,8 +207,15 @@ fn field_row(
   ])
 }
 
-// The value of one comparability field, written for a person.
-fn field_value(field: Field, p: Provenance) -> String {
+/// The value of one comparability field, written for a person.
+///
+/// ## Examples
+///
+/// ```gleam
+/// compare.field_value(provenance.Budget, provenance)
+/// // -> "top 200 · 15.0 s"
+/// ```
+pub fn field_value(field: Field, p: Provenance) -> String {
   case field {
     provenance.Method -> p.collection.method
     provenance.RuntimeField ->
@@ -351,11 +358,36 @@ fn figures_panel(
 fn figure_row(row: CompareRow, comparability: Comparability) -> Element(Msg) {
   html.tr([], [
     html.td([], [element.text(row.label)]),
-    ui.num(row.baseline, unit: row.unit),
-    ui.num(row.candidate, unit: row.unit),
+    banded(row.baseline, row.baseline_band, row.unit),
+    banded(row.candidate, row.candidate_band, row.unit),
     change_cell(row, comparability),
     html.td([], [verdict_cell(row, comparability)]),
   ])
+}
+
+// A reading with the band the figure varied in inside its capture beneath it,
+// so a difference can be read against the variation it has to beat.
+fn banded(
+  reading: Measurement,
+  band: Option(provenance.Band),
+  unit u: Unit,
+) -> Element(Msg) {
+  case band {
+    None -> ui.num(reading, unit: u)
+    Some(seen) ->
+      html.td([attribute.class("num")], [
+        element.text(fmt.cell(reading, u)),
+        html.small(
+          [
+            attribute.class("band"),
+            attribute.title(
+              "the lowest and highest reading over the passes the capture holds",
+            ),
+          ],
+          [element.text(" (" <> fmt.band(seen, u) <> ")")],
+        ),
+      ])
+  }
 }
 
 // The change is coloured only where core allows a direction for this kind of
@@ -383,13 +415,20 @@ fn change(baseline: Measurement, candidate: Measurement) -> Measurement {
 
 fn verdict_cell(row: CompareRow, comparability: Comparability) -> Element(Msg) {
   case
-    provenance.compare_measurements(
+    provenance.compare_against_noise(
       comparability,
       row.kind,
       row.baseline,
       row.candidate,
+      row.baseline_band,
+      row.candidate_band,
     )
   {
+    provenance.InsideNoise(range:, ..) ->
+      ui.badge(
+        "muted",
+        "within variation (" <> fmt.known(range, row.unit) <> ")",
+      )
     provenance.Moved(direction: provenance.Increased) ->
       ui.badge("up", "higher")
     provenance.Moved(direction: provenance.Decreased) ->

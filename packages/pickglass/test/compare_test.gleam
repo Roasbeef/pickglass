@@ -72,6 +72,16 @@ fn passes(total: Int) -> List(observation.Observation) {
   ]
 }
 
+// Three passes that all read `total`, so the figure did not vary.
+fn steady(total: Int) -> List(observation.Observation) {
+  list.map([0, 1, 2], fn(index) {
+    Observation(
+      ..fixture.observation(index, 1000 + 2000 * index),
+      memory: Ok(fixture.memory(total)),
+    )
+  })
+}
+
 pub fn a_workload_mismatch_blocks_a_verdict_test() {
   let assert Ok(page) =
     compare_build.build(
@@ -173,10 +183,27 @@ pub fn the_text_report_names_the_blocking_field_and_withholds_directions_test() 
   assert string.contains(text, "10.0 MiB")
   assert string.contains(text, "20.0 MiB")
   assert string.contains(text, "withheld (workload)")
-  assert !string.contains(text, "increased")
+  assert !string.contains(text, "higher")
 }
 
 pub fn matching_captures_state_a_direction_in_the_text_test() {
+  let assert Ok(page) =
+    compare_build.build(
+      "a.pgcap",
+      capture("idle", steady(1_048_576 * 10)),
+      "b.pgcap",
+      capture("idle", steady(1_048_576 * 20)),
+    )
+  let text = compare_report.render(page, "x", "y")
+
+  assert string.contains(text, "verdict: comparable")
+  assert string.contains(text, "  higher")
+  assert !string.contains(text, "within variation")
+}
+
+// The captures' own passes show memory swinging by more than the difference
+// between them, so no direction is stated and the band is printed.
+pub fn a_difference_inside_the_variation_seen_states_no_direction_test() {
   let assert Ok(page) =
     compare_build.build(
       "a.pgcap",
@@ -185,9 +212,14 @@ pub fn matching_captures_state_a_direction_in_the_text_test() {
       capture("idle", passes(1_048_576 * 20)),
     )
   let text = compare_report.render(page, "x", "y")
+  let assert Ok(total) =
+    list.find(page.rows, fn(row) { row.label == "memory: total" })
 
-  assert string.contains(text, "verdict: comparable")
-  assert string.contains(text, "increased")
+  assert total.baseline_band
+    == Some(provenance.Band(low: 1_000_000, high: 1_048_576 * 10))
+  assert string.contains(text, "within variation")
+  assert string.contains(text, "varied inside each capture")
+  assert !string.contains(text, "  higher")
 }
 
 // A sampled-stacks probe that ran at `hz`, with the same two stacks and

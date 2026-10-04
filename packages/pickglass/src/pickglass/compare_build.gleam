@@ -32,6 +32,7 @@ import pickglass_core/layout/flame
 import pickglass_core/measure.{type Measurement, Known, Missing, NotApplicable}
 import pickglass_core/profile.{type Profile}
 import pickglass_core/profile/activity
+import pickglass_core/provenance
 import pickglass_core/unit
 import pickglass_core/wire
 import pickglass_web/model
@@ -83,6 +84,8 @@ fn rows_of(
       unit: u,
       baseline: reading(newest(before), read),
       candidate: reading(newest(after), read),
+      baseline_band: band_of(before, read),
+      candidate_band: band_of(after, read),
     )
   }
 
@@ -117,9 +120,45 @@ fn rows_of(
         unit: unit.Ratio(per: 10_000),
         baseline: mean_utilisation(before),
         candidate: mean_utilisation(after),
+        baseline_band: None,
+        candidate_band: None,
       ),
     ],
   ])
+}
+
+// The lowest and highest known reading of a figure over a capture's passes.
+// A figure read once, never, or at the same value every time has no band:
+// there is no variation to show.
+fn band_of(
+  observations: List(Observation),
+  read: fn(Observation) -> Measurement,
+) -> option.Option(provenance.Band) {
+  let known =
+    list.filter_map(observations, fn(observation) {
+      case read(observation) {
+        Known(value) -> Ok(value)
+        _ -> Error(Nil)
+      }
+    })
+
+  case known {
+    [] | [_] -> None
+    [first, ..rest] -> {
+      let band =
+        list.fold(rest, provenance.Band(first, first), fn(band, value) {
+          provenance.Band(
+            low: int.min(band.low, value),
+            high: int.max(band.high, value),
+          )
+        })
+
+      case band.low == band.high {
+        True -> None
+        False -> Some(band)
+      }
+    }
+  }
 }
 
 fn reading(

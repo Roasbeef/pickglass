@@ -24,6 +24,7 @@ import pickglass_core/measure.{type Measurement, Known}
 import pickglass_core/provenance
 import pickglass_core/unit.{type Unit}
 import pickglass_web/model
+import pickglass_web/view/compare as compare_view
 
 /// Read two captures and print the comparison. The exit status is zero when
 /// both files were read, whatever the verdict, and one when either could
@@ -96,7 +97,9 @@ pub fn render(
         "",
         "comparability",
       ],
-      list.map(comparability.fields, field_line),
+      list.map(comparability.fields, fn(entry) {
+        field_line(entry, page.baseline, page.candidate)
+      }),
       [
         "",
         case blocking {
@@ -123,15 +126,29 @@ pub fn render(
   )
 }
 
-fn field_line(entry: #(provenance.Field, provenance.FieldResult)) -> String {
+// A field's result and, beside it, the value each capture holds, as the page
+// shows them. "Not recorded" means the capture lacks part of the field, which
+// the values make visible: a budget with its top and deadline stated and its
+// event limit absent is not an unknown budget.
+fn field_line(
+  entry: #(provenance.Field, provenance.FieldResult),
+  baseline: provenance.Provenance,
+  candidate: provenance.Provenance,
+) -> String {
   let name = string.pad_end(provenance.field_name(entry.0), 10, " ")
+  let values =
+    "  ["
+    <> compare_view.field_value(entry.0, baseline)
+    <> " | "
+    <> compare_view.field_value(entry.0, candidate)
+    <> "]"
 
   case entry.1 {
-    provenance.Same -> "  " <> name <> "same"
-    provenance.DiffersExpected -> "  " <> name <> "differs (expected)"
+    provenance.Same -> "  " <> name <> "same" <> values
+    provenance.DiffersExpected -> "  " <> name <> "differs (expected)" <> values
     provenance.DiffersBlocking(detail:) ->
       "  " <> name <> "differs, blocks: " <> detail
-    provenance.NotRecorded -> "  " <> name <> "not recorded"
+    provenance.NotRecorded -> "  " <> name <> "not recorded" <> values
   }
 }
 
@@ -139,24 +156,52 @@ fn figure_line(
   row: model.CompareRow,
   comparability: provenance.Comparability,
 ) -> String {
-  "  "
-  <> string.pad_end(row.label, 30, " ")
-  <> string.pad_start(text_of(row.baseline, row.unit), 16, " ")
-  <> string.pad_start(text_of(row.candidate, row.unit), 16, " ")
-  <> "  "
-  <> verdict_text(provenance.compare_measurements(
-    comparability,
-    row.kind,
-    row.baseline,
-    row.candidate,
-  ))
+  let line =
+    "  "
+    <> string.pad_end(row.label, 30, " ")
+    <> string.pad_start(text_of(row.baseline, row.unit), 16, " ")
+    <> string.pad_start(text_of(row.candidate, row.unit), 16, " ")
+    <> "  "
+    <> verdict_text(
+      provenance.compare_against_noise(
+        comparability,
+        row.kind,
+        row.baseline,
+        row.candidate,
+        row.baseline_band,
+        row.candidate_band,
+      ),
+      row.unit,
+    )
+
+  case row.baseline_band, row.candidate_band {
+    None, None -> line
+    base, cand ->
+      line
+      <> "\n"
+      <> string.pad_end("", 32, " ")
+      <> "varied inside each capture: "
+      <> band_text(base, row.unit)
+      <> " | "
+      <> band_text(cand, row.unit)
+  }
 }
 
-fn verdict_text(judgement: provenance.Judgement) -> String {
+fn band_text(band: option.Option(provenance.Band), in u: Unit) -> String {
+  case band {
+    Some(seen) ->
+      text_of(Known(seen.low), u) <> " to " <> text_of(Known(seen.high), u)
+    None -> "no variation seen"
+  }
+}
+
+fn verdict_text(judgement: provenance.Judgement, in u: Unit) -> String {
   case judgement {
-    provenance.Moved(provenance.Increased) -> "increased"
-    provenance.Moved(provenance.Decreased) -> "decreased"
+    provenance.Moved(provenance.Increased) -> "higher"
+    provenance.Moved(provenance.Decreased) -> "lower"
     provenance.Moved(provenance.Unchanged) -> "unchanged"
+    provenance.InsideNoise(range:, ..) ->
+      "within variation (" <> text_of(Known(range), u) <> ")"
     provenance.Withheld(blocking:) ->
       "withheld ("
       <> string.join(list.map(blocking, provenance.field_name), ", ")
@@ -170,12 +215,19 @@ fn verdict_text(judgement: provenance.Judgement) -> String {
 // that is absent is the word the page shows.
 fn text_of(reading: Measurement, in u: Unit) -> String {
   case reading, u {
-    Known(value), unit.Bytes -> tenths(value * 10 / 1_048_576) <> " MiB"
-    Known(value), unit.Ratio(per:) -> tenths(value * 1000 / per) <> " %"
+    Known(value), unit.Bytes ->
+      tenths(rounded(value, over: 1_048_576)) <> " MiB"
+    Known(value), unit.Ratio(per:) ->
+      tenths(rounded(value * 100, over: per)) <> " %"
     other, _ -> measure.render(other, u)
   }
 }
 
 fn tenths(value: Int) -> String {
   int.to_string(value / 10) <> "." <> int.to_string(value % 10)
+}
+
+// Rounds to the nearest tenth, as the page does, so 1.59 prints 1.6.
+fn rounded(numerator: Int, over denominator: Int) -> Int {
+  { numerator * 10 + denominator / 2 } / denominator
 }

@@ -21,6 +21,8 @@
 //// - `verdict_for` asks whether a direction may be stated for one kind of
 ////   series.
 //// - `compare_measurements` applies that to two readings.
+//// - `compare_against_noise` also withholds a direction that is no larger
+////   than the figure's own variation in the captures.
 
 import gleam/int
 import gleam/list
@@ -434,6 +436,11 @@ pub type Judgement {
   /// The captures are not comparable for this series; the fields say why.
   Withheld(blocking: List(Field))
 
+  /// The readings differ, but by no more than the figure itself varied
+  /// inside a capture, so a direction would be a statement about noise.
+  /// `range` is the wider of the two captures' bands.
+  InsideNoise(direction: Direction, range: Int)
+
   /// At least one reading is absent, so there is nothing to compare.
   NoReading
 }
@@ -458,6 +465,65 @@ pub fn compare_measurements(
     DirectionWithheld(blocking:), _, _ -> Withheld(blocking:)
     DirectionAllowed, Known(a), Known(b) -> Moved(direction_of(a, b))
     DirectionAllowed, _, _ -> NoReading
+  }
+}
+
+/// The lowest and highest reading of one figure over the observations a
+/// capture holds.
+pub type Band {
+  Band(low: Int, high: Int)
+}
+
+/// Compare two readings as `compare_measurements` does, then withhold a
+/// direction that is inside the figure's own variation. A gauge such as the
+/// memory a process heap holds swings between collections while nothing has
+/// changed, so a difference smaller than that swing does not show a change.
+/// The range is the wider of the two bands; a capture with no band (one
+/// observation, or a figure with none) adds nothing, so a direction is then
+/// stated as before and the page says there was no variation to compare it
+/// with.
+///
+/// ## Examples
+///
+/// ```gleam
+/// provenance.compare_against_noise(
+///   result,
+///   measure.Gauge,
+///   Known(100),
+///   Known(110),
+///   Some(Band(90, 130)),
+///   None,
+/// )
+/// // -> InsideNoise(Increased, 40)
+/// ```
+pub fn compare_against_noise(
+  comparability: Comparability,
+  kind: SeriesKind,
+  baseline: Measurement,
+  candidate: Measurement,
+  baseline_band: Option(Band),
+  candidate_band: Option(Band),
+) -> Judgement {
+  let judged = compare_measurements(comparability, kind, baseline, candidate)
+
+  case judged, baseline, candidate {
+    Moved(direction: Unchanged), _, _ -> judged
+    Moved(direction:), Known(before), Known(after) -> {
+      let range = int.max(width_of(baseline_band), width_of(candidate_band))
+
+      case int.absolute_value(after - before) <= range {
+        True -> InsideNoise(direction:, range:)
+        False -> judged
+      }
+    }
+    _, _, _ -> judged
+  }
+}
+
+fn width_of(band: Option(Band)) -> Int {
+  case band {
+    Some(Band(low:, high:)) -> high - low
+    None -> 0
   }
 }
 

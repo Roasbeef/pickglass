@@ -23,6 +23,7 @@ import gleam/int
 import gleam/list
 import gleam/string
 import pickglass_core/measure.{type Measurement, Known}
+import pickglass_core/provenance
 import pickglass_core/unit.{type Unit}
 
 /// The minus sign used for negative deltas. It is U+2212, which lines up with
@@ -211,6 +212,18 @@ pub fn known(value: Int, in u: Unit) -> String {
     unit.Nanoseconds -> nanoseconds(value)
     unit.Ratio(per:) -> ratio(value, per)
   }
+}
+
+/// Write the band a figure varied in inside one capture.
+///
+/// ## Examples
+///
+/// ```gleam
+/// fmt.band(provenance.Band(1024, 2048), unit.Bytes)
+/// // -> "1.00 KiB to 2.00 KiB"
+/// ```
+pub fn band(band: provenance.Band, in u: Unit) -> String {
+  known(band.low, u) <> " to " <> known(band.high, u)
 }
 
 /// Write a total in its unit's natural scale, marked as a lower bound when

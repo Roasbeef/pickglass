@@ -1620,6 +1620,8 @@ pub fn compare() -> Result(model.CompareModel, String) {
         unit: unit.Bytes,
         baseline: Known(181 * mib),
         candidate: Known(4 * mib),
+        baseline_band: None,
+        candidate_band: None,
       ),
       model.CompareRow(
         label: "daemon RSS (anon)",
@@ -1627,6 +1629,8 @@ pub fn compare() -> Result(model.CompareModel, String) {
         unit: unit.Bytes,
         baseline: Known(1751 * mib),
         candidate: Known(1741 * mib),
+        baseline_band: None,
+        candidate_band: None,
       ),
       model.CompareRow(
         label: "reductions/s",
@@ -1634,6 +1638,8 @@ pub fn compare() -> Result(model.CompareModel, String) {
         unit: unit.Reductions,
         baseline: Known(41_000),
         candidate: Missing(measure.BudgetExhausted),
+        baseline_band: None,
+        candidate_band: None,
       ),
       model.CompareRow(
         label: "process count",
@@ -1641,6 +1647,8 @@ pub fn compare() -> Result(model.CompareModel, String) {
         unit: unit.Count,
         baseline: Known(3412),
         candidate: Known(2760),
+        baseline_band: None,
+        candidate_band: None,
       ),
     ],
     diff: Some(model.DiffFlame(

@@ -253,10 +253,7 @@ pub fn a_refusal_is_said_where_the_button_was_test() {
     )
   let html = element.to_string(app.view(model))
 
-  assert string.contains(
-    html,
-    "Refused: no live process carries that owner",
-  )
+  assert string.contains(html, "Refused: no live process carries that owner")
 }
 
 pub fn an_empty_flow_draws_nothing_test() {
