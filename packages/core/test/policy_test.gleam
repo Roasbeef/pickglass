@@ -429,3 +429,16 @@ pub fn property_every_decision_is_audited_consistently_test() {
     }
   }
 }
+
+pub fn a_sampling_probe_is_limited_to_what_the_agent_runs_test() {
+  let sampling = spec(policy.Sampling)
+
+  assert policy.max_duration_ms(policy.Sampling) == 60_000
+  assert policy.validate_spec(policy.ProbeSpec(..sampling, duration_ms: 60_000))
+    == Ok(Nil)
+  assert policy.validate_spec(
+      policy.ProbeSpec(..sampling, duration_ms: 300_000),
+    )
+    == Error(policy.BadDuration(60_000))
+  assert policy.max_duration_ms(policy.Counters) == policy.max_probe_duration_ms
+}

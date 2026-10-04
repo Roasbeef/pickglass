@@ -675,7 +675,7 @@ fn record_started(
   command: Command,
   probe_id: Int,
   matched: Int,
-  _deadline_ms: Int,
+  deadline_ms: Int,
   now: Int,
 ) -> List(ProbeRecord) {
   case command {
@@ -685,7 +685,7 @@ fn record_started(
         spec.kind,
         spec.modules,
         now,
-        spec.duration_ms,
+        deadline_ms,
         matched,
       ),
       ..probes

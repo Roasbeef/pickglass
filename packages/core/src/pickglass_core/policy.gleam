@@ -450,8 +450,25 @@ pub type SpecError {
 /// The most modules a probe may name.
 pub const max_probe_modules = 16
 
-/// The longest a probe may run.
+/// The longest a probe of any kind may run.
 pub const max_probe_duration_ms = 300_000
+
+/// The longest a probe of this kind may run. The agent cuts a stack sampling
+/// probe to a minute, so a plan for longer would describe a scope the agent
+/// does not run; the limit here is what the agent enforces.
+///
+/// ## Examples
+///
+/// ```gleam
+/// policy.max_duration_ms(Sampling)
+/// // -> 60_000
+/// ```
+pub fn max_duration_ms(kind: ProbeKind) -> Int {
+  case kind {
+    Sampling -> 60_000
+    Counters | CallTree | SchedulingGc -> max_probe_duration_ms
+  }
+}
 
 fn target_limit(kind: ProbeKind) -> Int {
   case kind {
@@ -479,6 +496,7 @@ fn needs_modules(kind: ProbeKind) -> Bool {
 pub fn validate_spec(spec: ProbeSpec) -> Result(Nil, SpecError) {
   let targets = list.length(spec.targets)
   let limit = target_limit(spec.kind)
+  let longest = max_duration_ms(spec.kind)
 
   case
     targets,
@@ -491,8 +509,7 @@ pub fn validate_spec(spec: ProbeSpec) -> Result(Nil, SpecError) {
     _, m, _, _ if m > max_probe_modules ->
       Error(TooManyModules(limit: max_probe_modules))
     _, 0, True, _ -> Error(NoModules)
-    _, _, _, d if d < 1 || d > max_probe_duration_ms ->
-      Error(BadDuration(max_ms: max_probe_duration_ms))
+    _, _, _, d if d < 1 || d > longest -> Error(BadDuration(max_ms: longest))
     _, _, _, _ -> Ok(Nil)
   }
 }

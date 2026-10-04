@@ -394,3 +394,23 @@ fn monotonic_time(unit: Atom) -> Int
 fn clock_ms() -> Int {
   monotonic_time(atom.create("millisecond"))
 }
+
+pub fn a_probe_is_recorded_with_the_duration_the_agent_ran_test() {
+  // The agent cuts the probe to twelve seconds and says so in its reply.
+  let rig =
+    harness.live(
+      fn(request) {
+        case request {
+          wire.AskStartCounters(..) -> Ok(wire.CountersStarted(7, 3, 12_000))
+          other -> fixture.healthy(other)
+        }
+      },
+      None,
+    )
+  let page = harness.page(rig, "alice", harness.all)
+  let id = plan_id(page.submit(counters(pinned_token(page))))
+  let assert seam.ProbeStarted(..) = page.submit(seam.ConfirmPlan(id))
+  let assert [probe] = page.probes()
+
+  assert probe.duration_ms == 12_000
+}
