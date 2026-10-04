@@ -30,8 +30,35 @@ fn is_alive() -> Bool
 @external(erlang, "net_kernel", "start")
 fn net_kernel_start(name: Atom, options: Dynamic) -> Dynamic
 
+@external(erlang, "init", "get_argument")
+fn init_get_argument(name: Atom) -> Dynamic
+
+/// Whether this VM was started with its own cookie arrangement: `-nocookie`
+/// or `-setcookie`. Without either, starting distribution makes OTP's `auth`
+/// read `~/.erlang.cookie` and create it, with a random value, when it is
+/// missing. A viewer that attaches to a node must not write into the
+/// operator's home, so the launcher starts the VM with `-nocookie` and this
+/// reports it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// has_private_cookie()
+/// // -> True under the release launcher
+/// ```
+pub fn has_private_cookie() -> Bool {
+  first_is_ok(init_get_argument(atom.create("nocookie")))
+  || first_is_ok(init_get_argument(atom.create("setcookie")))
+}
+
 /// Start distribution as a hidden, non-listening node with a full name on
 /// the loopback address. Does nothing if this VM is already distributed.
+/// Refuses when the VM has no cookie arrangement of its own, because
+/// starting distribution would then create `~/.erlang.cookie`.
+///
+/// With `-nocookie` the node holds no cookie at all: it is not listening,
+/// so nothing connects to it, and the one cookie it uses is the target's,
+/// set per peer by `set_cookie`.
 ///
 /// ## Examples
 ///
@@ -40,9 +67,15 @@ fn net_kernel_start(name: Atom, options: Dynamic) -> Dynamic
 /// // -> Ok(Nil)
 /// ```
 pub fn start_hidden_node(name: String) -> Result(Nil, String) {
-  case is_alive() {
-    True -> Ok(Nil)
-    False -> {
+  case is_alive(), has_private_cookie() {
+    True, _ -> Ok(Nil)
+    False, False ->
+      Error(
+        "this VM has no cookie of its own, and starting distribution would "
+        <> "create ~/.erlang.cookie; run the pickglass release, or start "
+        <> "erl with -nocookie (ERL_FLAGS=-nocookie)",
+      )
+    False, True -> {
       let options =
         dynamic.properties([
           #(key("name_domain"), to_dynamic(atom.create("longnames"))),
@@ -185,9 +218,19 @@ pub fn send_named(node: Atom, name: String, message: Dynamic) -> Nil {
 @external(erlang, "erlang", "monotonic_time")
 fn monotonic_time(unit: Atom) -> Int
 
-/// The monotonic clock in milliseconds, for measuring ages.
+/// The monotonic clock in milliseconds, for measuring ages. It is negative
+/// on some runtimes, so never use it as a wire value or a timestamp.
 pub fn now_ms() -> Int {
   monotonic_time(atom.create("millisecond"))
+}
+
+@external(erlang, "erlang", "system_time")
+fn system_time(unit: Atom) -> Int
+
+/// Wall-clock milliseconds since the Unix epoch, for timestamps that appear
+/// in captures and audit entries.
+pub fn system_time_ms() -> Int {
+  system_time(atom.create("millisecond"))
 }
 
 @external(erlang, "rand", "uniform")

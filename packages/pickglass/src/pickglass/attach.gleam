@@ -49,6 +49,18 @@ pub type Session {
   Session(node: Atom, link: Link, boot_id: String)
 }
 
+/// The target node's name.
+///
+/// ## Examples
+///
+/// ```gleam
+/// attach.node_name(session)
+/// // -> "loom_daemon_profile_1_ab@127.0.0.1"
+/// ```
+pub fn node_name(session: Session) -> String {
+  atom.to_string(session.node)
+}
+
 /// Whether the agent's modules were gone from the target when `detach`
 /// finished waiting.
 pub type Unload {
