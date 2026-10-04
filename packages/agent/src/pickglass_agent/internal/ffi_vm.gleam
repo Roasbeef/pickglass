@@ -6,6 +6,7 @@
 //// the VM expects, so the closed list of readings the agent can take is
 //// one type, and a request cannot ask the agent to read anything else.
 
+import pickglass_agent/internal/ffi_proc
 import pickglass_agent/internal/ffi_term.{type Atom, type Term}
 
 /// Integer-valued `system_info/1` keys the agent reads.
@@ -13,6 +14,18 @@ pub type IntKey {
   ProcessCount
   Wordsize
   SchedulersOnline
+  Schedulers
+  Creation
+  DirtyCpuSchedulers
+  DirtyCpuSchedulersOnline
+  DirtyIoSchedulers
+  StartTime
+}
+
+/// Atom-valued `system_info/1` keys.
+pub type AtomKey {
+  EmuFlavor
+  EmuType
 }
 
 /// String-valued `system_info/1` keys, returned as charlists.
@@ -40,6 +53,9 @@ pub fn memory() -> List(#(Atom, Int))
 fn system_info_int(key: IntKey) -> Int
 
 @external(erlang, "erlang", "system_info")
+fn system_info_atom(key: AtomKey) -> Atom
+
+@external(erlang, "erlang", "system_info")
 fn system_info_text(key: TextKey) -> List(Int)
 
 /// The number of processes on the node right now.
@@ -55,6 +71,52 @@ pub fn word_size() -> Int {
 /// The number of online schedulers.
 pub fn schedulers_online() -> Int {
   system_info_int(SchedulersOnline)
+}
+
+/// The number of schedulers, online or not.
+pub fn schedulers() -> Int {
+  system_info_int(Schedulers)
+}
+
+/// The node's creation number, which changes each time a node name restarts.
+pub fn creation() -> Int {
+  system_info_int(Creation)
+}
+
+/// The number of dirty CPU schedulers, and how many are online.
+pub fn dirty_cpu_schedulers() -> #(Int, Int) {
+  #(
+    system_info_int(DirtyCpuSchedulers),
+    system_info_int(DirtyCpuSchedulersOnline),
+  )
+}
+
+/// The number of dirty I/O schedulers.
+pub fn dirty_io_schedulers() -> Int {
+  system_info_int(DirtyIoSchedulers)
+}
+
+/// The emulator flavor, `jit` or `emu`.
+pub fn emulator_flavor() -> String {
+  ffi_term.atom_name(system_info_atom(EmuFlavor))
+}
+
+/// The emulator type, such as `opt`.
+pub fn emulator_type() -> String {
+  ffi_term.atom_name(system_info_atom(EmuType))
+}
+
+/// Milliseconds since the runtime started. `start_time` is the monotonic
+/// time at start in the native unit, so the difference needs no clock that
+/// another tool could reset; `statistics(wall_clock)` would reset its own
+/// "since last call" half for every reader on the node.
+pub fn uptime_ms() -> Int {
+  ffi_proc.now_ms()
+  - ffi_proc.convert_time(
+    system_info_int(StartTime),
+    ffi_proc.Native,
+    ffi_proc.Millisecond,
+  )
 }
 
 /// The OTP release, such as `"29"`.

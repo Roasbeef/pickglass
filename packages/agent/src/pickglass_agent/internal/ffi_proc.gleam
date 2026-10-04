@@ -64,7 +64,12 @@ pub type ExitSignal {
 /// The unit `monotonic_time/1` is asked for.
 pub type TimeUnit {
   Millisecond
+  Native
 }
+
+/// Convert a time between units, as `erlang:convert_time_unit/3` does.
+@external(erlang, "erlang", "convert_time_unit")
+pub fn convert_time(time: Int, from: TimeUnit, to: TimeUnit) -> Int
 
 /// Options for `demonitor/2`.
 pub type DemonitorOption {

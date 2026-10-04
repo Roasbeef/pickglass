@@ -20,6 +20,8 @@ import pickglass_agent/internal/ffi_term.{type Pid, type Reference, type Term}
 import pickglass_agent/internal/seq
 import pickglass_agent/owner.{type Owner, Owned, Unknown}
 import pickglass_agent/request
+import pickglass_agent/supervision
+import pickglass_agent/system
 
 /// A refusal: a stable code and a human sentence.
 pub type Failure {
@@ -250,5 +252,79 @@ pub fn process_detail(found: detail.Detail) -> Term {
     ),
     owner(found.owner),
     found.capabilities,
+  ))
+}
+
+/// The answer to `supervision`: the coverage and one `{Child, Parent, Name,
+/// InitialCall, Owner}` edge per process the walk reached.
+pub fn supervision(report: supervision.Report) -> Term {
+  let coverage = report.coverage
+
+  ffi_term.coerce(#(
+    "supervision",
+    #(
+      coverage.scanned,
+      coverage.total,
+      supervision.stop_name(coverage.stop),
+      coverage.elapsed_ms,
+    ),
+    seq.map(report.edges, edge),
+  ))
+}
+
+fn edge(edge: supervision.Edge) -> Term {
+  ffi_term.coerce(#(
+    ffi_term.pid_text(edge.pid),
+    edge.parent,
+    census.name_text(edge.registered_name),
+    census.function_text(edge.initial_call),
+    owner(edge.owner),
+  ))
+}
+
+/// The answer to `system`: the node's facts, and its allocator carriers or
+/// the reason they are unavailable.
+pub fn system(report: system.Report) -> Term {
+  let facts = report.facts
+
+  ffi_term.coerce(#(
+    "system",
+    #(
+      facts.uptime_ms,
+      facts.creation,
+      facts.emulator_flavor,
+      facts.emulator_type,
+      facts.erts_version,
+      facts.otp_release,
+      facts.schedulers,
+      facts.schedulers_online,
+      facts.dirty_cpu,
+      facts.dirty_cpu_online,
+      facts.dirty_io,
+      facts.word_size,
+    ),
+    carriers(report.carriers),
+  ))
+}
+
+fn carriers(carriers: system.Carriers) -> Term {
+  case carriers {
+    system.Unavailable(reason) -> ffi_term.coerce(#("unavailable", reason))
+    system.Available(rows) ->
+      ffi_term.coerce(#("carriers", seq.map(rows, carrier_row)))
+  }
+}
+
+fn carrier_row(row: system.CarrierRow) -> Term {
+  ffi_term.coerce(#(
+    row.allocator,
+    case row.pool {
+      system.InPool -> True
+      system.NotInPool -> False
+    },
+    row.carriers,
+    row.total_bytes,
+    row.used_bytes,
+    row.unscanned_bytes,
   ))
 }

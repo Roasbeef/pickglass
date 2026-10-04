@@ -62,6 +62,22 @@ scenario_link_killed(Target, Work) ->
     {<<"error">>, <<"stale_pin">>, _} =
         ask(Target, {<<"process_detail">>, {<<"boot-1">>, PinId + 100}}),
     check("process detail refuses a pin that does not exist", true),
+    {<<"supervision">>, {SScanned, _, <<"finished">>, _}, Edges} =
+        ask(Target, {<<"supervision">>, 100000, 10000}),
+    WorkText = pid_text(Target, Work),
+    check("the supervision walk lists every scanned process", length(Edges) =:= SScanned),
+    check("the supervision walk records the workload's spawner",
+          lists:any(fun({C, P, _, _, _}) -> C =:= WorkText andalso P =/= <<>>; (_) -> false end,
+                    Edges)),
+    {<<"system">>, {Uptime, _, _, _, _, _, Scheds, _, _, _, _, _}, Carriers} =
+        ask(Target, {<<"system">>}),
+    check("the system report has facts", Uptime >= 0 andalso Scheds >= 1),
+    check("the system report has carriers or says why not",
+          case Carriers of
+              {<<"carriers">>, [_ | _]} -> true;
+              {<<"unavailable">>, Why} when is_binary(Why) -> true;
+              _ -> false
+          end),
     {<<"scheduler">>, <<"collecting">>, _} = ask(Target, {<<"scheduler">>, <<"on">>}),
     check("scheduler wall time is on", is_list(statistics_on(Target))),
     {<<"counters_started">>, ProbeId, Matched, _} =

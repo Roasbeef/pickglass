@@ -22,6 +22,8 @@
 //// | start a counters probe | `{<<"start_counters">>, Module, Function, Targets, DeadlineMs}` |
 //// | read or stop a probe | `{<<"read_counters">>, Id}`, `{<<"stop_counters">>, Id}` |
 //// | one process in detail | `{<<"process_detail">>, Token}` |
+//// | parent edges over the node | `{<<"supervision">>, MaxScanned, MaxEdges}` |
+//// | node facts and allocator carriers | `{<<"system">>}` |
 //// | detach | `{<<"detach">>}` |
 ////
 //// `Targets` is `{<<"all">>}` or `{<<"pins">>, [{BootId, PinId}]}`. Numeric
@@ -39,6 +41,9 @@ pub const wire_version = 1
 
 /// The most processes one census may scan.
 pub const max_scan = 200_000
+
+/// The most edges one supervision walk returns.
+pub const max_edges = 10_000
 
 /// The most rows one census returns.
 pub const max_top_k = 200
@@ -96,6 +101,8 @@ pub type Request {
   ReadCounters(probe_id: Int)
   StopCounters(probe_id: Int)
   ProcessDetail(token: Token)
+  Supervision(max_scanned: Int, max_edges: Int)
+  SystemReport
   Detach
 }
 
@@ -184,6 +191,8 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "read_counters", 2 -> decode_probe(term, ReadCounters)
     "stop_counters", 2 -> decode_probe(term, StopCounters)
     "process_detail", 2 -> decode_token_request(term, ProcessDetail)
+    "supervision", 3 -> decode_supervision(term)
+    "system", 1 -> Ok(SystemReport)
     _, _ -> Error("unknown request or wrong number of fields")
   }
 }
@@ -239,6 +248,13 @@ fn decode_token_request(
   use token <- fallible.then(decode_token(ffi_term.element(2, term)))
 
   Ok(build(token))
+}
+
+fn decode_supervision(term: Term) -> Result(Request, String) {
+  use scanned <- fallible.then(integer(ffi_term.element(2, term), "max_scanned"))
+  use edges <- fallible.then(integer(ffi_term.element(3, term), "max_edges"))
+
+  Ok(Supervision(clamp(scanned, 1, max_scan), clamp(edges, 1, max_edges)))
 }
 
 fn decode_probe(

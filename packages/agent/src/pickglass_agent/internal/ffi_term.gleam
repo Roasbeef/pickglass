@@ -133,6 +133,22 @@ pub fn pid_text(pid: Pid) -> String {
   list_to_binary(pid_to_list(pid))
 }
 
+/// The text of a term that is a pid, or the empty string for anything else,
+/// such as the atom `undefined` a process with no recorded parent reports.
+///
+/// ## Examples
+///
+/// ```gleam
+/// pid_text_or_empty(coerce(atom("undefined")))
+/// // -> ""
+/// ```
+pub fn pid_text_or_empty(term: Term) -> String {
+  case is_pid(term) {
+    True -> pid_text(coerce(term))
+    False -> ""
+  }
+}
+
 @external(erlang, "erlang", "binary_to_list")
 fn binary_to_list(text: String) -> List(Int)
 

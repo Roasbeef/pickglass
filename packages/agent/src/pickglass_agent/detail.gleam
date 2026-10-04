@@ -123,7 +123,7 @@ pub fn read(pid: Pid) -> Result(Detail, Nil) {
           links: seq.length(links),
           monitors: seq.length(monitors),
           monitored_by: seq.length(monitored_by),
-          parent: pid_text(parent),
+          parent: ffi_term.pid_text_or_empty(parent),
         ),
         queue_length: queue,
         reductions: reductions,
@@ -253,14 +253,5 @@ fn max_heap_words(settings: Term) -> Result(Int, Nil) {
 
       integer(size)
     }
-  }
-}
-
-// A pid as text, or the empty string for the atom `undefined` a process with
-// no recorded parent reports.
-fn pid_text(term: Term) -> String {
-  case ffi_term.is_pid(term) {
-    True -> ffi_term.pid_text(ffi_term.coerce(term))
-    False -> ""
   }
 }

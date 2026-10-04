@@ -44,6 +44,16 @@ pub fn targets_decode_test() {
     ))
 }
 
+pub fn supervision_and_system_decode_test() {
+  assert decoded_request(envelope(#("supervision", 999_999_999, 999_999_999)))
+    == Ok(request.Supervision(request.max_scan, request.max_edges))
+  assert decoded_request(envelope(#("supervision", 0, 0)))
+    == Ok(request.Supervision(1, 1))
+  assert decoded_request(envelope(#("system"))) == Ok(request.SystemReport)
+  assert decoded_request(envelope(#("supervision", "a", 5))) |> is_error
+  assert decoded_request(envelope(#("system", 1))) |> is_error
+}
+
 pub fn process_detail_takes_a_token_test() {
   assert decoded_request(envelope(#("process_detail", #("boot-1", 4))))
     == Ok(request.ProcessDetail(request.Token("boot-1", 4)))

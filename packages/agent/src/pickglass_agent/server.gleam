@@ -53,6 +53,8 @@ import pickglass_agent/janitor
 import pickglass_agent/owner
 import pickglass_agent/reply.{type Failure, Failure}
 import pickglass_agent/request.{type Envelope, type Token, Envelope}
+import pickglass_agent/supervision
+import pickglass_agent/system
 
 /// How often the agent looks at its lease and its probe deadlines.
 const tick_ms = 250
@@ -334,6 +336,12 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
       census_request(state, reply_to, reference, max_scanned, top_k)
     request.ProcessDetail(token) ->
       process_detail(state, reply_to, reference, token)
+    request.Supervision(max_scanned, max_edges) ->
+      supervision_request(state, reply_to, reference, max_scanned, max_edges)
+    request.SystemReport ->
+      start_worker(state, reply_to, reference, "system", read_deadline_ms, fn() {
+        reply.system(system.read())
+      })
     request.Pin(text) -> pin(state, reply_to, reference, text)
     request.Unpin(token) -> unpin(state, reply_to, reference, token)
     request.Scheduler(action) -> scheduler(state, reply_to, reference, action)
@@ -454,6 +462,25 @@ fn start_worker(
       )
     }
   }
+}
+
+fn supervision_request(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  max_scanned: Int,
+  max_edges: Int,
+) -> Next(State) {
+  let budget = supervision.Budget(max_scanned, max_edges, census_deadline_ms)
+
+  start_worker(
+    state,
+    reply_to,
+    reference,
+    "supervision",
+    census_deadline_ms,
+    fn() { reply.supervision(supervision.run(budget)) },
+  )
 }
 
 fn process_detail(
