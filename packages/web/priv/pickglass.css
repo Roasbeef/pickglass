@@ -591,3 +591,9 @@ marker path { fill: var(--edge); }
 @media (max-width: 1280px) { .layers .bar-cell, .layers thead th:last-child { display: none; } }
 .movers .owner-label { font-family: var(--font-mono); font-size: 12.5px; }
 .panel-meta { row-gap: 1px; }
+
+/* A negative gap's explanation wraps under its label instead of running off
+   the panel, and the checkpoint name takes only the room a name needs. */
+.layer-label .band { display: block; white-space: normal; font-weight: normal; color: var(--ink-3); max-width: 38em; }
+.band { color: var(--ink-3); font-size: 11.5px; }
+input.text.checkpoint-name { width: 13em; }

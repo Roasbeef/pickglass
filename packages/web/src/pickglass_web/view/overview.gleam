@@ -211,7 +211,7 @@ fn checkpoint_controls(
       ),
     ]),
     html.input([
-      attribute.class("text"),
+      attribute.class("text checkpoint-name"),
       attribute.type_("text"),
       attribute.placeholder("name, such as idle-0"),
       attribute.attribute("maxlength", "64"),

@@ -918,28 +918,21 @@ fn detached_reason(model: Model) -> Option(String) {
 // the audit log) stay.
 fn detached_view(model: Model, reason: String) -> Element(Msg) {
   let notice =
-    html.div(
-      [
-        attribute.class("panel stack"),
-        attribute.role("status"),
-        attribute.data("test-id", "detached"),
-      ],
-      [
-        html.h2([], [element.text("Detached")]),
-        html.p([], [
-          element.text(
+    ui.plain_panel(title: "Detached", body: [
+      html.div(
+        [attribute.role("status"), attribute.data("test-id", "detached")],
+        [
+          ui.note(
             "The viewer is not attached to the node: "
             <> reason
             <> ". Its modules were unloaded from the node and every pin and probe it held has ended. Nothing new is read, and no command can run.",
           ),
-        ]),
-        html.p([], [
-          element.text(
+          ui.note(
             "The profile, timeline, compare and audit pages still show what the viewer holds. To look at the node again, start pickglass open once more.",
           ),
-        ]),
-      ],
-    )
+        ],
+      ),
+    ])
 
   case model.page {
     page.Profile | page.Timeline | page.Compare | page.Audit ->
