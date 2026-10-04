@@ -150,15 +150,20 @@ fn ets_coverage(
   <> fmt.count(listed)
   <> " of "
   <> fmt.count(read)
-  <> " tables read ("
-  <> fmt.count(total)
-  <> " when the walk began), "
+  <> " tables read"
+  <> case total == read {
+    True -> ""
+    False -> " (" <> fmt.count(total) <> " when the walk began)"
+  }
+  <> ", "
   <> fmt.cell(objects, unit.Count)
   <> " objects and "
   <> fmt.cell(bytes, unit.Bytes)
   <> " in all, read "
   <> fmt.duration_ms(age_ms)
   <> " ago. Table properties only: contents are never read. "
+  <> "The ets figure under Categories is larger than the sum of table "
+  <> "memory because erlang:memory(ets) also counts allocator overhead. "
   <> case skipped {
     0 -> ""
     n -> fmt.count(n) <> " tables were deleted before they could be read. "

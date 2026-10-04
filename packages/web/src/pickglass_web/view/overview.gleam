@@ -408,8 +408,19 @@ fn roles_panel(data: OverviewModel) -> Element(Msg) {
             "The anonymous part of the resident set is not readable on this platform, so it is not listed.",
           )
       },
+      case list.any(data.roles.body, coarse_start) {
+        True -> ui.note("Process start times are good to a second.")
+        False -> element.none()
+      },
     ],
   )
+}
+
+fn coarse_start(role: OsRole) -> Bool {
+  case role.os.start {
+    identity.CoarseStart(_) -> True
+    identity.PreciseStart(_) | identity.UnreadableStart -> False
+  }
 }
 
 fn anon_readable(role: OsRole) -> Bool {

@@ -319,6 +319,11 @@ fn calls_panel(calls: Option(CallsTimeline)) -> Element(Msg) {
     Some(data) -> {
       let hidden = activity.hidden_calls(data.tracks)
 
+      let drawn =
+        list.fold(data.tracks, 0, fn(total, track) {
+          total + list.length(track.calls)
+        })
+
       ui.panel(
         title: "Calls · probe " <> data.probe,
         info: data.info,
@@ -326,26 +331,24 @@ fn calls_panel(calls: Option(CallsTimeline)) -> Element(Msg) {
         body: [
           html.div([attribute.class("graph-frame")], [activity.calls(data)]),
           notes(data.notes),
-          ui.note(
-            "The first "
-            <> fmt.count(
-              list.fold(data.tracks, 0, fn(total, track) {
-                total + list.length(track.calls)
-              }),
-            )
-            <> " calls to finish are drawn, nested under their callers. A call "
-            <> "is drawn when it returns, so a call still running when the "
-            <> "probe stopped is closed at the last event seen."
-            <> case hidden {
-              0 -> ""
-              count ->
-                " "
-                <> fmt.count(count)
-                <> " calls nested deeper than "
-                <> int.to_string(activity.max_call_rows)
-                <> " levels are not drawn."
-            },
-          ),
+          ui.note(case drawn {
+            0 -> "No call finished in the window, so nothing is drawn."
+            _ ->
+              "The first "
+              <> fmt.count(drawn)
+              <> " calls to finish are drawn, nested under their callers. A call "
+              <> "is drawn when it returns, so a call still running when the "
+              <> "probe stopped is closed at the last event seen."
+              <> case hidden {
+                0 -> ""
+                count ->
+                  " "
+                  <> fmt.count(count)
+                  <> " calls nested deeper than "
+                  <> int.to_string(activity.max_call_rows)
+                  <> " levels are not drawn."
+              }
+          }),
         ],
       )
     }

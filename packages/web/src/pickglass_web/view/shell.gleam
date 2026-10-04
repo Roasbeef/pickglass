@@ -49,6 +49,16 @@ pub fn view(
 }
 
 fn self_strip(strip: StripModel, links: Links) -> Element(Msg) {
+  // A detached viewer observes nothing and runs no probe, so the meter and
+  // the probe indicator would read as live figures of a node it has left.
+  let live = case strip.source {
+    model.Detached(_) -> []
+    model.Live | model.Viewing(_) -> [
+      observer_meter(strip),
+      probe_indicator(strip, links),
+    ]
+  }
+
   html.div([attribute.class("strip")], [
     html.span([attribute.class("brand")], [element.text("pickglass")]),
     html.span([attribute.class("node"), attribute.title(strip.node)], [
@@ -58,8 +68,7 @@ fn self_strip(strip: StripModel, links: Links) -> Element(Msg) {
     source_pill(strip),
     html.span([attribute.class("spacer")], []),
     detach_control(strip),
-    observer_meter(strip),
-    probe_indicator(strip, links),
+    ..live
   ])
 }
 

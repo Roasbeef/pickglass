@@ -225,7 +225,7 @@ fn store(model: Model, feed: Feed) -> Model {
   }
 }
 
-// A notice that still reads "Requested: ..." is a promise, and it stops being
+// A notice that still reads "Asked the viewer to ..." is a promise, and it stops being
 // true when the feed that answers it arrives. The page then draws the
 // outcome, so the promise is cleared; a refusal or any other notice is left
 // alone, because it is not answered by a feed.
@@ -584,8 +584,8 @@ fn ask(
   }
 }
 
-/// The sentence shown after a request is sent. It says the request is
-/// pending, because the viewer, not the page, decides.
+/// The sentence shown after a request is sent. It says the viewer was asked,
+/// not that it happened, because the viewer, not the page, decides.
 pub fn describe(request: Request) -> String {
   let what = case request {
     msg.RequestPin(_) -> "pin a process"
@@ -622,7 +622,7 @@ pub fn describe(request: Request) -> String {
     msg.ExportTrace(_) -> "export the timeline"
   }
 
-  "Requested: " <> what <> ". The viewer decides whether to allow it."
+  "Asked the viewer to " <> what <> "."
 }
 
 // ------------------------------------------------------------ checks

@@ -118,7 +118,7 @@ pub fn view(
         <> "rows beneath a group need not add to it. The unknown row lists "
         <> "its five largest processes; open it for the rest.",
       ),
-      ui.note(labelled_text(data.labelled)),
+      ui.note(labelled_text(data.labelled, data.info.coverage.requested)),
       ui.note(ets_text(data.ets)),
     ],
   )
@@ -182,26 +182,46 @@ fn ets_text(ets: memory_model.OwnersEts) -> String {
   }
 }
 
-fn labelled_text(counts: #(Int, Int)) -> String {
+// The census can count more processes than it lists, so the sentence says
+// which of the two the labels were read against.
+fn labelled_text(counts: #(Int, Int), counted: Int) -> String {
+  let listed = counts.0 + counts.1
+
   "Labels read on "
   <> fmt.count(counts.0)
   <> " of the "
-  <> fmt.count(counts.0 + counts.1)
-  <> " processes listed; "
+  <> fmt.count(listed)
+  <> " processes listed"
+  <> case counted == listed {
+    True -> ""
+    False -> " (" <> fmt.count(counted) <> " counted)"
+  }
+  <> "; "
   <> fmt.count(counts.1)
   <> " carried none."
 }
 
 fn controls(data: OwnersModel) -> List(Element(Msg)) {
+  let baseline = case data.checkpoints {
+    // A select with no option is a control that does nothing; the sentence
+    // says what would make it appear, as the Overview's column header does.
+    [] ->
+      html.span([attribute.class("muted")], [
+        element.text("no checkpoint yet; take one on Overview"),
+      ])
+    checkpoints ->
+      html.label([attribute.class("select")], [
+        element.text("Δ vs "),
+        html.select(
+          [wire.key_chosen(fn(picked) { msg.Ask(msg.ChooseBaseline(picked)) })],
+          list.map(checkpoints, fn(ref) { option_for(ref, data.baseline) }),
+        ),
+      ])
+  }
+
   [
     html.span([attribute.class("chip")], [element.text("group by owner path")]),
-    html.label([attribute.class("select")], [
-      element.text("Δ vs "),
-      html.select(
-        [wire.key_chosen(fn(picked) { msg.Ask(msg.ChooseBaseline(picked)) })],
-        list.map(data.checkpoints, fn(ref) { option_for(ref, data.baseline) }),
-      ),
-    ]),
+    baseline,
   ]
 }
 
@@ -382,7 +402,10 @@ fn ets_cell(row: OwnerRow) -> Element(Msg) {
       html.td([attribute.class("num")], [
         element.text(fmt.cell(row.ets_bytes, unit.Bytes)),
         html.span([attribute.class("muted")], [
-          element.text(" · " <> fmt.count(tables)),
+          element.text(case tables {
+            1 -> " · 1 table"
+            n -> " · " <> fmt.count(n) <> " tables"
+          }),
         ]),
       ])
     _, _ -> ui.num(row.ets_bytes, unit.Bytes)
@@ -469,8 +492,11 @@ fn member_row(member: ProcRow, links: Links) -> Element(Msg) {
     ]),
     ui.num(model_count(), unit.Count),
     ui.num(member.heap_cap, unit.Bytes),
-    html.td([attribute.class("num")], []),
-    html.td([attribute.class("num")], []),
+
+    // The ETS bytes and the change are figures of a whole group; a process
+    // row has none of its own, and a blank cell is neither number nor word.
+    ui.num(measure.NotApplicable, unit.Bytes),
+    ui.delta(measure.NotApplicable, unit.Bytes),
     ui.num(member.mailbox, unit.Count),
     ui.num(member.reductions, unit.Reductions),
     ui.overlap(member.binary_refs, unit.Count, binary_why),

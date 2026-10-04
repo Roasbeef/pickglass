@@ -73,6 +73,7 @@ fn interval_text(info: PanelInfo) -> String {
   }
 
   case info.took_ms {
+    Some(0) -> asked <> behind <> " · took under 1 ms"
     Some(took) -> asked <> behind <> " · took " <> fmt.duration_ms(took)
     None -> asked <> behind
   }

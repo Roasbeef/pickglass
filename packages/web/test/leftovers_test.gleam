@@ -52,7 +52,7 @@ pub fn a_detached_banner_lists_no_grants_test() {
   assert !string.contains(detached, "class=\"grant\"")
 }
 
-// "Requested: ..." is a promise, and the profile feed that answers it clears
+// "Asked the viewer to ..." is a promise, and the profile feed that answers it clears
 // it. A refusal is not answered by a feed and stays.
 pub fn the_requested_notice_clears_when_the_profile_arrives_test() {
   let start = app.Start(page: page.Profile, links: page.Files, feeds: [])
@@ -153,7 +153,7 @@ pub fn an_owner_row_with_roles_can_be_opened_test() {
 }
 
 // A request the flow answers (a plan, a refusal, a running probe) clears its
-// "Requested" notice when the flow is fed, so the page does not go on saying
+// "Asked the viewer to" notice when the flow is fed, so the page does not go on saying
 // it asked after the answer is on the screen.
 pub fn the_requested_notice_clears_when_the_flow_is_fed_test() {
   let start = app.Start(page: page.Overview, links: page.Files, feeds: [])
