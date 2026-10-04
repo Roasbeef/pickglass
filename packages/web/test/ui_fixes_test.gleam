@@ -684,3 +684,18 @@ pub fn an_unreadable_anon_column_becomes_one_note_and_a_negative_gap_says_why_te
   string.contains(html, "not readable on this platform") |> should.be_true
   string.contains(html, "Negative: the carriers are reserved") |> should.be_true
 }
+
+pub fn a_differential_flame_with_nothing_to_draw_says_so_test() {
+  let assert Ok(data) = fixture.compare() as "the compare fixture"
+  let assert Some(diff) = data.diff
+  let empty = flame.Layout(..diff.layout, boxes: [], total: 0, rows: 0)
+  let html =
+    element.to_string(compare.view(
+      model.CompareModel(
+        ..data,
+        diff: Some(model.DiffFlame(..diff, layout: empty)),
+      ),
+    ))
+
+  string.contains(html, "there is no difference to draw") |> should.be_true
+}

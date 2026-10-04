@@ -566,7 +566,14 @@ fn handle_request(
     Ok(seam.Run(command, follow)) -> {
       let decision = gate.authorize(state.gate, principal, command, now)
 
-      audit.append_all(state.config.audit, decision.entries)
+      // The audit page rereads the log every cadence. Recording each allowed
+      // read would fill the log's window with the page's own reads and push
+      // out the decisions it exists to show, so only a denied read is kept.
+      case command, decision.result {
+        policy.ReadAudit(_), Ok(_) -> Nil
+        _, _ -> audit.append_all(state.config.audit, decision.entries)
+      }
+
       run_decision(state, decision, follow, None)
     }
 
@@ -831,6 +838,18 @@ fn save(state: State) -> Result(String, String) {
   ))
 
   let path = saver.directory <> "/" <> id <> ".pgcap"
+
+  // A save directory that does not exist yet is made, since the operator who
+  // named it wants captures in it, not a refusal.
+  use _ <- result.try(
+    simplifile.create_directory_all(saver.directory)
+    |> result.map_error(fn(error) {
+      "cannot create "
+      <> saver.directory
+      <> ": "
+      <> simplifile.describe_error(error)
+    }),
+  )
 
   capture_file.write(path, header, records)
   |> result.replace(path)

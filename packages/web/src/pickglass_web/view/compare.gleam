@@ -475,26 +475,37 @@ fn diff_panel(
         _ -> flame_chart.Withheld
       }
 
-      ui.plain_panel(title: "Differential flame", body: [
-        html.div([attribute.class("graph-frame")], [
-          flame_chart.view(
-            layout: diff.layout,
-            facing: flame_chart.RootBelow,
-            name_of:,
-            unit: unit.Count,
-            selected: None,
-            search: "",
-            verdict:,
-            on_select: fn(box) { msg.Ui(msg.SelectBox(box)) },
-          ),
-        ]),
-        legend(blocking),
-        ui.note(
-          "Compared on the samples taken while a process was running or "
-          <> "runnable; samples taken while one waited are left out of both "
-          <> "sides, as the Profile page leaves them out by default.",
-        ),
-      ])
+      // Both profiles held no sample taken on a scheduler, so there is
+      // nothing to draw; an empty frame would read as a rendering fault.
+      case diff.layout.total {
+        0 ->
+          ui.plain_panel(title: "Differential flame", body: [
+            ui.note(
+              "Neither capture's profile holds a sample taken while a process was running or runnable, so there is no difference to draw. Samples of waiting processes are left out of both sides.",
+            ),
+          ])
+        _ ->
+          ui.plain_panel(title: "Differential flame", body: [
+            html.div([attribute.class("graph-frame")], [
+              flame_chart.view(
+                layout: diff.layout,
+                facing: flame_chart.RootBelow,
+                name_of:,
+                unit: unit.Count,
+                selected: None,
+                search: "",
+                verdict:,
+                on_select: fn(box) { msg.Ui(msg.SelectBox(box)) },
+              ),
+            ]),
+            legend(blocking),
+            ui.note(
+              "Compared on the samples taken while a process was running or "
+              <> "runnable; samples taken while one waited are left out of both "
+              <> "sides, as the Profile page leaves them out by default.",
+            ),
+          ])
+      }
     }
   }
 }

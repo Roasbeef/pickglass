@@ -1714,7 +1714,13 @@ fn profile_header(
         | profile.AllocationCounts -> gate.sampling_hz
       }
 
-      #("samples", rate * seconds * int.max(1, probe.matched), taken)
+      // The plan's estimate rounds the rate per process, so a probe can take
+      // more than it; the figure is never shown as fewer than were taken.
+      #(
+        "samples",
+        int.max(rate * seconds * int.max(1, probe.matched), taken),
+        taken,
+      )
     }
 
     // A call tree's coverage is the functions it matched and how many of

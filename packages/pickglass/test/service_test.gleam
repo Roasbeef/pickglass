@@ -323,6 +323,37 @@ pub fn a_checkpoint_and_a_save_write_a_verifiable_capture_test() {
   let _ = simplifile.delete(path)
 }
 
+// The audit page polls; its allowed reads must not fill the log.
+pub fn reading_the_audit_log_does_not_add_to_it_test() {
+  let rig = harness.replay([fixture.observation(0, 1000)], None)
+  let page = harness.page(rig, "alice", harness.all)
+  let _ = page.submit(seam.Checkpoint("mark"))
+  let before = list.length(page.audit(100))
+
+  list.each([1, 2, 3], fn(_) {
+    let _ = page.audit(100)
+    Nil
+  })
+
+  assert list.length(page.audit(100)) == before
+}
+
+// A save directory that does not exist is created, not a silent failure.
+pub fn a_save_makes_a_missing_directory_test() {
+  let dir = "build/service_test_missing/inner"
+  let _ = simplifile.delete("build/service_test_missing")
+  let rig =
+    harness.replay(
+      [fixture.observation(0, 1000)],
+      Some(service.Saver(directory: dir, facts: capture_facts(), cadence_ms: 0)),
+    )
+  let page = harness.page(rig, "alice", harness.all)
+  let assert seam.CaptureSaved(path) = page.submit(seam.SaveCapture)
+
+  assert simplifile.is_file(path) == Ok(True)
+  let _ = simplifile.delete("build/service_test_missing")
+}
+
 fn capture_facts() {
   import_facts()
 }
