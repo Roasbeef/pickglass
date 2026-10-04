@@ -253,7 +253,7 @@ pub fn view(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
   }
 
   let pending = case data.pending {
-    Some(card) -> [plan_dialog(card, ui_state.plan.modules)]
+    Some(card) -> [plan_dialog(card)]
     None -> []
   }
 
@@ -271,78 +271,90 @@ pub fn view(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
 fn draft_form(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
   let draft = ui_state.plan
 
+  // The module field and the button are in one form, so the patterns
+  // travel in the submit and a plan is never made from an earlier value.
   ui.plain_panel(title: "Plan a probe", body: [
-    html.div([attribute.class("form-grid")], [
-      field("Kind", [
-        html.select(
-          [
-            wire.code_chosen(msg.parse_probe, policy.Counters, fn(kind) {
-              msg.Ui(msg.DraftKind(kind))
-            }),
-          ],
-          list.map(
-            [
-              policy.Counters,
-              policy.Sampling,
-              policy.CallTree,
-              policy.SchedulingGc,
-            ],
-            fn(kind) {
-              html.option(
+    html.form(
+      [
+        attribute.class("plan-form"),
+        wire.submitted("modules", fn(text) { msg.Ui(msg.SubmitDraft(text)) }),
+      ],
+      [
+        html.div([attribute.class("form-grid")], [
+          field("Kind", [
+            html.select(
+              [
+                wire.code_chosen(msg.parse_probe, policy.Counters, fn(kind) {
+                  msg.Ui(msg.DraftKind(kind))
+                }),
+              ],
+              list.map(
                 [
-                  attribute.value(msg.probe_code(kind)),
-                  attribute.selected(kind == draft.kind),
+                  policy.Counters,
+                  policy.Sampling,
+                  policy.CallTree,
+                  policy.SchedulingGc,
                 ],
-                kind_title(kind),
-              )
-            },
+                fn(kind) {
+                  html.option(
+                    [
+                      attribute.value(msg.probe_code(kind)),
+                      attribute.selected(kind == draft.kind),
+                    ],
+                    kind_title(kind),
+                  )
+                },
+              ),
+            ),
+          ]),
+          field("Target", [
+            html.select(
+              [
+                attribute.data("test-id", "draft-target"),
+                wire.key_chosen(fn(target) { msg.Ui(msg.DraftTarget(target)) }),
+              ],
+              list.map(data.targets, fn(target) {
+                html.option(
+                  [
+                    attribute.value(key.to_string(target.0)),
+                    attribute.selected(Some(target.0) == draft.target),
+                  ],
+                  target.1,
+                )
+              }),
+            ),
+          ]),
+          modules_field(draft),
+          field("Duration", [
+            html.select(
+              [
+                wire.code_chosen(msg.parse_duration, msg.Seconds30, fn(choice) {
+                  msg.Ui(msg.DraftDuration(choice))
+                }),
+              ],
+              list.map(msg.durations_for(draft.kind), fn(choice) {
+                html.option(
+                  [
+                    attribute.value(msg.duration_code(choice)),
+                    attribute.selected(choice == draft.duration),
+                  ],
+                  fmt.duration_ms(msg.duration_ms(choice)),
+                )
+              }),
+            ),
+          ]),
+        ]),
+        html.div([attribute.class("form-actions")], [
+          html.button(
+            [
+              attribute.class("btn btn-primary"),
+              attribute.type_("submit"),
+            ],
+            [element.text("Plan probe…")],
           ),
-        ),
-      ]),
-      field("Target", [
-        html.select(
-          [wire.key_chosen(fn(target) { msg.Ui(msg.DraftTarget(target)) })],
-          list.map(data.targets, fn(target) {
-            html.option(
-              [
-                attribute.value(key.to_string(target.0)),
-                attribute.selected(Some(target.0) == draft.target),
-              ],
-              target.1,
-            )
-          }),
-        ),
-      ]),
-      modules_field(draft),
-      field("Duration", [
-        html.select(
-          [
-            wire.code_chosen(msg.parse_duration, msg.Seconds30, fn(choice) {
-              msg.Ui(msg.DraftDuration(choice))
-            }),
-          ],
-          list.map(msg.durations_for(draft.kind), fn(choice) {
-            html.option(
-              [
-                attribute.value(msg.duration_code(choice)),
-                attribute.selected(choice == draft.duration),
-              ],
-              fmt.duration_ms(msg.duration_ms(choice)),
-            )
-          }),
-        ),
-      ]),
-    ]),
-    html.div([attribute.class("form-actions")], [
-      html.button(
-        [
-          attribute.class("btn btn-primary"),
-          attribute.type_("button"),
-          wire.click(msg.Ui(msg.SubmitDraft)),
-        ],
-        [element.text("Plan probe…")],
-      ),
-    ]),
+        ]),
+      ],
+    ),
     ui.note(
       "Planning does not start anything. The plan below states what it "
       <> "would do and must be confirmed.",
@@ -354,15 +366,21 @@ fn draft_form(data: ProbesModel, ui_state: UiState) -> Element(Msg) {
 // them; a counters or call tree probe names the modules it traces.
 fn modules_field(draft: state.PlanDraft) -> Element(Msg) {
   case policy.needs_modules(draft.kind) {
-    False -> element.none()
+    // The submit always names the field, so a kind that traces nothing sends
+    // an empty one that `update` ignores.
+    False ->
+      html.input([
+        attribute.type_("hidden"),
+        attribute.name("modules"),
+        attribute.value(""),
+      ])
     True ->
       field("Module patterns", [
         html.input([
           attribute.class("text mono"),
           attribute.type_("text"),
+          attribute.name("modules"),
           attribute.placeholder("loom@runtime@keeper  lists"),
-          attribute.value(draft.modules),
-          wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
         ]),
       ])
   }
@@ -382,15 +400,15 @@ fn field(label: String, controls: List(Element(Msg))) -> Element(Msg) {
 /// one-click flow draw the same dialog, so a plan reads the same wherever it
 /// is confirmed.
 ///
-/// `modules` is the module pattern text the operator has typed in the plan
-/// form, which a stack profile's "trace calls instead" control sends.
+/// A stack profile's "trace calls instead" control is a form of its own, so
+/// the module patterns reach `update` in its submit.
 ///
 /// ## Examples
 ///
 /// ```gleam
 /// probes.plan_dialog(card, "")
 /// ```
-pub fn plan_dialog(card: PlanCard, modules: String) -> Element(Msg) {
+pub fn plan_dialog(card: PlanCard) -> Element(Msg) {
   let scope = policy.plan_scope(card.plan)
   let estimate = policy.plan_estimate(card.plan)
   let needs =
@@ -438,7 +456,7 @@ pub fn plan_dialog(card: PlanCard, modules: String) -> Element(Msg) {
           ],
         ]),
       ),
-      adjust_controls(card, modules),
+      adjust_controls(card),
       html.div([attribute.class("dialog-actions")], [
         html.button(
           [
@@ -618,7 +636,7 @@ fn trace_rows(card: PlanCard) -> List(Element(Msg)) {
 // enough processes also offers the call trace, which needs the modules to
 // trace: the field takes them and the button sends them as a request the
 // viewer checks again.
-fn adjust_controls(card: PlanCard, modules: String) -> Element(Msg) {
+fn adjust_controls(card: PlanCard) -> Element(Msg) {
   case card.adjust {
     model.NotAdjustable -> element.none()
     model.AdjustStacks(duration_ms:, rate_hz:, processes:) ->
@@ -642,7 +660,7 @@ fn adjust_controls(card: PlanCard, modules: String) -> Element(Msg) {
               )
             })
           ],
-          trace_instead(card.key, processes, modules),
+          trace_instead(card.key, processes),
         ])
       ])
     model.AdjustCalls(processes: _, duration_ms: _) ->
@@ -656,33 +674,37 @@ fn adjust_controls(card: PlanCard, modules: String) -> Element(Msg) {
   }
 }
 
-fn trace_instead(
-  plan: Key,
-  processes: Int,
-  modules: String,
-) -> List(Element(Msg)) {
+fn trace_instead(plan: Key, processes: Int) -> List(Element(Msg)) {
   case processes <= policy.target_limit(policy.CallTree) {
     False -> []
     True -> [
       html.span([attribute.class("field-label")], [
         element.text("Or trace calls of"),
       ]),
-      html.input([
-        attribute.class("text mono"),
-        attribute.type_("text"),
-        attribute.placeholder("loom@runtime@keeper"),
-        attribute.value(modules),
-        attribute.aria("label", "Modules to trace"),
-        wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
-      ]),
-      html.button(
+      html.form(
         [
-          attribute.class("btn btn-small"),
-          attribute.type_("button"),
-          attribute.data("test-id", "trace-calls-instead"),
-          wire.click(msg.Ui(msg.SubmitTraceInstead(plan))),
+          attribute.class("inline-form trace-instead"),
+          wire.submitted("modules", fn(text) {
+            msg.Ui(msg.SubmitTraceInstead(plan, text))
+          }),
         ],
-        [element.text("Trace calls instead")],
+        [
+          html.input([
+            attribute.class("text mono"),
+            attribute.type_("text"),
+            attribute.name("modules"),
+            attribute.placeholder("loom@runtime@keeper"),
+            attribute.aria("label", "Modules to trace"),
+          ]),
+          html.button(
+            [
+              attribute.class("btn btn-small"),
+              attribute.type_("submit"),
+              attribute.data("test-id", "trace-calls-instead"),
+            ],
+            [element.text("Trace calls instead")],
+          ),
+        ],
       ),
     ]
   }

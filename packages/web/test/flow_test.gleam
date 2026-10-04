@@ -105,7 +105,7 @@ pub fn the_buttons_need_both_capabilities_test() {
 
   let drawn = fn(grants) {
     [
-      element.to_string(overview.view(fixture.overview(), None, grants, "")),
+      element.to_string(overview.view(fixture.overview(), None, grants)),
       element.to_string(processes.view(fixture.processes(), page.Files, grants)),
       element.to_string(owners.view(
         fixture.owners(),
@@ -113,7 +113,7 @@ pub fn the_buttons_need_both_capabilities_test() {
         page.Files,
         grants,
       )),
-      element.to_string(process_detail.view(detail, grants, page.Files, "")),
+      element.to_string(process_detail.view(detail, grants, page.Files)),
     ]
     |> list.map(fn(html) { string.contains(html, "btn-profile") })
   }

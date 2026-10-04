@@ -35,7 +35,6 @@ fn detail_html(data: model.ProcessDetailModel) -> String {
     data,
     policy.all_capabilities,
     page.Files,
-    "",
   ))
 }
 
@@ -211,7 +210,7 @@ pub fn the_binaries_button_needs_a_pin_and_the_observe_capability_test() {
   assert string.contains(detail_html(pinned), "Read binaries")
   assert !string.contains(detail_html(unpinned), "Read binaries")
   assert !string.contains(
-    element.to_string(process_detail.view(pinned, [], page.Files, "")),
+    element.to_string(process_detail.view(pinned, [], page.Files)),
     "Read binaries",
   )
 }
@@ -221,7 +220,6 @@ pub fn a_binaries_plan_names_its_cost_and_what_it_does_not_prove_test() {
   let shown =
     element.to_string(probes.plan_dialog(
       model.PlanCard(..card, what: model.BinariesPlan),
-      "",
     ))
 
   assert string.contains(shown, "Read the binaries one process holds")

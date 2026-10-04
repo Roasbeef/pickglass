@@ -79,7 +79,7 @@ pub fn a_refusal_survives_a_profile_feed_test() {
   }
   let refused =
     app.init(start)
-    |> run(msg.Ui(msg.SubmitDraft))
+    |> run(msg.Ui(msg.SubmitDraft("")))
 
   let assert Some(sentence) = refused.ui.notice
 

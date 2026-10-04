@@ -233,14 +233,7 @@ pub fn the_plan_form_refuses_bad_module_patterns_test() {
     app.update(
       fn(_) { panic as "no request expected" },
       model,
-      msg.Ui(msg.DraftModules("../etc/passwd")),
-    )
-
-  let #(model, _) =
-    app.update(
-      fn(_) { panic as "no request expected" },
-      model,
-      msg.Ui(msg.SubmitDraft),
+      msg.Ui(msg.SubmitDraft("../etc/passwd")),
     )
 
   model.ui.last_request |> should.equal(None)
@@ -256,8 +249,7 @@ pub fn the_plan_form_sends_a_checked_draft_test() {
   let model =
     simulate.model(sim)
     |> update(msg.Ui(msg.DraftTarget(key.indexed("proc", 1))))
-    |> update(msg.Ui(msg.DraftModules("loom@runtime@keeper lists")))
-    |> update(msg.Ui(msg.SubmitDraft))
+    |> update(msg.Ui(msg.SubmitDraft("loom@runtime@keeper lists")))
 
   model.ui.last_request
   |> should.equal(
@@ -279,8 +271,7 @@ pub fn an_invalid_filter_pattern_is_not_sent_test() {
 
   let model =
     simulate.model(support.simulation(on: page.Profile))
-    |> update(msg.Ui(msg.FilterPattern("*bad")))
-    |> update(msg.Ui(msg.SubmitFilter))
+    |> update(msg.Ui(msg.SubmitFilter("*bad")))
 
   model.ui.last_request |> should.equal(None)
 }
@@ -292,8 +283,7 @@ pub fn a_valid_filter_pattern_is_sent_test() {
 
   let model =
     simulate.model(support.simulation(on: page.Profile))
-    |> update(msg.Ui(msg.FilterPattern("loom@runtime")))
-    |> update(msg.Ui(msg.SubmitFilter))
+    |> update(msg.Ui(msg.SubmitFilter("loom@runtime")))
 
   model.ui.last_request
   |> should.equal(Some(msg.AddFilter(msg.FocusFilter, "loom@runtime")))
@@ -312,8 +302,7 @@ pub fn a_misplaced_wildcard_is_refused_with_the_reason_before_any_request_test()
   let model =
     simulate.model(sim)
     |> update(msg.Ui(msg.DraftTarget(key.indexed("proc", 1))))
-    |> update(msg.Ui(msg.DraftModules("*")))
-    |> update(msg.Ui(msg.SubmitDraft))
+    |> update(msg.Ui(msg.SubmitDraft("*")))
 
   model.ui.last_request |> should.equal(None)
   assert string.contains(option.unwrap(model.ui.notice, ""), "end of a module")

@@ -42,17 +42,14 @@ import pickglass_web/page.{type Links}
 import pickglass_web/view/ui
 import pickglass_web/wire
 
-/// Draw the process detail page for a principal holding `grants`. `modules`
-/// is the module pattern text the operator has typed in the plan form, which
-/// the call trace button sends.
+/// Draw the process detail page for a principal holding `grants`.
 pub fn view(
   data: ProcessDetailModel,
   grants: List(Capability),
   links: Links,
-  modules: String,
 ) -> Element(Msg) {
   html.div([attribute.class("stack")], [
-    header(data, grants, modules),
+    header(data, grants),
     html.div([attribute.class("grid two")], [
       ownership_panel(data, links),
       evidence_panel(data),
@@ -149,11 +146,7 @@ fn binaries_panel(binaries: memory_model.Binaries) -> Element(Msg) {
   })
 }
 
-fn header(
-  data: ProcessDetailModel,
-  grants: List(Capability),
-  modules: String,
-) -> Element(Msg) {
+fn header(data: ProcessDetailModel, grants: List(Capability)) -> Element(Msg) {
   let life = case data.liveness {
     model.Alive -> ui.badge("ok", "alive")
     model.Exited(at:) -> ui.badge("warn", "exited " <> at)
@@ -173,7 +166,7 @@ fn header(
       life,
       pin,
     ]),
-    html.div([attribute.class("actions")], actions(data, grants, modules)),
+    html.div([attribute.class("actions")], actions(data, grants)),
   ])
 }
 
@@ -182,7 +175,6 @@ fn header(
 fn actions(
   data: ProcessDetailModel,
   grants: List(Capability),
-  modules: String,
 ) -> List(Element(Msg)) {
   let pin_button = case data.pin {
     model.NotPinned -> button("Pin", "btn", msg.Ask(msg.RequestPin(data.key)))
@@ -242,7 +234,7 @@ fn actions(
     pin_button,
     ..list.flatten([
       profile,
-      tracing(data, grants, modules),
+      tracing(data, grants),
       probe,
       binaries,
       gc,
@@ -255,27 +247,36 @@ fn actions(
 // Each pins the process when it is not pinned and ends in a plan that waits
 // for Confirm. A recording needs nothing more; a call trace names the modules
 // whose functions to trace, because the agent will not trace every function of
-// a node, so it has a field for them.
+// a node, so it has a field for them. The field and its button are one form, so
+// the patterns travel in the submit and no draft of them is kept.
 fn tracing(
   data: ProcessDetailModel,
   grants: List(Capability),
-  modules: String,
 ) -> List(Element(Msg)) {
   case list.contains(grants, policy.Profile) {
     False -> []
     True -> [
       button("Record scheduling…", "btn", msg.Ask(msg.RecordProcess(data.key))),
-      html.span([attribute.class("inline-form")], [
-        html.input([
-          attribute.class("text mono"),
-          attribute.type_("text"),
-          attribute.placeholder("modules, e.g. loom@runtime@*"),
-          attribute.aria("label", "Modules to trace"),
-          attribute.value(modules),
-          wire.text_entered(fn(text) { msg.Ui(msg.DraftModules(text)) }),
-        ]),
-        button("Trace calls…", "btn", msg.Ui(msg.SubmitTraceProcess(data.key))),
-      ]),
+      html.form(
+        [
+          attribute.class("inline-form trace-process"),
+          wire.submitted("modules", fn(text) {
+            msg.Ui(msg.SubmitTraceProcess(data.key, text))
+          }),
+        ],
+        [
+          html.input([
+            attribute.class("text mono"),
+            attribute.type_("text"),
+            attribute.name("modules"),
+            attribute.placeholder("modules, e.g. loom@runtime@*"),
+            attribute.aria("label", "Modules to trace"),
+          ]),
+          html.button([attribute.class("btn"), attribute.type_("submit")], [
+            element.text("Trace calls…"),
+          ]),
+        ],
+      ),
     ]
   }
 }

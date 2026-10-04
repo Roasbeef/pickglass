@@ -25,6 +25,7 @@ import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
+import lustre/element/keyed
 import lustre/element/svg
 import pickglass_core/identity
 import pickglass_core/measure.{type Measurement, Known}
@@ -49,7 +50,6 @@ pub fn view(
   data: OverviewModel,
   movers: Option(model.OwnerMovers),
   grants: List(Capability),
-  checkpoint_name: String,
 ) -> Element(Msg) {
   html.div([attribute.class("stack")], [
     html.div([attribute.class("profile-bar")], [
@@ -61,20 +61,16 @@ pub fn view(
         ),
       ]),
     ]),
-    html.div(
-      [attribute.class("grid overview")],
-      overview_panels(data, movers, checkpoint_name),
-    ),
+    html.div([attribute.class("grid overview")], overview_panels(data, movers)),
   ])
 }
 
 fn overview_panels(
   data: OverviewModel,
   movers: Option(model.OwnerMovers),
-  checkpoint_name: String,
 ) -> List(Element(Msg)) {
   [
-    layers_panel(data, checkpoint_name),
+    layers_panel(data),
     schedulers_panel(data),
     movers_panel(movers),
     counts_panel(data),
@@ -148,14 +144,14 @@ fn movers_panel(movers: Option(model.OwnerMovers)) -> Element(Msg) {
   }
 }
 
-fn layers_panel(data: OverviewModel, checkpoint_name: String) -> Element(Msg) {
+fn layers_panel(data: OverviewModel) -> Element(Msg) {
   let rows = data.layers.body
   let peak = largest(rows)
 
   ui.panel(
     title: "Memory layers",
     info: data.layers.info,
-    controls: checkpoint_controls(data, checkpoint_name),
+    controls: checkpoint_controls(data),
     body: [
       html.table([attribute.class("tbl layers")], [
         html.thead([], [
@@ -183,10 +179,12 @@ fn delta_title(checkpoint: Option(CheckpointRef)) -> String {
   }
 }
 
-fn checkpoint_controls(
-  data: OverviewModel,
-  name: String,
-) -> List(Element(Msg)) {
+// The baseline chooser and the form that takes a checkpoint. The name field
+// is read from the submit, so a name typed an instant before Enter or the
+// button is the name used. The form is keyed by the checkpoints on the page, so
+// that when the viewer reports the new one the browser builds a fresh, empty
+// field instead of keeping the name that was just used.
+fn checkpoint_controls(data: OverviewModel) -> List(Element(Msg)) {
   let chosen = case data.checkpoint {
     Some(ref) -> Some(ref.key)
     None -> None
@@ -210,24 +208,41 @@ fn checkpoint_controls(
         }),
       ),
     ]),
-    html.input([
-      attribute.class("text checkpoint-name"),
-      attribute.type_("text"),
-      attribute.placeholder("name, such as idle-0"),
-      attribute.attribute("maxlength", "64"),
-      attribute.attribute("aria-label", "Checkpoint name"),
-      attribute.value(name),
-      wire.text_entered(fn(text) { msg.Ui(msg.DraftCheckpointName(text)) }),
+    keyed.div([attribute.class("inline-form")], [
+      #(
+        checkpoints_key(data.checkpoints),
+        html.form(
+          [
+            attribute.class("inline-form checkpoint-form"),
+            wire.submitted("name", fn(text) {
+              msg.Ask(msg.TakeCheckpoint(text))
+            }),
+          ],
+          [
+            html.input([
+              attribute.class("text checkpoint-name"),
+              attribute.type_("text"),
+              attribute.name("name"),
+              attribute.placeholder("name, such as idle-0"),
+              attribute.attribute("maxlength", "64"),
+              attribute.attribute("aria-label", "Checkpoint name"),
+            ]),
+            html.button([attribute.class("btn"), attribute.type_("submit")], [
+              element.text("Checkpoint now"),
+            ]),
+          ],
+        ),
+      ),
     ]),
-    html.button(
-      [
-        attribute.class("btn"),
-        attribute.type_("button"),
-        wire.click(msg.Ask(msg.TakeCheckpoint(name))),
-      ],
-      [element.text("Checkpoint now")],
-    ),
   ]
+}
+
+// The text that changes when a checkpoint is added, which is what clears the
+// name field.
+fn checkpoints_key(checkpoints: List(CheckpointRef)) -> String {
+  list.fold(checkpoints, "", fn(acc, ref) {
+    acc <> key.to_string(ref.key) <> ","
+  })
 }
 
 fn largest(rows: List(LayerRow)) -> Int {

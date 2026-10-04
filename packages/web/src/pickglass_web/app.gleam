@@ -387,18 +387,6 @@ fn ui_event(
         ),
       )
 
-    msg.DraftModules(text) ->
-      with_ui(
-        model,
-        state.UiState(
-          ..current,
-          plan: state.PlanDraft(..current.plan, modules: text),
-        ),
-      )
-
-    msg.DraftCheckpointName(text) ->
-      with_ui(model, state.UiState(..current, checkpoint_name: text))
-
     msg.DraftDuration(duration) ->
       with_ui(
         model,
@@ -421,37 +409,22 @@ fn ui_event(
         False -> refuse(model, "That process is not offered as a target.")
       }
 
-    msg.SubmitDraft -> submit_draft(on_request, model)
+    msg.SubmitDraft(text) -> submit_draft(on_request, model, text)
 
-    msg.SubmitTraceInstead(plan) ->
-      with_modules(model, fn(modules) {
+    msg.SubmitTraceInstead(plan, text) ->
+      with_modules(model, text, fn(modules) {
         ask(on_request, model, msg.TraceCallsInstead(plan, modules))
       })
 
-    msg.SubmitTraceProcess(process) ->
-      with_modules(model, fn(modules) {
+    msg.SubmitTraceProcess(process, text) ->
+      with_modules(model, text, fn(modules) {
         ask(on_request, model, msg.TraceProcess(process, modules))
       })
 
     msg.FilterKindChosen(kind) ->
-      with_ui(
-        model,
-        state.UiState(
-          ..current,
-          filter: state.FilterDraft(..current.filter, kind:),
-        ),
-      )
+      with_ui(model, state.UiState(..current, filter: state.FilterDraft(kind:)))
 
-    msg.FilterPattern(text) ->
-      with_ui(
-        model,
-        state.UiState(
-          ..current,
-          filter: state.FilterDraft(..current.filter, pattern: text),
-        ),
-      )
-
-    msg.SubmitFilter -> submit_filter(on_request, model)
+    msg.SubmitFilter(text) -> submit_filter(on_request, model, text)
   }
 }
 
@@ -470,6 +443,7 @@ fn toggle(rows: set.Set(Key), row: Key) -> set.Set(Key) {
 fn submit_draft(
   on_request: fn(Request) -> Effect(Msg),
   model: Model,
+  text: String,
 ) -> #(Model, Effect(Msg)) {
   let draft = model.ui.plan
 
@@ -480,7 +454,7 @@ fn submit_draft(
       case policy.needs_modules(draft.kind) {
         False -> ask(on_request, model, plan_draft(draft, target, []))
         True ->
-          with_modules(model, fn(modules) {
+          with_modules(model, text, fn(modules) {
             ask(on_request, model, plan_draft(draft, target, modules))
           })
       }
@@ -500,13 +474,14 @@ fn plan_draft(
   ))
 }
 
-// Run a request that needs module patterns with the ones typed in the plan
+// Run a request that needs module patterns with the ones submitted with the
 // form, or say what is wrong with them.
 fn with_modules(
   model: Model,
+  text: String,
   next: fn(List(String)) -> #(Model, Effect(Msg)),
 ) -> #(Model, Effect(Msg)) {
-  case wire.module_patterns(model.ui.plan.modules) {
+  case wire.module_patterns(text) {
     Ok(modules) -> next(modules)
 
     Error(wire.NoPatterns) ->
@@ -535,10 +510,11 @@ fn with_modules(
 fn submit_filter(
   on_request: fn(Request) -> Effect(Msg),
   model: Model,
+  text: String,
 ) -> #(Model, Effect(Msg)) {
   let draft = model.ui.filter
 
-  case pattern.compile(draft.pattern) {
+  case pattern.compile(text) {
     Ok(compiled) ->
       ask(
         on_request,
@@ -572,10 +548,6 @@ fn ask(
           ..model.ui,
           last_request: Some(request),
           notice: Some(describe(request)),
-          checkpoint_name: case request {
-            msg.TakeCheckpoint(_) -> ""
-            _ -> model.ui.checkpoint_name
-          },
         ),
       ),
       on_request(request),
@@ -1050,7 +1022,7 @@ fn toast(ui_state: UiState) -> Element(Msg) {
 // The one-click profile above the page body, once the viewer has fed it.
 fn flow_view(model: Model) -> Element(Msg) {
   case model.flow {
-    Ready(data) -> flow.view(data, model.links, model.page, model.ui)
+    Ready(data) -> flow.view(data, model.links, model.page)
     Waiting -> element.none()
   }
 }
@@ -1073,7 +1045,6 @@ fn page_body(model: Model) -> Element(Msg) {
             Waiting -> None
           },
           grants(model),
-          model.ui.checkpoint_name,
         )
       })
     page.Owners ->
@@ -1086,12 +1057,7 @@ fn page_body(model: Model) -> Element(Msg) {
       })
     page.ProcessDetail ->
       loaded("Process", model.process_detail, fn(data) {
-        process_detail.view(
-          data,
-          grants(model),
-          model.links,
-          model.ui.plan.modules,
-        )
+        process_detail.view(data, grants(model), model.links)
       })
     page.Memory -> loaded("Memory", model.memory, memory.view)
     page.Supervision ->

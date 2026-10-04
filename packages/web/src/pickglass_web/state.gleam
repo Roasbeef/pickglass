@@ -22,13 +22,12 @@ import pickglass_core/policy
 import pickglass_web/key.{type Key}
 import pickglass_web/msg
 
-/// The plan form's fields as typed.
+/// The plan form's choices. Its module patterns are not kept here: they are
+/// free text, and free text reaches `update` inside the submit that uses it.
 pub type PlanDraft {
   PlanDraft(
     /// The kind of probe chosen.
     kind: policy.ProbeKind,
-    /// The module patterns as typed, not yet checked.
-    modules: String,
     /// The duration chosen.
     duration: msg.DurationChoice,
     /// The target chosen, by key.
@@ -36,13 +35,11 @@ pub type PlanDraft {
   )
 }
 
-/// The filter form's fields as typed.
+/// The filter form's choices. Its pattern travels in the submit.
 pub type FilterDraft {
   FilterDraft(
     /// The kind of step chosen.
     kind: msg.FilterKind,
-    /// The pattern as typed, not yet compiled.
-    pattern: String,
   )
 }
 
@@ -61,8 +58,6 @@ pub type UiState {
     plan: PlanDraft,
     /// The filter form.
     filter: FilterDraft,
-    /// The name typed for the next checkpoint, as typed.
-    checkpoint_name: String,
     /// A sentence about the last refusal or request, shown near the control.
     notice: Option(String),
     /// The last request sent to the viewer.
@@ -80,12 +75,10 @@ pub fn initial() -> UiState {
     search: "",
     plan: PlanDraft(
       kind: policy.Counters,
-      modules: "",
       duration: msg.Seconds30,
       target: None,
     ),
-    filter: FilterDraft(kind: msg.FocusFilter, pattern: ""),
-    checkpoint_name: "",
+    filter: FilterDraft(kind: msg.FocusFilter),
     notice: None,
     last_request: None,
   )

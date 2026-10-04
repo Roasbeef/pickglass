@@ -405,6 +405,9 @@ input.text { width: 100%; }
 .activity .notice { margin: 0; }
 .inline-form { display: inline-flex; align-items: center; gap: 6px; }
 .inline-form .text { min-width: 18em; }
+.inline-form .checkpoint-name { min-width: 0; }
+.filter-form .inline-form { flex: 1; }
+.filter-form .inline-form .text { flex: 1; min-width: 200px; }
 .legend-line { margin: 6px 14px; font-size: 12.5px; color: var(--ink-2); }
 .swatch { display: inline-block; width: 12px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-left: 6px; }
 .swatch-run { background: var(--accent); }

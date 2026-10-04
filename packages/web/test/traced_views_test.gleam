@@ -20,7 +20,6 @@ import pickglass_web/key
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/page
-import pickglass_web/state
 import pickglass_web/timeline_model
 import pickglass_web/view/flow
 import pickglass_web/view/probes
@@ -304,7 +303,7 @@ pub fn the_drawing_has_one_rect_per_slice_test() {
 // ----------------------------------------------------------------- the flow
 
 fn flow_html(data: model.FlowModel, current: page.Page) -> String {
-  element.to_string(flow.view(data, page.Files, current, state.initial()))
+  element.to_string(flow.view(data, page.Files, current))
 }
 
 fn card(adjust: model.Adjust) -> model.PlanCard {
@@ -469,7 +468,7 @@ pub fn a_recording_needs_no_modules_and_a_call_tree_does_test() {
   let recording =
     pick_kind(policy.SchedulingGc)
     |> with_target
-    |> update(msg.Ui(msg.SubmitDraft))
+    |> update(msg.Ui(msg.SubmitDraft("")))
 
   let assert Some(msg.PlanProbe(draft)) = recording.ui.last_request
 
@@ -479,7 +478,7 @@ pub fn a_recording_needs_no_modules_and_a_call_tree_does_test() {
   let calls =
     pick_kind(policy.CallTree)
     |> with_target
-    |> update(msg.Ui(msg.SubmitDraft))
+    |> update(msg.Ui(msg.SubmitDraft("")))
 
   assert calls.ui.last_request == None
   assert calls.ui.notice == Some("Enter at least one module pattern.")
@@ -487,8 +486,7 @@ pub fn a_recording_needs_no_modules_and_a_call_tree_does_test() {
   let named =
     pick_kind(policy.CallTree)
     |> with_target
-    |> update(msg.Ui(msg.DraftModules("lists gleam@list")))
-    |> update(msg.Ui(msg.SubmitDraft))
+    |> update(msg.Ui(msg.SubmitDraft("lists gleam@list")))
   let assert Some(msg.PlanProbe(sent)) = named.ui.last_request
 
   assert sent.modules == ["lists", "gleam@list"]
@@ -502,20 +500,16 @@ pub fn trace_instead_checks_the_modules_before_it_asks_test() {
   let assert app.Ready(flow_data) = model.flow
   let assert Some(plan) = flow_data.pending
 
-  let empty = update(model, msg.Ui(msg.SubmitTraceInstead(plan.key)))
+  let empty = update(model, msg.Ui(msg.SubmitTraceInstead(plan.key, "")))
 
   assert empty.ui.last_request == None
   assert empty.ui.notice == Some("Enter at least one module pattern.")
 
-  let bad =
-    update(model, msg.Ui(msg.DraftModules("../etc")))
-    |> update(msg.Ui(msg.SubmitTraceInstead(plan.key)))
+  let bad = update(model, msg.Ui(msg.SubmitTraceInstead(plan.key, "../etc")))
 
   assert bad.ui.last_request == None
 
-  let good =
-    update(model, msg.Ui(msg.DraftModules("lists")))
-    |> update(msg.Ui(msg.SubmitTraceInstead(plan.key)))
+  let good = update(model, msg.Ui(msg.SubmitTraceInstead(plan.key, "lists")))
 
   assert good.ui.last_request
     == Some(msg.TraceCallsInstead(plan.key, ["lists"]))
@@ -547,7 +541,7 @@ pub fn the_new_requests_check_their_keys_against_the_page_test() {
 pub fn the_detail_page_offers_a_recording_and_a_call_trace_with_the_capability_test() {
   let data = fixture.process_detail()
   let drawn = fn(grants) {
-    element.to_string(process_detail.view(data, grants, page.Files, "lists"))
+    element.to_string(process_detail.view(data, grants, page.Files))
   }
 
   let with = drawn(policy.all_capabilities)
@@ -555,7 +549,7 @@ pub fn the_detail_page_offers_a_recording_and_a_call_trace_with_the_capability_t
   assert string.contains(with, "Record scheduling…")
   assert string.contains(with, "Trace calls…")
   assert string.contains(with, "Modules to trace")
-  assert string.contains(with, "value=\"lists\"")
+  assert string.contains(with, "name=\"modules\"")
 
   let without = drawn([policy.Observe])
 
@@ -574,8 +568,9 @@ pub fn the_detail_buttons_send_their_requests_test() {
   // The call trace goes through the form's own check.
   let traced =
     simulate.model(sim)
-    |> update(msg.Ui(msg.DraftModules("loom@runtime@keeper")))
-    |> update(msg.Ui(msg.SubmitTraceProcess(fixture.keeper_key())))
+    |> update(
+      msg.Ui(msg.SubmitTraceProcess(fixture.keeper_key(), "loom@runtime@keeper")),
+    )
 
   assert traced.ui.last_request
     == Some(msg.TraceProcess(fixture.keeper_key(), ["loom@runtime@keeper"]))
@@ -592,7 +587,7 @@ pub fn an_owner_row_offers_a_recording_beside_its_profile_test() {
 
 pub fn a_call_tree_plan_states_its_window_and_its_budget_test() {
   let assert Some(plan) = fixture.plan_card_of(policy.CallTree, ["lists"], 5000)
-  let shown = element.to_string(probes.plan_dialog(plan, ""))
+  let shown = element.to_string(probes.plan_dialog(plan))
 
   assert string.contains(shown, "Plan: Trace call tree")
   assert string.contains(shown, "Window")
@@ -605,7 +600,7 @@ pub fn a_call_tree_plan_states_its_window_and_its_budget_test() {
 
 pub fn a_recording_plan_states_the_thresholds_and_names_no_modules_test() {
   let assert Some(plan) = fixture.plan_card_of(policy.SchedulingGc, [], 10_000)
-  let shown = element.to_string(probes.plan_dialog(plan, ""))
+  let shown = element.to_string(probes.plan_dialog(plan))
 
   assert string.contains(shown, "Plan: Scheduling and GC events")
   assert string.contains(shown, "Node-wide thresholds")

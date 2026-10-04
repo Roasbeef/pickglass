@@ -225,38 +225,32 @@ pub type UiEvent {
   /// The probe kind in the plan form.
   DraftKind(policy.ProbeKind)
 
-  /// The module pattern text in the plan form.
-  DraftModules(String)
-
-  /// The name typed for the next checkpoint.
-  DraftCheckpointName(String)
-
   /// The duration in the plan form.
   DraftDuration(DurationChoice)
 
   /// The target process in the plan form, by key.
   DraftTarget(Key)
 
-  /// Send the plan form as a request, if it passes `update`'s checks.
-  SubmitDraft
+  /// Send the plan form as a request, if it passes `update`'s checks. The
+  /// text is the module field as it stood when the form was submitted; a
+  /// stack or events probe ignores it.
+  SubmitDraft(modules: String)
 
-  /// Send the module patterns typed in the plan form as a request to trace
+  /// Send the module patterns submitted with the form as a request to trace
   /// the calls of a pending profile's processes, if they pass `update`'s
   /// checks. The key names the pending plan.
-  SubmitTraceInstead(plan: Key)
+  SubmitTraceInstead(plan: Key, modules: String)
 
-  /// Send the module patterns typed in the plan form as a request to trace
+  /// Send the module patterns submitted with the form as a request to trace
   /// the calls of one process, if they pass `update`'s checks.
-  SubmitTraceProcess(process: Key)
+  SubmitTraceProcess(process: Key, modules: String)
 
   /// The kind of the filter being added.
   FilterKindChosen(FilterKind)
 
-  /// The pattern text of the filter being added.
-  FilterPattern(String)
-
-  /// Send the filter being added as a request, if its pattern compiles.
-  SubmitFilter
+  /// Send the filter being added as a request, if its pattern compiles. The
+  /// text is the pattern field as it stood when the form was submitted.
+  SubmitFilter(pattern: String)
 
   /// The search text on the profile page.
   Search(String)
@@ -301,7 +295,8 @@ pub type Request {
   /// Use a capture file the compare page offers as the candidate.
   ChooseCandidate(capture: Key)
 
-  /// Take a checkpoint now. An empty name asks the viewer to number it.
+  /// Take a checkpoint now. The name is the field as it stood when the form
+  /// was submitted. An empty name asks the viewer to number it.
   TakeCheckpoint(name: String)
 
   /// Detach from the node: the agent unloads itself, every pin and running

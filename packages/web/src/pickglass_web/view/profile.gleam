@@ -529,6 +529,9 @@ fn join(acc: String, text: String) -> String {
   }
 }
 
+// The pattern field and the button are one form, so the pattern travels in
+// the submit. The kind is a select whose change is sent at once and arrives
+// before the submit on the same socket.
 fn filter_form(ui_state: UiState) -> Element(Msg) {
   let draft = ui_state.filter
 
@@ -558,20 +561,22 @@ fn filter_form(ui_state: UiState) -> Element(Msg) {
         },
       ),
     ),
-    html.input([
-      attribute.class("text mono"),
-      attribute.type_("text"),
-      attribute.placeholder("module or function pattern"),
-      attribute.value(draft.pattern),
-      wire.text_entered(fn(text) { msg.Ui(msg.FilterPattern(text)) }),
-    ]),
-    html.button(
+    html.form(
       [
-        attribute.class("btn"),
-        attribute.type_("button"),
-        wire.click(msg.Ui(msg.SubmitFilter)),
+        attribute.class("inline-form filter-add"),
+        wire.submitted("pattern", fn(text) { msg.Ui(msg.SubmitFilter(text)) }),
       ],
-      [element.text("Add step")],
+      [
+        html.input([
+          attribute.class("text mono"),
+          attribute.type_("text"),
+          attribute.name("pattern"),
+          attribute.placeholder("module or function pattern"),
+        ]),
+        html.button([attribute.class("btn"), attribute.type_("submit")], [
+          element.text("Add step"),
+        ]),
+      ],
     ),
   ])
 }

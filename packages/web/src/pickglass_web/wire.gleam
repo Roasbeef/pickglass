@@ -7,12 +7,24 @@
 //// was rendered. It reads nothing from the event, so a forged click can only
 //// send what the view already offered on that element.
 ////
-//// A *reading* handler (`key_chosen`, `code_chosen`, `text_entered`) decodes
-//// one property of the event target, `target.value`, with a decoder that
-//// can fail. A value that is not a key the alphabet allows, not one of a
-//// closed set of codes, or longer than the text bound is a decode failure,
-//// and Lustre's runtime then drops the event without calling `update`. The
+//// A *reading* handler (`key_chosen`, `code_chosen`, `text_entered`,
+//// `submitted`) decodes one property of the event, with a decoder that can
+//// fail. A value that is not a key the alphabet allows, not one of a closed
+//// set of codes, or longer than the text bound is a decode failure, and
+//// Lustre's runtime then drops the event without calling `update`. The
 //// decoders are exported so a test can run them on forged input.
+////
+//// ## Text is read at the moment of the act
+////
+//// A free-text field that feeds an action is never reported as it is typed.
+//// An `input` event is debounced so that a fast typist does not send a
+//// message per keystroke, and an action taken inside that window would then
+//// act on the previous value. Each such field therefore sits in an
+//// `html.form`, and the form's `submit` event (Enter in the field, or the
+//// submit button) carries the field's value in the event itself. The server
+//// never holds a draft of that text, so it cannot act on a stale one. The
+//// only field still reported as it is typed is the profile search, which
+//// filters a picture and triggers nothing.
 ////
 //// No handler decodes a pid, a module name taken from the target, or a
 //// function name. Key *membership* (did the viewer issue this key for this
@@ -21,9 +33,9 @@
 ////
 //// ## Reading order
 ////
-//// `key_decoder`, `code_decoder` and `text_decoder` are the decoders;
-//// `click`, `key_chosen`, `code_chosen` and `text_entered` wrap them in
-//// attributes; `module_patterns` validates the one free-text field that
+//// `key_decoder`, `code_decoder`, `text_decoder` and `form_decoder` are the
+//// decoders; `click`, `key_chosen`, `code_chosen`, `text_entered` and
+//// `submitted` wrap them in attributes; `module_patterns` validates the one free-text field that
 //// becomes part of a request.
 
 import gleam/dynamic/decode.{type Decoder}
@@ -97,6 +109,53 @@ pub fn text_decoder() -> Decoder(String) {
   }
 }
 
+/// Decode the `submit` event of a form that holds exactly one named text
+/// field, and return that field's text.
+///
+/// Lustre's client adds the form's entries to the event as
+/// `detail.formData`, a list of `[name, value]` pairs. A forged submit can
+/// send any names, so anything but exactly one pair, named `field`, with text
+/// no longer than `max_text`, is a decode failure. A file entry is not text
+/// and fails the same way.
+///
+/// ## Examples
+///
+/// ```gleam
+/// decode.run(forged_dynamic, wire.form_decoder("pattern"))
+/// // -> Ok("loom@runtime") for one pair ["pattern", "loom@runtime"]
+/// // -> Error(_) for a second pair, or a different name
+/// ```
+pub fn form_decoder(field: String) -> Decoder(String) {
+  use pairs <- decode.subfield(
+    ["detail", "formData"],
+    decode.list(decode.list(decode.string)),
+  )
+
+  case pairs {
+    [[name, text]] if name == field ->
+      case string.length(text) <= max_text {
+        True -> decode.success(text)
+        False -> decode.failure("", "text within the bound")
+      }
+    _ -> decode.failure("", "one form field named " <> field)
+  }
+}
+
+/// A `submit` handler for a form with one text field named `field`. The
+/// message carries the text the field held when the form was submitted, so
+/// the update that acts on it needs no earlier draft. The browser's own
+/// submission is prevented.
+///
+/// ## Examples
+///
+/// ```gleam
+/// wire.submitted("name", fn(text) { msg.Ask(msg.TakeCheckpoint(text)) })
+/// ```
+pub fn submitted(field: String, make: fn(String) -> Msg) -> Attribute(Msg) {
+  event.on("submit", decode.map(form_decoder(field), make))
+  |> event.prevent_default
+}
+
 /// A `change` handler that sends the chosen key.
 pub fn key_chosen(make: fn(Key) -> Msg) -> Attribute(Msg) {
   event.on("change", decode.map(key_decoder(), make))
@@ -114,6 +173,8 @@ pub fn code_chosen(
 }
 
 /// An `input` handler that sends bounded text, at most five times a second.
+/// Only a field whose text drives no action uses it; a field read by a
+/// button uses `submitted` instead, because the debounce delays this one.
 pub fn text_entered(make: fn(String) -> Msg) -> Attribute(Msg) {
   event.on("input", decode.map(text_decoder(), make))
   |> server_component.include(["target.value"])

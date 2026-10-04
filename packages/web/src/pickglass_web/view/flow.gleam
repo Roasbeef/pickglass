@@ -42,7 +42,6 @@ import pickglass_web/memory_model
 import pickglass_web/model.{type FlowModel}
 import pickglass_web/msg.{type Msg}
 import pickglass_web/page.{type Links, type Page}
-import pickglass_web/state.{type UiState}
 import pickglass_web/view/probes
 import pickglass_web/wire
 
@@ -52,27 +51,21 @@ import pickglass_web/wire
 /// ## Examples
 ///
 /// ```gleam
-/// flow.view(data, links, page.Overview, ui_state)
+/// flow.view(data, links, page.Overview)
 /// ```
-pub fn view(
-  data: FlowModel,
-  links: Links,
-  current: Page,
-  ui_state: UiState,
-) -> Element(Msg) {
-  let modules = ui_state.plan.modules
+pub fn view(data: FlowModel, links: Links, current: Page) -> Element(Msg) {
   let parts = case current {
     page.Probes -> [refusal(data.refused)]
 
     // A page that shows the result a banner links to does not link to itself.
     page.Profile | page.Timeline -> [
       refusal(data.refused),
-      plan(data.pending, modules),
+      plan(data.pending),
       running(data),
     ]
     _ -> [
       refusal(data.refused),
-      plan(data.pending, modules),
+      plan(data.pending),
       running(data),
       collected(data.collected),
       ready(data.ready, links),
@@ -100,9 +93,9 @@ fn refusal(reason: Option(String)) -> Element(Msg) {
   }
 }
 
-fn plan(pending: Option(model.PlanCard), modules: String) -> Element(Msg) {
+fn plan(pending: Option(model.PlanCard)) -> Element(Msg) {
   case pending {
-    Some(card) -> probes.plan_dialog(card, modules)
+    Some(card) -> probes.plan_dialog(card)
     None -> element.none()
   }
 }

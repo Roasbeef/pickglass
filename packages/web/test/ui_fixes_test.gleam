@@ -693,7 +693,7 @@ pub fn an_unreadable_anon_column_becomes_one_note_and_a_negative_gap_says_why_te
       roles: model.Panel(..overview.roles, body: roles),
       layers: model.Panel(..overview.layers, body: negative),
     )
-  let html = element.to_string(overview_view.view(data, None, [], ""))
+  let html = element.to_string(overview_view.view(data, None, []))
 
   string.contains(html, "unsupported_on_platform") |> should.be_false
   string.contains(html, "not readable on this platform") |> should.be_true
