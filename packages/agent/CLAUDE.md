@@ -75,26 +75,33 @@ PinId, PidText}`; `{<<"unpin">>, Token}` gives `{<<"unpinned">>, PinId}`.
 gives `{<<"detached">>, Reason}` after every session and sampler is gone.
 
 **Census.** `{<<"census">>, MaxScanned, TopK}` gives `{<<"census">>,
-Coverage, Rows, Owners, Totals}`.
+Coverage, Rows, Owners}`, the shape of the first wire release, which does not
+change.
 - `Coverage` is `{Scanned, Total, Stop, ElapsedMs}`; `Stop` is
   `<<"finished"|"scan_budget"|"deadline">>`.
 - A row is `{PidText, MemoryBytes, TotalHeapWords, HeapWords, StackWords,
   QueueLength, Reductions, Status, CurrentFunction, RegisteredName, Owner}`.
 - An owner aggregate is `{Owner, Processes, MemoryBytes, QueueLength,
-  Reductions, TotalHeapWords}`. At most 100 are listed, largest memory
-  first, plus the `unknown` one when any process is unlabelled.
-- `Totals` covers every process the walk scanned, listed or not:
-  `{Processes, MemoryBytes, QueueLength, Reductions, TotalHeapWords,
-  OwnersTracked, OwnersListed}`. The remainder row is `Totals` minus the sum
-  of the listed aggregates; `OwnersTracked - OwnersListed` is how many
-  owners it stands for.
+  Reductions}`. At most 100 are listed, largest memory first, plus the
+  `unknown` one when any process is unlabelled.
 - `Owner` is `{<<"unknown">>}` or `{<<"owner">>, [{Kind, Id}], Role}`. The
   agent labels its own processes `{pickglass_owner, 1, [{<<"tool">>,
   <<"pickglass">>}], <<"agent">>}`, so its cost appears as that owner.
-- Reductions deltas between censuses are not computed by the agent. A sum
-  per owner falls when a process exits, so a correct rate needs a per-pid
-  baseline; the viewer owns that.
 - Errors: `busy` (four workers already running).
+
+**Owners.** `{<<"owners">>, MaxScanned, TopK}` runs the same census and gives
+`{<<"owners">>, Coverage, Rows, Owners, Totals}`: `Coverage` and rows as above,
+an owner aggregate with a sixth field, `TotalHeapWords` (the sum of the
+owner's `total_heap_size`, every heap fragment its processes hold), and:
+- `Totals` over every process the walk scanned, listed or not:
+  `{Processes, MemoryBytes, QueueLength, Reductions, TotalHeapWords,
+  OwnersTracked, OwnersListed}`. The Owners remainder row is `Totals` minus
+  the sum of the listed aggregates, and `OwnersTracked - OwnersListed` is how
+  many owners it stands for.
+- Reductions deltas between censuses are not computed by the agent. A sum per
+  owner falls when a process exits, so a correct rate needs a per-pid
+  baseline, which the viewer owns.
+- Errors: `busy`.
 
 **Process detail.** `{<<"process_detail">>, Token}` gives
 `{<<"process_detail">>, PidText, Sizes, Activity, Gc, Relations, Owner,
@@ -194,9 +201,14 @@ refused with `memory_unavailable` where the VM lacks it. Both reply
 `{<<"counters_started">>, ProbeId, MatchedFunctions, DeadlineMs}` and share
 `read_counters` and `stop_counters`, which give `{<<"counters">>, ProbeId,
 State, MatchedFunctions, ElapsedMs, {Functions, WithCalls, Invalidated},
-Rows}`. A row is now `{Module, Function, Arity, Calls, TimeUs, Memory}` with
-`Memory` `{<<"none">>}` or `{<<"words">>, Words}` (words allocated while the
-function ran in the traced processes). The 5,000-function cap and the deny
+Rows}` with rows `{Module, Function, Arity, Calls, TimeUs}`, unchanged from
+the first release and merged over all the patterns. Allocation is read apart:
+`{<<"read_counter_memory">>, ProbeId}` gives `{<<"counter_memory">>, ProbeId,
+State, Memory}`, where `Memory` is `{<<"none">>}` for a probe that did not ask
+for `time_and_memory` (not a list of zeros) and otherwise `{<<"words">>,
+[{Module, Function, Arity, Words}]}`, the words allocated while each called
+function ran in the traced processes, largest first, at most 200. Read memory
+before stopping the probe, since a stop removes it. The 5,000-function cap and the deny
 list of hot modules apply to the whole set. A repeated pattern, or one a
 wildcard on the same module covers, is dropped before arming. Errors:
 `unknown_module`, `unknown_function` (names the node has never seen, never

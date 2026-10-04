@@ -42,14 +42,19 @@ scenario_link_killed(Target, Work) ->
     {<<"pong">>, <<"boot-1">>, _, _, _, _, _} = ask(Target, {<<"ping">>}),
     {<<"memory">>, Cats, _, _, _, _, _} = ask(Target, {<<"memory">>}),
     check("memory reports categories", length(Cats) > 3),
-    {<<"census">>, {Scanned, Total, _, _}, Rows, Aggs, Totals} =
+    {<<"census">>, {Scanned, Total, _, _}, Rows, LegacyAggs} =
         ask(Target, {<<"census">>, 100000, 10}),
+    check("the census keeps its first-release shape: five-field owners",
+          lists:all(fun({_, _, _, _, _}) -> true; (_) -> false end, LegacyAggs)),
+    {<<"owners">>, {OScanned, _, _, _}, ORows, Aggs, Totals} =
+        ask(Target, {<<"owners">>, 100000, 10}),
+    check("owners returns the census rows", length(ORows) >= 1 andalso length(ORows) =< 10),
     check("census scans processes", Scanned > 0 andalso Total > 0),
     check("census returns at most the top 10", length(Rows) >= 1 andalso length(Rows) =< 10),
     check("an unlabelled node aggregates as unknown",
           lists:any(fun({{<<"unknown">>}, _, _, _, _, _}) -> true; (_) -> false end, Aggs)),
     check("the census totals cover every scanned process",
-          element(1, Totals) =:= Scanned),
+          element(1, Totals) =:= OScanned),
     check("the agent's own processes are their own owner",
           lists:any(fun({{<<"owner">>, [{<<"tool">>, <<"pickglass">>}], <<"agent">>}, _, _, _, _, _}) -> true;
                        (_) -> false end, Aggs)),
@@ -97,7 +102,7 @@ scenario_link_killed(Target, Work) ->
     {<<"counters">>, ProbeId, <<"running">>, _, _, _, CRows} =
         ask(Target, {<<"read_counters">>, ProbeId}),
     check("the probe counted calls to work/1",
-          lists:any(fun({<<"pg_e2e_work">>, <<"work">>, 1, Calls, _, {<<"none">>}}) -> Calls > 0;
+          lists:any(fun({<<"pg_e2e_work">>, <<"work">>, 1, Calls, _}) -> Calls > 0;
                        (_) -> false end, CRows)),
     scenario_counter_set(Target, PinId),
     scenario_stacks(Target, PinId),
@@ -125,14 +130,21 @@ scenario_counter_set(Target, PinId) ->
     timer:sleep(500),
     {<<"counters">>, SetId, <<"running">>, _, _, {_, _, 0}, Rows} =
         ask(Target, {<<"read_counters">>, SetId}),
-    Has = fun(Mod) ->
-              lists:any(fun({M, _, _, Calls, _, {<<"words">>, W}}) ->
-                                M =:= Mod andalso Calls > 0 andalso W >= 0;
-                           (_) -> false end, Rows)
+    {<<"counter_memory">>, SetId, <<"running">>, {<<"words">>, MemRows}} =
+        ask(Target, {<<"read_counter_memory">>, SetId}),
+    Has = fun(Mod, Which) ->
+              lists:any(fun({M, _, _, Calls, _}) -> M =:= Mod andalso Calls > 0 end, Which)
           end,
-    check("the rows cover the first module with allocation counted", Has(<<"pg_e2e_work">>)),
-    check("the rows cover the second module with allocation counted", Has(<<"pg_e2e_more">>)),
+    HasWords = fun(Mod) ->
+                   lists:any(fun({M, _, _, W}) -> M =:= Mod andalso W >= 0 end, MemRows)
+               end,
+    check("the time rows cover the first module", Has(<<"pg_e2e_work">>, Rows)),
+    check("the time rows cover the second module", Has(<<"pg_e2e_more">>, Rows)),
+    check("the allocation rows cover the first module", HasWords(<<"pg_e2e_work">>)),
+    check("the allocation rows cover the second module", HasWords(<<"pg_e2e_more">>)),
     {<<"counters">>, SetId, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, SetId}),
+    {<<"counter_memory">>, _, _, {<<"none">>}} = ask_time_only_memory(Target, Pins),
+    check("a time-only probe answers none for allocation, not zeros", true),
     {<<"error">>, <<"no_match">>, _} =
         ask(Target, {<<"start_counter_set">>,
                      [{<<"pg_e2e_work">>, <<"work">>}, {<<"pg_e2e_more">>, <<"loop">>}],
@@ -194,6 +206,15 @@ scenario_stacks(Target, PinId) ->
     {<<"error">>, <<"no_such_probe">>, _} = ask(Target, {<<"read_stacks">>, Id}),
     check("a stopped probe is gone", true),
     ok.
+
+%% A probe that did not ask for allocation answers `none` and not zeros.
+ask_time_only_memory(Target, Pins) ->
+    {<<"counters_started">>, Id, _, _} =
+        ask(Target, {<<"start_counter_set">>, [{<<"pg_e2e_work">>, <<"work">>}], Pins, 5000,
+                     <<"time">>}),
+    Reply = ask(Target, {<<"read_counter_memory">>, Id}),
+    {<<"counters">>, Id, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, Id}),
+    Reply.
 
 %% Self-measure: a process that advertises the capability answers, and every
 %% way the exchange can go wrong is a typed refusal.

@@ -188,6 +188,19 @@ pub fn malformed_stack_probes_are_refused_test() {
   assert decoded_request(envelope(#("read_stacks", "x"))) |> is_error
 }
 
+// `owners` takes the census budget and clamps it the same way, and the
+// allocation read takes a probe id.
+pub fn owners_and_counter_memory_decode_test() {
+  assert decoded_request(envelope(#("owners", 999_999_999, 0)))
+    == Ok(request.Owners(request.max_scan, 1))
+  assert decoded_request(envelope(#("owners", 100, 10)))
+    == Ok(request.Owners(100, 10))
+  assert decoded_request(envelope(#("read_counter_memory", 4)))
+    == Ok(request.ReadCounterMemory(4))
+  assert decoded_request(envelope(#("owners", 100))) |> is_error
+  assert decoded_request(envelope(#("read_counter_memory", "x"))) |> is_error
+}
+
 pub fn process_detail_takes_a_token_test() {
   assert decoded_request(envelope(#("process_detail", #("boot-1", 4))))
     == Ok(request.ProcessDetail(request.Token("boot-1", 4)))

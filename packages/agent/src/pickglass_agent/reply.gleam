@@ -81,21 +81,36 @@ pub fn memory(
   ))
 }
 
-/// The answer to `census`.
+/// The answer to `census`. The shape is the first wire release's and does
+/// not change: an owner aggregate has five fields and there are no totals.
 pub fn census(report: census.Report) -> Term {
-  let coverage = report.coverage
-
   ffi_term.coerce(#(
     "census",
-    #(
-      coverage.scanned,
-      coverage.total,
-      census.stop_name(coverage.stop),
-      coverage.elapsed_ms,
-    ),
+    coverage(report.coverage),
     seq.map(report.rows, row),
     seq.map(report.aggregates, aggregate),
+  ))
+}
+
+/// The answer to `owners`: the census with each owner's heap capacity and the
+/// totals over every scanned process, which is what lets a view say how much
+/// the listed owners leave out.
+pub fn owners(report: census.Report) -> Term {
+  ffi_term.coerce(#(
+    "owners",
+    coverage(report.coverage),
+    seq.map(report.rows, row),
+    seq.map(report.aggregates, detailed_aggregate),
     totals(report.totals),
+  ))
+}
+
+fn coverage(coverage: census.Coverage) -> Term {
+  ffi_term.coerce(#(
+    coverage.scanned,
+    coverage.total,
+    census.stop_name(coverage.stop),
+    coverage.elapsed_ms,
   ))
 }
 
@@ -128,6 +143,16 @@ fn row(row: census.Row) -> Term {
 }
 
 fn aggregate(aggregate: census.Aggregate) -> Term {
+  ffi_term.coerce(#(
+    owner(aggregate.owner),
+    aggregate.processes,
+    aggregate.memory,
+    aggregate.queue_length,
+    aggregate.reductions,
+  ))
+}
+
+fn detailed_aggregate(aggregate: census.Aggregate) -> Term {
   ffi_term.coerce(#(
     owner(aggregate.owner),
     aggregate.processes,
@@ -201,19 +226,28 @@ pub fn counters(
 }
 
 fn counter_row(row: counters.Row) -> Term {
+  ffi_term.coerce(#(row.module, row.function, row.arity, row.calls, row.time_us))
+}
+
+/// The answer to `read_counter_memory`: the probe's state and, for a probe
+/// that counted allocation, the words each function allocated. A probe that
+/// did not is `{<<"none">>}`, which is not a list of zeros.
+pub fn counter_memory(
+  probe_id: Int,
+  state: String,
+  snapshot: counters.Snapshot,
+) -> Term {
   ffi_term.coerce(
-    #(
-      row.module,
-      row.function,
-      row.arity,
-      row.calls,
-      row.time_us,
-      case row.memory {
-        counters.NotCounted -> ffi_term.coerce(#("none"))
-        counters.Allocated(words) -> ffi_term.coerce(#("words", words))
-      },
-    ),
+    #("counter_memory", probe_id, state, case snapshot.memory {
+      counters.NotCounted -> ffi_term.coerce(#("none"))
+      counters.Counted(rows) ->
+        ffi_term.coerce(#("words", seq.map(rows, memory_row)))
+    }),
   )
+}
+
+fn memory_row(row: counters.MemoryRow) -> Term {
+  ffi_term.coerce(#(row.module, row.function, row.arity, row.words))
 }
 
 /// The answer to `detach`, sent after every session is destroyed.

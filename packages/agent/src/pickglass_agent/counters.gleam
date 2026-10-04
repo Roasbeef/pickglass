@@ -39,24 +39,22 @@ pub const max_functions = 5000
 /// The most rows a snapshot carries.
 pub const max_rows = 200
 
-/// The words a function allocated while it ran, or the fact that the probe
-/// did not count them. A probe without `call_memory` has no memory reading,
-/// which is not the same as zero words.
-pub type Words {
-  NotCounted
-  Allocated(words: Int)
-}
-
 /// One traced function's totals.
 pub type Row {
-  Row(
-    module: String,
-    function: String,
-    arity: Int,
-    calls: Int,
-    time_us: Int,
-    memory: Words,
-  )
+  Row(module: String, function: String, arity: Int, calls: Int, time_us: Int)
+}
+
+/// The words one function allocated while it ran, summed over the traced
+/// processes.
+pub type MemoryRow {
+  MemoryRow(module: String, function: String, arity: Int, words: Int)
+}
+
+/// What a probe counted for allocation. A probe without `call_memory` has no
+/// reading, which is not the same as zero words.
+pub type Memory {
+  NotCounted
+  Counted(rows: List(MemoryRow))
 }
 
 /// One `{Module, Function}` pattern. A function of `_` covers every
@@ -70,7 +68,13 @@ pub type Pattern {
 /// `invalidated` how many the VM no longer traces because the module was
 /// reloaded, which makes the whole snapshot suspect when it is not zero.
 pub type Snapshot {
-  Snapshot(rows: List(Row), functions: Int, with_calls: Int, invalidated: Int)
+  Snapshot(
+    rows: List(Row),
+    memory: Memory,
+    functions: Int,
+    with_calls: Int,
+    invalidated: Int,
+  )
 }
 
 /// Where a probe is in its life.
@@ -375,12 +379,19 @@ pub fn collect(
   mode: CounterMode,
 ) -> Snapshot {
   let totals =
-    seq.fold(patterns, Totals(topk.new(max_rows), 0, 0, 0), fn(totals, pattern) {
-      collect_pattern(totals, session, pattern, mode)
-    })
+    seq.fold(
+      patterns,
+      Totals(topk.new(max_rows), topk.new(max_rows), 0, 0, 0),
+      fn(totals, pattern) { collect_pattern(totals, session, pattern, mode) },
+    )
 
   Snapshot(
     rows: seq.map(topk.descending(totals.top), fn(entry) { entry.1 }),
+    memory: case mode {
+      ffi_trace.TimeOnly -> NotCounted
+      ffi_trace.TimeAndMemory ->
+        Counted(seq.map(topk.descending(totals.memory), fn(entry) { entry.1 }))
+    },
     functions: totals.functions,
     with_calls: totals.with_calls,
     invalidated: totals.invalidated,
@@ -413,7 +424,13 @@ fn collect_pattern(
 }
 
 type Totals {
-  Totals(top: topk.Top(Row), functions: Int, with_calls: Int, invalidated: Int)
+  Totals(
+    top: topk.Top(Row),
+    memory: topk.Top(MemoryRow),
+    functions: Int,
+    with_calls: Int,
+    invalidated: Int,
+  )
 }
 
 // `trace:info/3` answers `{call_time, Value}`. A list is the per-process
@@ -470,8 +487,15 @@ fn read_answer(
                 arity,
                 calls,
                 time_us,
-                memory_of(session, module, function, arity, mode),
               ),
+            ),
+            memory: offer_memory(
+              totals.memory,
+              session,
+              module,
+              function,
+              arity,
+              mode,
             ),
             with_calls: totals.with_calls + 1,
           )
@@ -480,27 +504,43 @@ fn read_answer(
   }
 }
 
-// The words a function allocated, summed over the traced processes. A probe
-// that did not ask for memory has no reading, and one whose reading cannot be
-// taken is not counted either: neither is reported as zero words.
-fn memory_of(
+// The words a function allocated, summed over the traced processes, offered
+// to the bounded memory list. A probe that did not ask for memory offers
+// nothing, and a function whose reading cannot be taken is left out, so
+// neither shows as zero words.
+fn offer_memory(
+  top: topk.Top(MemoryRow),
   session: Session,
   module: Atom,
   function: Atom,
   arity: Int,
   mode: CounterMode,
-) -> Words {
+) -> topk.Top(MemoryRow) {
   case mode {
-    ffi_trace.TimeOnly -> NotCounted
+    ffi_trace.TimeOnly -> top
     ffi_trace.TimeAndMemory ->
       case ffi_trace.call_memory(session, module, function, arity) {
-        Error(Nil) -> NotCounted
-        Ok(answer) -> memory_words(answer)
+        Error(Nil) -> top
+        Ok(answer) ->
+          case memory_words(answer) {
+            Error(Nil) -> top
+            Ok(words) ->
+              topk.offer(
+                top,
+                words,
+                MemoryRow(
+                  ffi_term.atom_name(module),
+                  ffi_term.atom_name(function),
+                  arity,
+                  words,
+                ),
+              )
+          }
       }
   }
 }
 
-fn memory_words(answer: Term) -> Words {
+fn memory_words(answer: Term) -> Result(Int, Nil) {
   let value = ffi_term.element(2, answer)
 
   case
@@ -508,8 +548,8 @@ fn memory_words(answer: Term) -> Words {
     && ffi_term.tuple_size(answer) == 2
     && ffi_term.is_list(value)
   {
-    False -> NotCounted
-    True -> Allocated(sum_words(ffi_term.coerce(value), 0))
+    False -> Error(Nil)
+    True -> Ok(sum_words(ffi_term.coerce(value), 0))
   }
 }
 

@@ -15,6 +15,7 @@
 //// |---|---|
 //// | liveness | `{<<"ping">>}` |
 //// | census | `{<<"census">>, MaxScanned, TopK}` |
+//// | census with owner heap and totals | `{<<"owners">>, MaxScanned, TopK}` |
 //// | memory | `{<<"memory">>}` |
 //// | pin a process | `{<<"pin">>, PidText}` |
 //// | release a pin | `{<<"unpin">>, {BootId, PinId}}` |
@@ -129,6 +130,7 @@ pub type Targets {
 pub type Request {
   Ping
   Census(max_scanned: Int, top_k: Int)
+  Owners(max_scanned: Int, top_k: Int)
   MemoryReport
   Pin(pid_text: String)
   Unpin(token: Token)
@@ -141,6 +143,7 @@ pub type Request {
   )
   ReadCounters(probe_id: Int)
   StopCounters(probe_id: Int)
+  ReadCounterMemory(probe_id: Int)
   ProcessDetail(token: Token)
   Supervision(max_scanned: Int, max_edges: Int)
   SystemReport
@@ -234,7 +237,8 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "ping", 1 -> Ok(Ping)
     "memory", 1 -> Ok(MemoryReport)
     "detach", 1 -> Ok(Detach)
-    "census", 3 -> decode_census(term)
+    "census", 3 -> decode_census(term, Census)
+    "owners", 3 -> decode_census(term, Owners)
     "pin", 2 -> decode_pin(term)
     "unpin", 2 -> decode_unpin(term)
     "scheduler", 2 -> decode_scheduler(term)
@@ -242,6 +246,7 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "start_counter_set", 5 -> decode_start_counter_set(term)
     "read_counters", 2 -> decode_probe(term, ReadCounters)
     "stop_counters", 2 -> decode_probe(term, StopCounters)
+    "read_counter_memory", 2 -> decode_probe(term, ReadCounterMemory)
     "process_detail", 2 -> decode_token_request(term, ProcessDetail)
     "supervision", 3 -> decode_supervision(term)
     "system", 1 -> Ok(SystemReport)
@@ -255,11 +260,16 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
   }
 }
 
-fn decode_census(term: Term) -> Result(Request, String) {
+// `census` and `owners` take the same budget and differ only in the shape of
+// the reply, so they share a decoder.
+fn decode_census(
+  term: Term,
+  build: fn(Int, Int) -> Request,
+) -> Result(Request, String) {
   use scanned <- fallible.then(integer(ffi_term.element(2, term), "max_scanned"))
   use top_k <- fallible.then(integer(ffi_term.element(3, term), "top_k"))
 
-  Ok(Census(clamp(scanned, 1, max_scan), clamp(top_k, 1, max_top_k)))
+  Ok(build(clamp(scanned, 1, max_scan), clamp(top_k, 1, max_top_k)))
 }
 
 fn decode_pin(term: Term) -> Result(Request, String) {

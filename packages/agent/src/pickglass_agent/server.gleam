@@ -383,7 +383,23 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
     request.Ping -> answer(state, reply_to, reference, ping(state))
     request.MemoryReport -> answer(state, reply_to, reference, memory())
     request.Census(max_scanned, top_k) ->
-      census_request(state, reply_to, reference, max_scanned, top_k)
+      census_request(
+        state,
+        reply_to,
+        reference,
+        max_scanned,
+        top_k,
+        reply.census,
+      )
+    request.Owners(max_scanned, top_k) ->
+      census_request(
+        state,
+        reply_to,
+        reference,
+        max_scanned,
+        top_k,
+        reply.owners,
+      )
     request.ProcessDetail(token) ->
       process_detail(state, reply_to, reference, token)
     request.Supervision(max_scanned, max_edges) ->
@@ -422,6 +438,8 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
         mode,
       )
     request.ReadCounters(id) -> read_counters(state, reply_to, reference, id)
+    request.ReadCounterMemory(id) ->
+      read_counter_memory(state, reply_to, reference, id)
     request.StopCounters(id) -> stop_counters(state, reply_to, reference, id)
   }
 }
@@ -481,11 +499,12 @@ fn census_request(
   reference: Reference,
   max_scanned: Int,
   top_k: Int,
+  shape: fn(census.Report) -> Term,
 ) -> Next(State) {
   let budget = census.Budget(max_scanned, top_k, census_deadline_ms)
 
   start_worker(state, reply_to, reference, "census", census_deadline_ms, fn() {
-    reply.census(census.run(budget))
+    shape(census.run(budget))
   })
 }
 
@@ -1072,6 +1091,34 @@ fn read_counters(
   }
 }
 
+// The allocation reading is a separate request so that the counters reply
+// keeps the shape the first wire release gave it. A probe is read here before
+// it is stopped, since stopping removes it.
+fn read_counter_memory(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  id: Int,
+) -> Next(State) {
+  case find_probe(state.probes, id) {
+    Error(Nil) ->
+      refuse(
+        state,
+        reply_to,
+        reference,
+        "no_such_probe",
+        "no probe has that id",
+      )
+    Ok(probe) ->
+      answer(
+        state,
+        reply_to,
+        reference,
+        reply.counter_memory(probe.id, probe_state(probe), snapshot_of(probe)),
+      )
+  }
+}
+
 fn stop_counters(
   state: State,
   reply_to: Pid,
@@ -1113,13 +1160,17 @@ fn snapshot_of(probe: Probe) -> counters.Snapshot {
   }
 }
 
+fn probe_state(probe: Probe) -> String {
+  case probe.phase {
+    counters.Running(_) -> "running"
+    counters.Finished(_) -> "finished"
+  }
+}
+
 fn probe_reply(probe: Probe, snapshot: counters.Snapshot) -> Term {
   reply.counters(
     probe.id,
-    case probe.phase {
-      counters.Running(_) -> "running"
-      counters.Finished(_) -> "finished"
-    },
+    probe_state(probe),
     probe.matched,
     ffi_proc.now_ms() - probe.started_ms,
     snapshot,
