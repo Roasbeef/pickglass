@@ -63,9 +63,14 @@ agent-imports: ## Fail if a compiled agent beam calls outside its allowed module
 	@(cd packages/agent && gleam build --warnings-as-errors)
 	@escript scripts/agent_imports.escript $(AGENT_EBIN)
 
+# The script starts distribution at run time with net_kernel:start, which,
+# unlike erl -name, does not start epmd, and a fresh CI runner has none
+# running, so the target starts one first. epmd -daemon is a no-op when one
+# is already up.
 .PHONY: agent-e2e
 agent-e2e: ## Push the agent into a peer node; check teardown on link death and kill -9
 	@(cd packages/agent && gleam build --warnings-as-errors)
+	@epmd -daemon
 	@escript scripts/agent_e2e.escript $(AGENT_EBIN)
 
 # -------------------------------------------------------------------- docs
