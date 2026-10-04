@@ -1261,7 +1261,7 @@ won't use any at all") and in Loom's security model, which Pickglass keeps as a 
 These rules are Loom's Part IV (§0.2 of its implementation spec), trimmed to
 what applies here. They tighten the ecosystem defaults.
 
-1. **Toolchain**: Gleam ≥ 1.18, Erlang/OTP ≥ 29. `gleam format` enforced; no
+1. **Toolchain**: Gleam ≥ 1.19.0-rc2, Erlang/OTP ≥ 29. `gleam format` enforced; no
    warnings.
 2. **Total decoders**: every wire or storage boundary decodes with a
    decoder that returns a `Result` carrying a report of what was wrong.

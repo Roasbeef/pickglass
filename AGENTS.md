@@ -65,7 +65,7 @@ missing explanatory prose as unfinished work when reviewing a change.
 - Design priorities, in order: correctness, robustness, performance,
   capability. Pickglass reads runtime data it did not produce, so a decoder
   that guesses is a bug.
-- Gleam >= 1.18, Erlang/OTP >= 29, erlang target. All code passes
+- Gleam >= 1.19.0-rc2, Erlang/OTP >= 29, erlang target. All code passes
   `gleam format --check` and compiles warning-free before commit.
 - `core` (when it exists) is pure: no I/O, no `@external` of any target, and
   no `gleam_erlang` or `gleam_otp`, in source or in `gleam.toml`. Lint R6

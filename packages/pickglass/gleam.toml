@@ -4,7 +4,7 @@ licences = ["Apache-2.0"]
 description = "A BEAM runtime inspector and performance and trace viewer, written in Gleam."
 target = "erlang"
 
-gleam = ">= 1.18.0"
+gleam = ">= 1.19.0-rc2"
 
 repository = { type = "github", user = "Roasbeef", repo = "pickglass" }
 

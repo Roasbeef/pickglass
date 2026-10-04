@@ -31,8 +31,8 @@ concurrency:
 
 env:
   # Exact, never floating. 1.19.0-rc2 is a release candidate, above the
-  # `gleam >= 1.18.0` floor every gleam.toml declares; it becomes "1.19.0"
-  # when that ships. 29.0.5 is the OTP the tree is developed against (the
+  # `gleam >= 1.19.0-rc2` floor every gleam.toml declares; it becomes
+  # "1.19.0" when that ships. 29.0.5 is the OTP the tree is developed against (the
   # floor is 29). rebar3 is needed by the release job's relx assembly.
   GLEAM_VERSION: "1.19.0-rc2"
   OTP_VERSION: "29.0.5"

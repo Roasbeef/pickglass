@@ -63,7 +63,7 @@ fi
 # ------------------------------------------------------------ preflight
 missing=""
 need() { command -v "$1" >/dev/null 2>&1 || missing="$missing  $1 — $2\n"; }
-need gleam  "exports the package as an erlang shipment (>= 1.18)"
+need gleam  "exports the package as an erlang shipment (>= 1.19.0-rc2)"
 need rebar3 "assembles the OTP release and copies ERTS into it"
 need erl    "the runtime system that gets copied in (OTP >= 29)"
 if [ "$STRIP_ERTS" = 1 ]; then
