@@ -7,7 +7,9 @@ import pickglass/capture_file
 import pickglass/internal/ffi_zlib
 import pickglass/observation.{type Observation, Observation}
 import pickglass/observation_codec
+import pickglass/os_reader
 import pickglass_core/capture
+import pickglass_core/identity
 import pickglass_core/measure
 import pickglass_core/owner
 import pickglass_core/wire
@@ -23,6 +25,8 @@ fn facts() -> capture_build.Facts {
     workload: "idle",
     top_k: 200,
     deadline_ms: 15_000,
+    os_start: identity.UnreadableStart,
+    clock: option.None,
   )
 }
 
@@ -60,6 +64,7 @@ fn round_trip(observations: List(Observation)) -> List(Observation) {
       "cap-test",
       observations,
       measure.EveryMs(2000),
+      [],
       [],
       [],
     )
@@ -143,6 +148,7 @@ pub fn memory_categories_are_declared_overlapping_test() {
       measure.OneShot,
       [],
       [],
+      [],
     )
   let memory_series =
     list.filter_map(records, fn(record) {
@@ -168,7 +174,15 @@ pub fn memory_categories_are_declared_overlapping_test() {
 pub fn a_capture_needs_a_memory_report_test() {
   let none = Observation(..fixture.observation(0, 1000), memory: Error("down"))
 
-  assert capture_build.assemble(facts(), "id", [none], measure.OneShot, [], [])
+  assert capture_build.assemble(
+      facts(),
+      "id",
+      [none],
+      measure.OneShot,
+      [],
+      [],
+      [],
+    )
     |> result_is_error
 }
 
@@ -187,6 +201,7 @@ fn text_of_capture() -> String {
       [rich(0, 1000)],
       measure.OneShot,
       [capture.Checkpoint("idle", 0, 1500)],
+      [],
       [],
     )
   let assert Ok(text) = capture_file.render(header, records)
@@ -236,6 +251,7 @@ pub fn a_capture_written_to_disk_reads_back_gzipped_test() {
       "cap-disk",
       [rich(0, 1000)],
       measure.OneShot,
+      [],
       [],
       [],
     )
@@ -299,4 +315,92 @@ pub fn a_capture_with_no_passes_is_refused_test() {
       capture_build.runtime_of(loaded.capture.header),
     )
     == Error("the capture has no pass record")
+}
+
+fn os_reading(
+  pid: Int,
+  role: String,
+  rss: measure.Measurement,
+) -> os_reader.Reading {
+  os_reader.Reading(
+    pid:,
+    role:,
+    rss:,
+    anon: measure.Missing(measure.UnsupportedOnPlatform),
+    cpu_ms: measure.Known(1500),
+    start: identity.UnreadableStart,
+  )
+}
+
+pub fn os_readings_round_trip_with_their_missing_parts_test() {
+  let with_os =
+    Observation(
+      ..rich(0, 1000),
+      os: Ok([
+        os_reading(4242, "target", measure.Known(900_000)),
+        os_reading(4300, "child sh", measure.Known(4096)),
+      ]),
+    )
+
+  assert round_trip([with_os]) == [with_os]
+}
+
+pub fn a_pass_whose_os_reading_failed_reads_back_as_words_test() {
+  let ok =
+    Observation(
+      ..rich(0, 1000),
+      os: Ok([os_reading(4242, "target", measure.Known(900_000))]),
+    )
+  let failed =
+    Observation(
+      ..rich(1, 3000),
+      os: Error("the OS process table could not be read"),
+    )
+
+  let back = round_trip([ok, failed])
+  let assert [first, second] = back
+
+  assert first == ok
+
+  // The failure's wording is not kept, but every figure of the pass is a
+  // word and not a zero.
+  let assert Ok([target]) = second.os
+
+  assert target.rss == measure.Missing(measure.DecodeFailed)
+  assert target.cpu_ms == measure.Missing(measure.DecodeFailed)
+  assert second.memory == failed.memory
+}
+
+pub fn the_os_series_are_declared_overlapping_and_scoped_to_the_os_test() {
+  let assert Ok(#(_, records)) =
+    capture_build.assemble(
+      facts(),
+      "cap-test",
+      [
+        Observation(
+          ..rich(0, 1000),
+          os: Ok([os_reading(4242, "target", measure.Known(900_000))]),
+        ),
+      ],
+      measure.OneShot,
+      [],
+      [],
+      [],
+    )
+  let os_series =
+    list.filter_map(records, fn(record) {
+      case record {
+        capture.SeriesRecord(series) if series.scope == measure.OsProcessScope ->
+          Ok(series)
+        _ -> Error(Nil)
+      }
+    })
+
+  assert list.length(os_series) == 3
+  assert list.all(os_series, fn(series) {
+    case series.additivity {
+      measure.Overlapping(_) -> True
+      measure.Additive -> False
+    }
+  })
 }

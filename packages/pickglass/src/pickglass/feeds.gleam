@@ -32,18 +32,27 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 import pickglass/audit
+import pickglass/deltas
+import pickglass/marks.{type Mark}
 import pickglass/observation.{type Observation}
+import pickglass/panel
+import pickglass/probe_book.{type ProbeRecord}
 import pickglass/seam
+import pickglass/timeline_build
+import pickglass_core/analysis/transform
 import pickglass_core/capture
 import pickglass_core/identity
 import pickglass_core/measure.{Known, Missing, NotApplicable}
 import pickglass_core/owner
 import pickglass_core/policy
+import pickglass_core/profile
 import pickglass_core/unit
 import pickglass_core/wire
+import pickglass_web/build/profile as profile_page
 import pickglass_web/census/owners as owners_builder
 import pickglass_web/key.{type Key}
 import pickglass_web/model
@@ -62,6 +71,9 @@ pub type Slug {
   Processes
   Memory
   Probes
+  Profile
+  Timeline
+  Compare
   Audit
 
   /// A page the viewer has no data for yet.
@@ -76,7 +88,20 @@ pub type Inputs {
     observations: List(Observation),
     pins: List(seam.PinCard),
     plans: List(#(String, policy.Plan)),
-    checkpoints: List(capture.Checkpoint),
+    /// The checkpoints with their baselines, oldest first.
+    marks: List(Mark),
+    /// The index in `marks` the page compares against, if it chose one;
+    /// otherwise the newest.
+    baseline: Option(Int),
+    /// The probes, newest first.
+    probes: List(ProbeRecord),
+    /// What the profile page was asked to filter by and export.
+    chain: List(transform.Step),
+    exports: List(model.ExportNote),
+    /// The compare page's state.
+    comparison: Comparison,
+    /// Wall-clock milliseconds now.
+    now_ms: Int,
     /// The newest audit entries, newest first.
     entries: List(audit.Entry),
     cadence_ms: Int,
@@ -84,6 +109,23 @@ pub type Inputs {
     offset: Int,
   )
 }
+
+/// What the compare page shows: the capture files on offer, which two are
+/// chosen, and how reading them went.
+pub type Comparison {
+  Comparison(
+    /// File names, newest first.
+    offers: List(String),
+    baseline: Option(String),
+    candidate: Option(String),
+    /// What reading the chosen pair gave, once both are chosen.
+    outcome: Option(Result(model.CompareModel, String)),
+  )
+}
+
+/// A comparison with nothing offered or chosen.
+pub const no_comparison =
+  Comparison(offers: [], baseline: None, candidate: None, outcome: None)
 
 /// The page a route slug names.
 ///
@@ -100,9 +142,11 @@ pub fn slug_of(slug: String) -> Result(Slug, Nil) {
     "processes" -> Ok(Processes)
     "memory" -> Ok(Memory)
     "probes" -> Ok(Probes)
+    "profile" -> Ok(Profile)
+    "timeline" -> Ok(Timeline)
+    "compare" -> Ok(Compare)
     "audit" -> Ok(Audit)
-    "supervision" | "profile" | "timeline" | "compare" | "process-detail" ->
-      Ok(Waiting)
+    "supervision" | "process-detail" -> Ok(Waiting)
     _ -> Error(Nil)
   }
 }
@@ -122,15 +166,23 @@ pub fn feeds_for(slug: Slug, inputs: Inputs) -> List(msg.Feed) {
   case slug, inputs.observations {
     Audit, _ -> [strip, msg.FedAudit(audit_model(inputs))]
     Waiting, _ -> [strip]
+    Profile, _ -> [strip, ..profile_feed(inputs)]
+    Timeline, observations -> [strip, ..timeline_feed(inputs, observations)]
+    Compare, _ -> [strip, ..compare_feed(inputs)]
     _, [] -> [strip]
     Overview, [newest, ..] -> [
       strip,
       msg.FedOverview(overview(inputs, newest)),
+      ..movers_feed(inputs, newest)
     ]
     Owners, [newest, ..] -> [strip, ..owners_feed(inputs, newest)]
     Processes, [newest, ..] -> [strip, ..processes_feed(inputs, newest)]
     Memory, [newest, ..] -> [strip, msg.FedMemory(memory(inputs, newest))]
-    Probes, [newest, ..] -> [strip, msg.FedProbes(probes(inputs, newest))]
+    Probes, [newest, ..] -> [
+      strip,
+      msg.FedProbes(probes(inputs, newest)),
+      ..plan_target(inputs)
+    ]
   }
 }
 
@@ -169,24 +221,16 @@ fn info(
   outcome: measure.Outcome,
   elapsed_ms: Int,
 ) -> model.PanelInfo {
-  model.PanelInfo(
+  panel.info(panel.Facts(
     source:,
     method:,
-    cadence: case inputs.cadence_ms > 0 {
-      True -> measure.EveryMs(inputs.cadence_ms)
-      False -> measure.OneShot
-    },
-    achieved_ms: Some(elapsed_ms),
-    coverage: measure.Coverage(
-      scope:,
-      requested:,
-      achieved:,
-      outcome:,
-      dropped_events: NotApplicable,
-      in_flight_events: NotApplicable,
-      unscanned_bytes: NotApplicable,
-    ),
-  )
+    cadence_ms: inputs.cadence_ms,
+    scope:,
+    requested:,
+    achieved:,
+    outcome:,
+    elapsed_ms:,
+  ))
 }
 
 fn census_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
@@ -263,7 +307,7 @@ fn strip(inputs: Inputs) -> model.StripModel {
       source_line: line,
     ),
     observer: observer(inputs),
-    probes: [],
+    probes: active_probes(inputs),
   )
 }
 
@@ -287,19 +331,45 @@ fn observer(inputs: Inputs) -> model.ObserverEffect {
 
 // --------------------------------------------------------------- overview
 
-fn overview(inputs: Inputs, newest: Observation) -> model.OverviewModel {
-  let checkpoints =
-    list.index_map(inputs.checkpoints, fn(checkpoint, index) {
-      model.CheckpointRef(key: checkpoint_key(index), checkpoint:)
-    })
+// The checkpoints as the page's references, each with the key a browser may
+// send to name it.
+fn checkpoint_refs(inputs: Inputs) -> List(model.CheckpointRef) {
+  list.index_map(inputs.marks, fn(mark, index) {
+    model.CheckpointRef(key: checkpoint_key(index), checkpoint: mark.checkpoint)
+  })
+}
 
+// The checkpoint the page compares against and its reference, if any.
+fn chosen_mark(inputs: Inputs) -> Option(#(model.CheckpointRef, Mark)) {
+  case marks.chosen(inputs.marks, inputs.baseline) {
+    Some(#(index, mark)) ->
+      Some(#(
+        model.CheckpointRef(
+          key: checkpoint_key(index),
+          checkpoint: mark.checkpoint,
+        ),
+        mark,
+      ))
+    None -> None
+  }
+}
+
+// The baseline observation of the chosen checkpoint, when it has one.
+fn baseline_observation(inputs: Inputs) -> Option(Observation) {
+  case chosen_mark(inputs) {
+    Some(#(_, mark)) -> mark.baseline
+    None -> None
+  }
+}
+
+fn overview(inputs: Inputs, newest: Observation) -> model.OverviewModel {
   model.OverviewModel(
     layers: model.Panel(
       info: memory_info(inputs, newest),
-      body: layers_of(newest),
+      body: layers_of(newest, baseline_observation(inputs)),
     ),
-    checkpoint: None,
-    checkpoints:,
+    checkpoint: option.map(chosen_mark(inputs), fn(chosen) { chosen.0 }),
+    checkpoints: checkpoint_refs(inputs),
     schedulers: model.Panel(info: scheduler_info(inputs, newest), body: [
       utilisation(inputs.observations),
     ]),
@@ -313,20 +383,83 @@ fn overview(inputs: Inputs, newest: Observation) -> model.OverviewModel {
         limit: NotApplicable,
       ),
     ],
-    roles: model.Panel(
-      info: info(
-        inputs,
-        "OS processes",
-        "not read yet",
-        "OS processes",
-        1,
-        0,
-        measure.Refused("the viewer's OS readers are not built yet"),
-        0,
-      ),
-      body: [],
-    ),
+    roles: model.Panel(info: os_info(inputs, newest), body: os_roles(newest)),
   )
+}
+
+// The owners that moved most since the checkpoint, in the figures the owners
+// page shows. Without a checkpoint that has a baseline there is nothing to
+// say, and the panel stays absent.
+fn movers_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
+  case chosen_mark(inputs) {
+    Some(#(_, mark)) ->
+      case mark.baseline, newest.census {
+        Some(_), Ok(_) -> {
+          let page = owners_page(inputs, newest)
+
+          [
+            msg.FedOwnerMovers(model.OwnerMovers(
+              since: mark.checkpoint.name,
+              rows: list.filter_map(page.rows, fn(row) {
+                case row.kind {
+                  model.OwnerGroup ->
+                    Ok(model.OwnerMover(label: row.label, delta: row.delta))
+                  model.RoleGroup | model.UnknownGroup -> Error(Nil)
+                }
+              })
+                |> list.append([
+                  model.OwnerMover(label: "unknown", delta: page.unknown.delta),
+                ]),
+            )),
+          ]
+        }
+        _, _ -> []
+      }
+    None -> []
+  }
+}
+
+// The OS panel: the target's own process and the processes it started, each
+// with the figures the OS reader could take. A failed reading is the whole
+// panel's outcome, never an empty table.
+fn os_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
+  let #(achieved, outcome) = case newest.os {
+    Ok(readings) -> #(list.length(readings), measure.Complete)
+    Error(reason) -> #(0, measure.Errored(reason))
+  }
+
+  info(
+    inputs,
+    "OS processes",
+    "ps for resident set, CPU time and start; /proc for the anonymous part where it exists",
+    "OS processes",
+    case newest.os {
+      Ok(readings) -> list.length(readings)
+      Error(_) -> 1
+    },
+    achieved,
+    outcome,
+    newest.elapsed_ms,
+  )
+}
+
+fn os_roles(newest: Observation) -> List(model.OsRole) {
+  case newest.os {
+    Error(_) -> []
+    Ok(readings) ->
+      list.map(readings, fn(reading) {
+        model.OsRole(
+          role: reading.role,
+          os: identity.OsProcess(pid: reading.pid, start: reading.start),
+          rss: reading.rss,
+          anon: reading.anon,
+          note: case reading.start {
+            identity.CoarseStart(_) -> "start time is good to a second"
+            identity.PreciseStart(_) | identity.UnreadableStart -> ""
+          },
+        )
+      })
+  }
 }
 
 fn memory_info(inputs: Inputs, newest: Observation) -> model.PanelInfo {
@@ -376,10 +509,14 @@ fn missing_for(reason: String) -> measure.MissingReason {
   }
 }
 
-// The erlang:memory total first, then each category under it. A failed
-// memory reading is one row that says so.
-fn layers_of(newest: Observation) -> List(model.LayerRow) {
-  case newest.memory {
+// The erlang:memory total first, then each category under it, then the OS's
+// account of the target. A failed memory reading is one row that says so. A
+// change is shown only against a baseline that has the same reading.
+fn layers_of(
+  newest: Observation,
+  baseline: Option(Observation),
+) -> List(model.LayerRow) {
+  let vm = case newest.memory {
     Error(reason) -> [
       model.LayerRow(
         label: "erlang:memory total",
@@ -401,11 +538,27 @@ fn layers_of(newest: Observation) -> List(model.LayerRow) {
             _ -> 1
           },
           value: Known(pair.1),
-          delta: NotApplicable,
+          delta: case baseline {
+            Some(earlier) -> deltas.memory(newest, earlier, pair.0)
+            None -> NotApplicable
+          },
           derivation: model.Measured,
         )
       })
   }
+
+  list.append(vm, [
+    model.LayerRow(
+      label: "OS resident set (target)",
+      depth: 0,
+      value: deltas.target_rss(newest),
+      delta: case baseline {
+        Some(earlier) -> deltas.os_rss(newest, earlier)
+        None -> NotApplicable
+      },
+      derivation: model.Derived("the OS's account, not the VM's"),
+    ),
+  ])
 }
 
 // Scheduler utilisation between consecutive passes, oldest first: the change
@@ -521,20 +674,29 @@ fn word_size_of(newest: Observation, inputs: Inputs) -> Int {
 }
 
 fn owners_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
-  let rows = rows_of(newest, word_size_of(newest, inputs))
-  let checkpoints =
-    list.index_map(inputs.checkpoints, fn(checkpoint, index) {
-      model.CheckpointRef(key: checkpoint_key(index), checkpoint:)
-    })
+  [msg.FedOwners(owners_page(inputs, newest))]
+}
 
-  let page =
+// The owners page for the newest census, with each group's heap capacity
+// change since the chosen checkpoint when that checkpoint kept a census.
+fn owners_page(inputs: Inputs, newest: Observation) -> model.OwnersModel {
+  let word_size = word_size_of(newest, inputs)
+  let rows = rows_of(newest, word_size)
+  let chosen = chosen_mark(inputs)
+  let without_change =
     owners_builder.build(
       census_info(inputs, newest),
       rows,
-      checkpoints,
-      None,
+      checkpoint_refs(inputs),
+      option.map(chosen, fn(pair) { pair.0 }),
       fn(_) { NotApplicable },
     )
+
+  let page = case chosen {
+    Some(#(_, marks.Mark(baseline: Some(earlier), ..))) ->
+      with_changes(inputs, newest, earlier, rows, without_change, word_size)
+    _ -> without_change
+  }
 
   // The census lists only the top rows. What was scanned and not listed is
   // the remainder; the agent's per-owner aggregate carries memory and not
@@ -544,13 +706,41 @@ fn owners_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
     Error(_) -> 0
   }
 
-  [
-    msg.FedOwners(owners_builder.with_remainder(
-      page,
-      procs: int.max(0, left_out),
-      heap_cap: Missing(measure.UnsupportedOnRuntime),
-    )),
-  ]
+  owners_builder.with_remainder(
+    page,
+    procs: int.max(0, left_out),
+    heap_cap: Missing(measure.UnsupportedOnRuntime),
+  )
+}
+
+fn with_changes(
+  inputs: Inputs,
+  newest: Observation,
+  earlier: Observation,
+  rows: List(model.ProcRow),
+  current: model.OwnersModel,
+  word_size: Int,
+) -> model.OwnersModel {
+  let baseline_page =
+    owners_builder.build(
+      census_info(inputs, earlier),
+      rows_of(earlier, word_size),
+      [],
+      None,
+      fn(_) { NotApplicable },
+    )
+  let completeness = case deltas.census_complete(earlier) {
+    True -> deltas.BaselineComplete
+    False -> deltas.BaselineTopRows
+  }
+
+  owners_builder.build(
+    census_info(inputs, newest),
+    rows,
+    checkpoint_refs(inputs),
+    option.map(chosen_mark(inputs), fn(pair) { pair.0 }),
+    deltas.owner_heap(current, baseline_page, completeness),
+  )
 }
 
 fn processes_feed(inputs: Inputs, newest: Observation) -> List(msg.Feed) {
@@ -604,6 +794,16 @@ fn memory(inputs: Inputs, newest: Observation) -> model.MemoryModel {
         )
       })
   }
+  let os_row =
+    model.CategoryRow(
+      label: "OS resident set (target)",
+      unit: unit.Bytes,
+      value: deltas.target_rss(newest),
+      additivity: measure.Overlapping(
+        "the OS's account of the whole process: the VM's allocations, loaded code and shared libraries",
+      ),
+      note: "",
+    )
   let unread = fn(source) {
     model.Panel(
       info: info(
@@ -621,7 +821,10 @@ fn memory(inputs: Inputs, newest: Observation) -> model.MemoryModel {
   }
 
   model.MemoryModel(
-    categories: model.Panel(info: memory_info(inputs, newest), body: categories),
+    categories: model.Panel(
+      info: memory_info(inputs, newest),
+      body: list.append(categories, [os_row]),
+    ),
     allocators: unread("allocators"),
     tables: unread("ets tables"),
   )
@@ -665,10 +868,58 @@ fn probes(inputs: Inputs, newest: Observation) -> model.ProbesModel {
       #(pin_key(pin.token), pin.pid_text <> label_for(rows, pin.pid_text))
     }),
     pending: option.from_result(pending),
-    active: [],
-    history: [],
+    active: active_probes(inputs),
+    history: probe_history(inputs),
     grants: inputs.page.grants,
   )
+}
+
+/// The key of a probe, which names it by the agent's id.
+pub fn probe_key(probe_id: String) -> Key {
+  key.make("probe." <> probe_id)
+}
+
+// The newest live pin is offered as the plan form's first target, which is
+// how "Plan probe" on a process ends: the process is pinned and the form is
+// open with it chosen. The page ignores the offer once the operator has
+// chosen a target of their own.
+fn plan_target(inputs: Inputs) -> List(msg.Feed) {
+  case
+    list.filter(inputs.pins, fn(pin) { pin.status == seam.PinLive })
+    |> list.last
+  {
+    Ok(pin) -> [msg.FedPlanTarget(pin_key(pin.token))]
+    Error(Nil) -> []
+  }
+}
+
+fn active_probes(inputs: Inputs) -> List(model.ActiveProbe) {
+  list.filter_map(inputs.probes, fn(probe) {
+    case probe.state {
+      probe_book.Running ->
+        Ok(model.ActiveProbe(
+          key: probe_key(probe.id),
+          kind: probe.kind,
+          remaining_ms: Known(probe_book.remaining_ms(probe, inputs.now_ms)),
+        ))
+      probe_book.Finished(..) -> Error(Nil)
+    }
+  })
+}
+
+fn probe_history(inputs: Inputs) -> List(model.ProbeHistoryRow) {
+  list.filter_map(inputs.probes, fn(probe) {
+    case probe.state {
+      probe_book.Running -> Error(Nil)
+      probe_book.Finished(outcome:, cost:, ..) ->
+        Ok(model.ProbeHistoryRow(
+          key: probe_key(probe.id),
+          kind: probe.kind,
+          outcome:,
+          cost:,
+        ))
+    }
+  })
 }
 
 fn label_for(rows: List(model.ProcRow), pid_text: String) -> String {
@@ -720,7 +971,9 @@ fn policy_entry(entry: audit.Entry, _now: Int) -> policy.AuditEntry {
         principal: "host",
         command: audit.describe(entry),
         decision: case event {
-          audit.TicketRedeemed(_) | audit.SocketAdmitted(_) -> policy.Allowed
+          audit.TicketRedeemed(_)
+          | audit.SocketAdmitted(_)
+          | audit.DownloadServed(_) -> policy.Allowed
           audit.TicketRefused(_)
           | audit.RequestRefused(..)
           | audit.SocketRefused(_)
@@ -730,5 +983,191 @@ fn policy_entry(entry: audit.Entry, _now: Int) -> policy.AuditEntry {
           | audit.PinsInvalidated(_) -> policy.Denied(reason: "refused")
         },
       )
+  }
+}
+
+// ---------------------------------------------------------------- profile
+
+/// The most functions the profile page's chain can name before the viewer
+/// stops growing it. A chain longer than this is a mistake, not an analysis.
+pub const max_chain = 16
+
+// The newest finished probe that measured something, drawn through the
+// page's chain. A chain core refuses (a pattern that did not compile) is
+// dropped whole and the profile drawn unfiltered, because a profile the
+// operator cannot see is worse than a filter that did not apply.
+fn profile_feed(inputs: Inputs) -> List(msg.Feed) {
+  case profile_model(inputs, inputs.chain) {
+    Ok(Some(page)) -> [msg.FedProfile(page)]
+    Ok(None) -> []
+    Error(_) ->
+      case profile_model(inputs, []) {
+        Ok(Some(page)) -> [msg.FedProfile(page)]
+        Ok(None) | Error(_) -> []
+      }
+  }
+}
+
+/// The profile page for the newest probe that has a profile, after a chain.
+/// `Ok(None)` when no probe has measured anything yet.
+///
+/// ## Examples
+///
+/// ```gleam
+/// feeds.profile_model(inputs, [transform.Focus("lists")])
+/// ```
+pub fn profile_model(
+  inputs: Inputs,
+  chain: List(transform.Step),
+) -> Result(Option(model.ProfileModel), profile_page.Failure) {
+  case probe_book.latest_profiled(inputs.probes) {
+    Error(Nil) -> Ok(None)
+    Ok(#(probe, found)) ->
+      case column_of(found) {
+        Error(Nil) -> Ok(None)
+        Ok(column) ->
+          profile_page.build(
+            profile_header(inputs, probe, found),
+            found,
+            column,
+            chain,
+            inputs.exports,
+          )
+          |> result.map(Some)
+      }
+  }
+}
+
+// A counters profile is read by call time; any other by its first column,
+// which for sampled stacks is the sample count. Core guarantees a profile has
+// a value type, so the error is not reachable; it is handled as "nothing to
+// draw" and not as a crash.
+fn column_of(found: profile.Profile) -> Result(profile.Column, Nil) {
+  result.lazy_or(profile.column_named(found, "call time"), fn() {
+    profile.column(found, 0)
+  })
+}
+
+fn profile_header(
+  inputs: Inputs,
+  probe: ProbeRecord,
+  found: profile.Profile,
+) -> model.ProfileHeader {
+  let notes = case probe.state {
+    probe_book.Finished(notes:, ..) -> notes
+    probe_book.Running -> []
+  }
+  let #(source, method) = case profile.source(found) {
+    profile.SampledStacks(method:, rate:) -> #(
+      "sampled stacks probe",
+      method <> ", " <> int.to_string(rate) <> " Hz requested",
+    )
+    profile.TracedCounters -> #(
+      "counters probe",
+      "call_time trace session, silent, read at the deadline",
+    )
+    profile.TracedCalls -> #(
+      "call trace probe",
+      "trace messages to a collector",
+    )
+    profile.AllocationCounts -> #("allocation counts", "allocator statistics")
+  }
+
+  model.ProfileHeader(
+    title: "probe "
+      <> probe.id
+      <> case probe.modules {
+      [] -> ""
+      modules -> " · " <> string.join(modules, ", ")
+    },
+    source: profile.source(found),
+    info: info(
+      inputs,
+      source,
+      method,
+      "functions",
+      probe.matched,
+      list.length(profile.samples(found)),
+      case probe.state {
+        probe_book.Finished(outcome:, ..) -> outcome
+        probe_book.Running -> measure.Complete
+      },
+      case probe.state {
+        probe_book.Finished(cost: capture.ProbeCost(wall_ms: Known(ms), ..), ..) ->
+          ms
+        _ -> 0
+      },
+    ),
+    caveats: notes,
+  )
+}
+
+// --------------------------------------------------------------- timeline
+
+fn timeline_feed(
+  inputs: Inputs,
+  observations: List(Observation),
+) -> List(msg.Feed) {
+  case
+    timeline_build.build(
+      observations,
+      inputs.marks,
+      inputs.probes,
+      inputs.cadence_ms,
+      inputs.now_ms,
+    )
+  {
+    Ok(page) -> [msg.FedTimeline(page)]
+    Error(_) -> []
+  }
+}
+
+// ---------------------------------------------------------------- compare
+
+/// The key of a capture file offered for comparison.
+pub fn capture_key(name: String) -> Key {
+  key.make("cap:" <> name)
+}
+
+fn compare_feed(inputs: Inputs) -> List(msg.Feed) {
+  let state = inputs.comparison
+  let chosen = fn(name) {
+    case Some(name) == state.baseline, Some(name) == state.candidate {
+      True, _ -> model.AsBaseline
+      _, True -> model.AsCandidate
+      _, _ -> model.NotChosen
+    }
+  }
+
+  let note = case state.outcome, state.baseline, state.candidate {
+    Some(Error(reason)), _, _ -> reason
+    Some(Ok(_)), _, _ -> ""
+    None, None, None -> "Choose a baseline and a candidate."
+    None, Some(_), None -> "Choose a candidate."
+    None, None, Some(_) -> "Choose a baseline."
+    None, Some(_), Some(_) -> "Reading the chosen captures."
+  }
+
+  let offers =
+    msg.FedCaptures(model.CapturesModel(
+      info: info(
+        inputs,
+        "capture files",
+        "the files in the save directory",
+        "files",
+        list.length(state.offers),
+        list.length(state.offers),
+        measure.Complete,
+        0,
+      ),
+      offers: list.map(state.offers, fn(name) {
+        model.CaptureOffer(key: capture_key(name), name:, chosen: chosen(name))
+      }),
+      note:,
+    ))
+
+  case state.outcome {
+    Some(Ok(page)) -> [offers, msg.FedCompare(page)]
+    Some(Error(_)) | None -> [offers]
   }
 }

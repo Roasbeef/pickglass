@@ -150,3 +150,18 @@ pub fn malformed_open_and_view_are_errors_test() {
     ]),
   )
 }
+
+pub fn compare_takes_two_capture_files_test() {
+  assert cli.parse(["compare", "a.pgcap", "b.pgcap"])
+    == Ok(cli.Compare("a.pgcap", "b.pgcap"))
+}
+
+pub fn compare_without_two_files_or_with_options_is_refused_test() {
+  assert cli.parse(["compare"]) == Error("compare needs two capture files")
+  assert cli.parse(["compare", "a.pgcap"])
+    == Error("compare needs two capture files")
+  assert cli.parse(["compare", "a", "b", "c"])
+    == Error("compare needs two capture files")
+  assert cli.parse(["compare", "--out", "b"])
+    == Error("compare takes two capture files and no options")
+}

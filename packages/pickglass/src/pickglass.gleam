@@ -14,6 +14,7 @@ import argv
 import gleam/io
 import gleam/option.{Some}
 import pickglass/cli
+import pickglass/compare_report
 import pickglass/internal/ffi_os
 import pickglass/once
 import pickglass/serve
@@ -70,6 +71,8 @@ pub fn main() -> Nil {
     Ok(cli.Attach(options)) -> ffi_os.halt(cli.run_attach(options))
     Ok(cli.Open(options)) -> ffi_os.halt(serve.run_open(options, version))
     Ok(cli.View(options)) -> ffi_os.halt(serve.run_view(options))
+    Ok(cli.Compare(baseline:, candidate:)) ->
+      ffi_os.halt(compare_report.run(baseline, candidate))
     Error(message) -> {
       io.println_error("pickglass: " <> message)
       io.println_error(cli.usage)

@@ -42,9 +42,12 @@ import gleam/list
 import gleam/result
 import gleam/string
 import pickglass/audit
+import pickglass/capture_file
+import pickglass/downloads
 import pickglass/hub
+import pickglass/marks.{type Mark}
 import pickglass/observation.{type Observation}
-import pickglass_core/capture
+import pickglass/probe_book.{type ProbeRecord}
 import pickglass_core/identity
 import pickglass_core/policy.{type Command, type PrincipalId}
 import pickglass_core/wire
@@ -91,6 +94,15 @@ pub type Request {
   /// Write the live window to a capture file.
   SaveCapture
 
+  /// Offer a file the viewer built from a probe's profile as a one-time
+  /// download. It is authorized as an export of that probe in `format`; the
+  /// body is the viewer's own data and carries nothing from the browser.
+  ExportProfile(
+    probe_id: String,
+    format: policy.ExportFormat,
+    download: downloads.Download,
+  )
+
   /// Read the newest audit entries.
   ReadAudit(count: Int)
 
@@ -121,6 +133,9 @@ pub type Reply {
 
   /// A capture was written.
   CaptureSaved(path: String)
+
+  /// A download is waiting at this ticket, to be fetched once.
+  DownloadReady(ticket: String)
 
   /// The request was refused. The text is the gate's reason, a validation
   /// message, or what the agent said.
@@ -174,8 +189,16 @@ pub type Page {
     submit: fn(Request) -> Reply,
     /// The plans this principal has pending, as `(id, plan)`.
     plans: fn() -> List(#(String, policy.Plan)),
-    /// The checkpoints recorded in the live capture, oldest first.
-    checkpoints: fn() -> List(capture.Checkpoint),
+    /// The checkpoints recorded in the live capture with the observations
+    /// they are compared against, oldest first.
+    checkpoints: fn() -> List(Mark),
+    /// The probes, newest first.
+    probes: fn() -> List(ProbeRecord),
+    /// The names of the capture files that can be compared, newest first.
+    /// Empty when the principal may not observe.
+    captures: fn() -> List(String),
+    /// Read one of those files. `Error` says why it could not be read.
+    read_capture: fn(String) -> Result(capture_file.Loaded, String),
     /// The newest audit entries, newest first.
     audit: fn(Int) -> List(audit.Entry),
     /// The pins, oldest first.
@@ -205,6 +228,7 @@ pub type Intent {
 pub type Follow {
   NoFollow
   AddCheckpoint(name: String)
+  StoreDownload(download: downloads.Download)
   WriteCapture
   TailAudit(count: Int)
 }
@@ -253,15 +277,17 @@ pub fn intent(request: Request) -> Result(Intent, String) {
     Checkpoint(name) -> {
       use name <- result.try(valid_name(name))
 
-      Ok(Run(
-        policy.ExportCapture(live_capture, policy.CaptureFile),
-        AddCheckpoint(name),
-      ))
+      Ok(Run(policy.Checkpoint(name), AddCheckpoint(name)))
     }
     SaveCapture ->
       Ok(Run(
         policy.ExportCapture(live_capture, policy.CaptureFile),
         WriteCapture,
+      ))
+    ExportProfile(probe_id, format, download) ->
+      Ok(Run(
+        policy.ExportCapture("probe-" <> probe_id, format),
+        StoreDownload(download),
       ))
     ReadAudit(count) ->
       case count >= 1 && count <= max_audit_count {

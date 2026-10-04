@@ -30,15 +30,20 @@ import pickglass/audit
 import pickglass/capture_build
 import pickglass/capture_file
 import pickglass/cli
+import pickglass/clock
 import pickglass/host
 import pickglass/hub
 import pickglass/internal/ffi_dist
+import pickglass/marks
 import pickglass/observation.{type Observation}
 import pickglass/observation_codec
+import pickglass/os_reader
+import pickglass/probe_book
 import pickglass/remote.{type Remote}
 import pickglass/seam
 import pickglass/service
 import pickglass/web_mount
+import pickglass_core/capture as capture_records
 import pickglass_core/identity
 import pickglass_core/policy
 
@@ -70,6 +75,14 @@ fn open(options: cli.OpenOptions, version: String) -> Result(Nil, String) {
   use remote <- result.try(remote.of_session(session))
 
   let cadence_ms = option.unwrap(options.cadence_s, 2) * 1000
+  let os_start = case os_reader.read(target.os_pid) {
+    Ok(readings) ->
+      case os_reader.target_of(readings) {
+        Some(reading) -> reading.start
+        None -> identity.UnreadableStart
+      }
+    Error(_) -> identity.UnreadableStart
+  }
   let facts =
     capture_build.Facts(
       pickglass_version: version,
@@ -80,6 +93,12 @@ fn open(options: cli.OpenOptions, version: String) -> Result(Nil, String) {
       workload: "",
       top_k: 200,
       deadline_ms: 15_000,
+      os_start:,
+      clock: option.from_result(clock.measure(
+        remote,
+        ffi_dist.system_time_ms,
+        ffi_dist.monotonic_ns,
+      )),
     )
   let mode =
     seam.Live(
@@ -89,16 +108,16 @@ fn open(options: cli.OpenOptions, version: String) -> Result(Nil, String) {
         creation: 0,
         boot: remote.boot,
       ),
-      os: identity.OsProcess(
-        pid: target.os_pid,
-        start: identity.UnreadableStart,
-      ),
+      os: identity.OsProcess(pid: target.os_pid, start: os_start),
     )
 
   let started =
     serve(
       Some(remote),
       [],
+      [],
+      [],
+      fn() { os_reader.read(target.os_pid) },
       mode,
       host.operator_grants(),
       Some(service.Saver(
@@ -163,7 +182,26 @@ fn view(options: cli.ViewOptions) -> Result(Nil, String) {
       os: target.os,
     )
 
-  serve(None, observations, mode, host.viewer_grants(), None, 0, options.port)
+  let checkpoints =
+    list.filter_map(capture.records, fn(record) {
+      case record {
+        capture_records.CheckpointRecord(checkpoint) -> Ok(checkpoint)
+        _ -> Error(Nil)
+      }
+    })
+
+  serve(
+    None,
+    observations,
+    marks.from_capture(checkpoints, observations),
+    probe_book.of_records(capture.records),
+    fn() { Error("a capture has no live OS to read") },
+    mode,
+    host.viewer_grants(),
+    None,
+    0,
+    options.port,
+  )
 }
 
 fn verdict(loaded: capture_file.Loaded) -> String {
@@ -187,6 +225,9 @@ fn file_name(path: String) -> String {
 fn serve(
   remote: Option(Remote),
   observations: List(Observation),
+  marks: List(marks.Mark),
+  probes: List(probe_book.ProbeRecord),
+  os: fn() -> Result(List(os_reader.Reading), String),
   mode: seam.Mode,
   grants: List(policy.Capability),
   saver: Option(service.Saver),
@@ -199,7 +240,7 @@ fn serve(
   use loaded_assets <- result.try(assets.load())
   use admission <- result.try(admission.start(clock))
 
-  let config = hub.Config(..hub.default_config(clock), cadence_ms:)
+  let config = hub.Config(..hub.default_config(clock), cadence_ms:, os:)
 
   use hub <- result.try(case remote {
     Some(remote) -> hub.start_live(remote, config)
@@ -213,6 +254,8 @@ fn serve(
       clock:,
       mode:,
       saver:,
+      marks:,
+      probes:,
     )),
   )
   use running <- result.try(

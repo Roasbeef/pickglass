@@ -7,9 +7,12 @@ import harness.{type Rig}
 import pickglass/admission.{type Admission}
 import pickglass/assets
 import pickglass/audit
+import pickglass/downloads
 import pickglass/host
 import pickglass/internal/ffi_dist
+import pickglass/seam
 import pickglass/web_mount
+import pickglass_core/policy
 import raw_client as net
 
 type Setup {
@@ -370,4 +373,65 @@ pub fn the_principal_comes_from_the_session_not_the_frame_test() {
   assert !mentions(trail(setup), "root")
 
   net.close(conn)
+}
+
+fn stash(setup: Setup) -> String {
+  let page = harness.page(setup.rig, "alice", harness.all)
+  let assert seam.DownloadReady(ticket) =
+    page.submit(seam.ExportProfile(
+      "7",
+      policy.CollapsedStacks,
+      downloads.Download(
+        file_name: "probe 7/../x.collapsed",
+        content_type: "text/plain",
+        body: "a;b 3\n",
+      ),
+    ))
+
+  ticket
+}
+
+pub fn a_download_is_served_once_to_a_session_test() {
+  let setup = start()
+  let cookie = login(setup)
+  let ticket = stash(setup)
+
+  let first = net.get(setup.port, "/download/" <> ticket, [#("Cookie", cookie)])
+
+  assert first.status == 200
+  assert first.body == "a;b 3\n"
+
+  // The name in the header is cleaned, whatever the viewer was handed.
+  assert net.header(first, "content-disposition")
+    == "attachment; filename=\"probe_7_.._x.collapsed\""
+  assert net.header(first, "x-content-type-options") == "nosniff"
+  assert mentions(trail(setup), "download served to")
+
+  let second =
+    net.get(setup.port, "/download/" <> ticket, [#("Cookie", cookie)])
+
+  assert second.status == 404
+  assert mentions(trail(setup), "unknown, used or expired ticket")
+}
+
+pub fn a_download_without_a_session_is_refused_and_keeps_the_ticket_test() {
+  let setup = start()
+  let ticket = stash(setup)
+
+  assert net.get(setup.port, "/download/" <> ticket, []).status == 403
+  assert mentions(trail(setup), "request refused on download: no session")
+
+  // The refusal did not spend the ticket.
+  let cookie = login(setup)
+
+  assert net.get(setup.port, "/download/" <> ticket, [#("Cookie", cookie)]).status
+    == 200
+}
+
+pub fn a_made_up_download_ticket_gets_nothing_test() {
+  let setup = start()
+  let cookie = login(setup)
+
+  assert net.get(setup.port, "/download/forged", [#("Cookie", cookie)]).status
+    == 404
 }

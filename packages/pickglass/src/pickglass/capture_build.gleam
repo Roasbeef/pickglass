@@ -8,12 +8,13 @@
 //// boot id, the OS process id, and the runtime fields of the first memory
 //// report. A field the agent does not report yet, such as the emulator
 //// flavor or the host build, is written as the word `unknown` and never
-//// guessed, and the OS process start identity is `UnreadableStart` until the
-//// OS readers land.
+//// guessed. The OS process start identity comes from the OS reader and is
+//// `UnreadableStart` when it could not be read.
 ////
-//// The agent has no clock request yet, so a checkpoint's
-//// `agent_monotonic_ns` is written as zero and readers use its `system_ms`.
-//// No `clock` record is written for the same reason.
+//// The agent has no clock request, so the `clock` record comes from timing
+//// a ping (`clock`), and is written only when a ping was timed. A
+//// checkpoint's `agent_monotonic_ns` is placed on the agent's clock from
+//// that record by the service, and is zero when there is none.
 ////
 //// ## Flow
 ////
@@ -29,11 +30,13 @@ import gleam/bit_array
 import gleam/crypto
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import pickglass/audit
 import pickglass/observation.{type Observation}
 import pickglass/observation_codec
+import pickglass/probe_book.{type ProbeRecord}
 import pickglass_core/capture.{type Header, type Record}
 import pickglass_core/identity.{type BootId}
 import pickglass_core/measure.{type Cadence}
@@ -59,6 +62,11 @@ pub type Facts {
     /// The census budget that produced the observations.
     top_k: Int,
     deadline_ms: Int,
+    /// How the target's OS process is told from another that reused its
+    /// pid, from the OS reader.
+    os_start: identity.StartIdentity,
+    /// The agent's clock against the viewer's, when a ping was timed.
+    clock: Option(capture.Clock),
   )
 }
 
@@ -74,7 +82,7 @@ pub const redaction = "none; the agent reads no message contents"
 /// ## Examples
 ///
 /// ```gleam
-/// capture_build.assemble(facts, "id", observations, OneShot, [], [])
+/// capture_build.assemble(facts, "id", observations, OneShot, [], [], [])
 /// ```
 pub fn assemble(
   facts: Facts,
@@ -83,6 +91,7 @@ pub fn assemble(
   cadence: Cadence,
   checkpoints: List(capture.Checkpoint),
   entries: List(audit.Entry),
+  probes: List(ProbeRecord),
 ) -> Result(#(Header, List(Record(Profile))), String) {
   use memory <- result.try(
     list.find_map(observations, fn(observation) { observation.memory })
@@ -101,8 +110,13 @@ pub fn assemble(
   Ok(#(
     header,
     list.flatten([
+      case facts.clock {
+        Some(clock) -> [capture.ClockRecord(clock)]
+        None -> []
+      },
       observation_codec.to_records(observations, cadence, memory.word_size),
       list.map(checkpoints, capture.CheckpointRecord),
+      probe_book.to_records(probes),
       list.map(decisions(entries), capture.AuditRecord),
     ]),
   ))
@@ -153,7 +167,7 @@ fn provenance_of(
         creation: 0,
         boot: facts.boot,
       ),
-      os: identity.OsProcess(pid: facts.os_pid, start: identity.UnreadableStart),
+      os: identity.OsProcess(pid: facts.os_pid, start: facts.os_start),
       role: facts.role,
     ),
     runtime: provenance.Runtime(

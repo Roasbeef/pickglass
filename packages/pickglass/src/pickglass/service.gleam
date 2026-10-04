@@ -14,7 +14,16 @@
 ////
 //// The service watches the hub for `TargetLost`. When the target is gone it
 //// marks every pin dead, so a later probe naming one is denied by the gate
-//// before it reaches the link.
+//// before it reaches the link, and closes every running probe as lost.
+////
+//// The service also keeps what the viewer must not lose when the agent
+//// forgets it. A probe the agent accepted is recorded (`probe_book`); once a
+//// second the service asks the agent whether each running probe has ended,
+//// and when one has, takes its result into a profile before the agent
+//// discards it. Checkpoints are kept with a copy of the observation they are
+//// compared against (`marks`), exports wait here as one-time downloads
+//// (`downloads`), and the capture files of the save directory are listed and
+//// read here so the compare page can offer them.
 ////
 //// ## Flow
 ////
@@ -28,14 +37,19 @@ import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/result
 import gleam/set
+import gleam/string
 import pickglass/audit.{type Log}
 import pickglass/capture_build
 import pickglass/capture_file
+import pickglass/downloads
 import pickglass/exec
 import pickglass/gate.{type Gate}
 import pickglass/hub.{type Hub}
+import pickglass/marks.{type Mark}
+import pickglass/probe_book.{type ProbeRecord}
 import pickglass/remote.{type Remote}
 import pickglass/seam.{type Reply, type Request}
 import pickglass/secret
@@ -43,6 +57,8 @@ import pickglass_core/capture
 import pickglass_core/identity
 import pickglass_core/measure
 import pickglass_core/policy.{type Command, type Principal}
+import pickglass_core/wire
+import simplifile
 import weft/actor
 
 /// Where captures are saved and what their headers say.
@@ -62,8 +78,16 @@ pub type Config {
     mode: seam.Mode,
     /// `None` when saving is not offered.
     saver: Option(Saver),
+    /// The checkpoints a replayed capture already holds, oldest first.
+    marks: List(Mark),
+    /// The probes a replayed capture already holds, newest first.
+    probes: List(ProbeRecord),
   )
 }
+
+/// How often the service asks the agent whether a running probe has ended,
+/// in milliseconds.
+pub const poll_ms = 1000
 
 /// A handle to the service.
 pub type Service {
@@ -83,7 +107,19 @@ pub opaque type Message {
     reply: Subject(List(#(String, policy.Plan))),
   )
   Pins(reply: Subject(List(seam.PinCard)))
-  Checkpoints(reply: Subject(List(capture.Checkpoint)))
+  Checkpoints(reply: Subject(List(Mark)))
+  Probes(reply: Subject(List(ProbeRecord)))
+  Captures(principal: Principal, reply: Subject(List(String)))
+  ReadCapture(
+    principal: Principal,
+    name: String,
+    reply: Subject(Result(capture_file.Loaded, String)),
+  )
+  TakeDownload(
+    ticket: String,
+    reply: Subject(Result(downloads.Download, downloads.Refusal)),
+  )
+  Poll
   TargetGone(hub.Update)
 }
 
@@ -92,7 +128,11 @@ type State {
     config: Config,
     remote: Remote,
     gate: Gate,
-    checkpoints: List(capture.Checkpoint),
+    /// Checkpoints with their baselines, newest first.
+    marks: List(Mark),
+    /// Probes, newest first.
+    probes: List(ProbeRecord),
+    downloads: downloads.Registry,
   )
 }
 
@@ -122,9 +162,14 @@ pub fn start(config: Config) -> Result(Service, String) {
 
       hub.watch(config.hub, watcher)
 
-      actor.initialised(
-        State(config:, remote:, gate: gate.new(boot, target), checkpoints: []),
-      )
+      actor.initialised(State(
+        config:,
+        remote:,
+        gate: gate.new(boot, target),
+        marks: list.reverse(config.marks),
+        probes: config.probes,
+        downloads: downloads.new(),
+      ))
       |> actor.selecting(
         process.new_selector()
         |> process.select(subject)
@@ -134,6 +179,7 @@ pub fn start(config: Config) -> Result(Service, String) {
       |> Ok
     })
     |> actor.on_message(handle)
+    |> actor.periodic(every: poll_ms, sending: Poll)
 
   case actor.start(builder) {
     Ok(started) ->
@@ -191,12 +237,48 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
     }
 
     Checkpoints(reply) -> {
-      process.send(reply, list.reverse(state.checkpoints))
+      process.send(reply, list.reverse(state.marks))
 
       actor.continue(state)
     }
 
-    // The hub reported the target gone: every pin is dead from here on.
+    Probes(reply) -> {
+      process.send(reply, state.probes)
+
+      actor.continue(state)
+    }
+
+    Captures(principal, reply) -> {
+      process.send(reply, case observe_allowed(state, principal) {
+        True -> capture_names(state)
+        False -> []
+      })
+
+      actor.continue(state)
+    }
+
+    ReadCapture(principal, name, reply) -> {
+      process.send(reply, case observe_allowed(state, principal) {
+        True -> read_capture(state, name)
+        False -> Error("this principal may not observe")
+      })
+
+      actor.continue(state)
+    }
+
+    TakeDownload(ticket, reply) -> {
+      let #(registry, outcome) =
+        downloads.take(state.downloads, ticket, state.config.clock())
+
+      process.send(reply, outcome)
+
+      actor.continue(State(..state, downloads: registry))
+    }
+
+    Poll -> actor.continue(poll_probes(state))
+
+    // The hub reported the target gone: every pin is dead from here on, and
+    // so is every probe the agent was running.
     TargetGone(hub.TargetLost(reason)) -> {
       audit.append(
         state.config.audit,
@@ -207,6 +289,13 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
         State(
           ..state,
           gate: gate.target_lost(state.gate, reason, state.config.clock()),
+          probes: list.map(state.probes, fn(probe) {
+            case probe_book.is_running(probe) {
+              True ->
+                probe_book.finish_lost(probe, reason, state.config.clock())
+              False -> probe
+            }
+          }),
         ),
       )
     }
@@ -321,11 +410,17 @@ fn execute(
     )
 
     exec.ProbeStarted(probe_id, matched, _) -> #(
-      state,
+      State(
+        ..state,
+        probes: record_started(state.probes, command, probe_id, matched, now),
+      ),
       seam.ProbeStarted(int.to_string(probe_id), matched),
     )
 
-    exec.ProbeStopped(snapshot) -> #(state, seam.ProbeStopped(snapshot))
+    exec.ProbeStopped(snapshot) -> #(
+      State(..state, probes: close_probe(state.probes, snapshot, now)),
+      seam.ProbeStopped(snapshot),
+    )
 
     exec.DetachRequested -> #(state, seam.Done("detached"))
 
@@ -383,13 +478,27 @@ fn invalidate_if_dead(
 fn follow_up(state: State, follow: seam.Follow, now: Int) -> #(State, Reply) {
   case follow {
     seam.NoFollow -> #(state, seam.Done(""))
-    seam.AddCheckpoint(name) -> #(
-      State(..state, checkpoints: [
-        capture.Checkpoint(name, 0, now),
-        ..state.checkpoints
-      ]),
-      seam.Done("checkpoint recorded"),
-    )
+    seam.AddCheckpoint(name) -> {
+      let newest =
+        list.first(hub.latest(state.config.hub)) |> option.from_result
+      let checkpoint = capture.Checkpoint(name, agent_ns(state, now), now)
+
+      #(
+        State(..state, marks: [marks.take(checkpoint, newest), ..state.marks]),
+        seam.Done("checkpoint recorded"),
+      )
+    }
+    seam.StoreDownload(download) -> {
+      let ticket = secret.token(16)
+
+      #(
+        State(
+          ..state,
+          downloads: downloads.put(state.downloads, ticket, download, now),
+        ),
+        seam.DownloadReady(ticket),
+      )
+    }
     seam.WriteCapture ->
       case save(state) {
         Ok(path) -> #(state, seam.CaptureSaved(path))
@@ -422,14 +531,177 @@ fn save(state: State) -> Result(String, String) {
     id,
     observations,
     cadence,
-    list.reverse(state.checkpoints),
+    list.reverse(list.map(state.marks, fn(mark) { mark.checkpoint })),
     audit.tail(state.config.audit, audit.capacity),
+    state.probes,
   ))
 
   let path = saver.directory <> "/" <> id <> ".pgcap"
 
   capture_file.write(path, header, records)
   |> result.replace(path)
+}
+
+// A checkpoint's place on the agent's clock, from the clock record a ping
+// produced: the agent's reading then, plus the viewer's time since. Without a
+// record it is zero, and a reader uses the checkpoint's `system_ms`.
+fn agent_ns(state: State, now: Int) -> Int {
+  case state.config.saver {
+    Some(saver) ->
+      case saver.facts.clock {
+        Some(clock) ->
+          clock.agent_monotonic_ns
+          + { now - clock.viewer_system_ms }
+          * 1_000_000
+        None -> 0
+      }
+    None -> 0
+  }
+}
+
+// ----------------------------------------------------------------- probes
+
+// A probe the agent accepted is recorded from the plan that started it.
+fn record_started(
+  probes: List(ProbeRecord),
+  command: Command,
+  probe_id: Int,
+  matched: Int,
+  now: Int,
+) -> List(ProbeRecord) {
+  case command {
+    policy.StartProbe(spec:) -> [
+      probe_book.started(
+        probe_id,
+        spec.kind,
+        spec.modules,
+        now,
+        spec.duration_ms,
+        matched,
+      ),
+      ..probes
+    ]
+    _ -> probes
+  }
+}
+
+// The operator's stop returns the probe's last snapshot; the record that
+// named it is closed with it.
+fn close_probe(
+  probes: List(ProbeRecord),
+  snapshot: wire.CountersSnapshot,
+  now: Int,
+) -> List(ProbeRecord) {
+  list.map(probes, fn(probe) {
+    case
+      probe.id == int.to_string(snapshot.probe_id),
+      probe_book.is_running(probe)
+    {
+      True, True -> probe_book.finish_counters(probe, snapshot, now)
+      _, _ -> probe
+    }
+  })
+}
+
+// Once a second each running probe is asked whether it has ended. The
+// agent keeps an ended probe's snapshot only until it is read or stopped, so
+// a probe that has ended is taken into a profile now and the agent is told
+// to release it. A probe the agent no longer knows is closed as lost, and one
+// that merely did not answer is asked again next time.
+fn poll_probes(state: State) -> State {
+  let running = list.filter(state.probes, probe_book.is_running)
+
+  case running {
+    [] -> state
+    _ ->
+      State(
+        ..state,
+        probes: list.map(state.probes, fn(probe) {
+          case probe_book.is_running(probe) {
+            True -> poll_one(state, probe)
+            False -> probe
+          }
+        }),
+      )
+  }
+}
+
+fn poll_one(state: State, probe: ProbeRecord) -> ProbeRecord {
+  let now = state.config.clock()
+
+  case exec.poll_counters(state.remote, probe.id) {
+    exec.Polled(snapshot) ->
+      case snapshot.state {
+        wire.ProbeRunning -> probe
+        wire.ProbeFinished | wire.ProbeStopped -> {
+          exec.release_counters(state.remote, probe.id)
+
+          probe_book.finish_counters(probe, snapshot, now)
+        }
+      }
+    exec.PollRefused(reason) -> probe_book.finish_lost(probe, reason, now)
+    exec.PollPending -> probe
+  }
+}
+
+// --------------------------------------------------------------- captures
+
+// A principal may list and read capture files only when it may observe,
+// which is the same question a page's subscription asks.
+fn observe_allowed(state: State, principal: Principal) -> Bool {
+  let decision =
+    gate.authorize(
+      state.gate,
+      principal,
+      policy.ReadCensus(200),
+      state.config.clock(),
+    )
+
+  audit.append_all(state.config.audit, decision.entries)
+
+  result.is_ok(decision.result)
+}
+
+// The capture files of the save directory, newest first by modification
+// time. Only `.pgcap` files are offered.
+fn capture_names(state: State) -> List(String) {
+  case state.config.saver {
+    None -> []
+    Some(saver) ->
+      case simplifile.read_directory(saver.directory) {
+        Error(_) -> []
+        Ok(names) ->
+          names
+          |> list.filter(fn(name) { string.ends_with(name, ".pgcap") })
+          |> list.map(fn(name) { #(name, modified(saver.directory, name)) })
+          |> list.sort(fn(a, b) {
+            case int.compare(b.1, a.1) {
+              order.Eq -> string.compare(a.0, b.0)
+              other -> other
+            }
+          })
+          |> list.map(fn(entry) { entry.0 })
+      }
+  }
+}
+
+fn modified(directory: String, name: String) -> Int {
+  case simplifile.file_info(directory <> "/" <> name) {
+    Ok(info) -> info.mtime_seconds
+    Error(_) -> 0
+  }
+}
+
+// A name is read only if it is one the listing offers, so a name that is a
+// path, or names a file outside the directory, reads nothing.
+fn read_capture(
+  state: State,
+  name: String,
+) -> Result(capture_file.Loaded, String) {
+  case state.config.saver, list.contains(capture_names(state), name) {
+    Some(saver), True -> capture_file.read(saver.directory <> "/" <> name)
+    _, _ -> Error("that is not a capture file the viewer offers")
+  }
 }
 
 // -------------------------------------------------------------- the page
@@ -467,6 +739,19 @@ pub fn page_for(service: Service, principal: Principal) -> seam.Page {
     checkpoints: fn() {
       process.call(service.subject, 5000, fn(reply) { Checkpoints(reply) })
     },
+    probes: fn() {
+      process.call(service.subject, 5000, fn(reply) { Probes(reply) })
+    },
+    captures: fn() {
+      process.call(service.subject, 5000, fn(reply) {
+        Captures(principal, reply)
+      })
+    },
+    read_capture: fn(name) {
+      process.call(service.subject, 30_000, fn(reply) {
+        ReadCapture(principal, name, reply)
+      })
+    },
     audit: fn(count) {
       case
         process.call(service.subject, 30_000, fn(reply) {
@@ -481,4 +766,19 @@ pub fn page_for(service: Service, principal: Principal) -> seam.Page {
       process.call(service.subject, 5000, fn(reply) { Pins(reply) })
     },
   )
+}
+
+/// Take a one-time download. The ticket is consumed by the attempt, whether
+/// or not a file comes back.
+///
+/// ## Examples
+///
+/// ```gleam
+/// service.take_download(service, ticket)
+/// ```
+pub fn take_download(
+  service: Service,
+  ticket: String,
+) -> Result(downloads.Download, downloads.Refusal) {
+  process.call(service.subject, 5000, fn(reply) { TakeDownload(ticket, reply) })
 }

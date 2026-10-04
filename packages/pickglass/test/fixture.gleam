@@ -4,7 +4,9 @@ import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/list
 import gleam/set
+import pickglass/hub
 import pickglass/observation.{type Observation, Observation}
+import pickglass/observation_codec
 import pickglass/remote.{type Remote}
 import pickglass_core/identity
 import pickglass_core/owner
@@ -136,6 +138,7 @@ pub fn observation(seq: Int, at_ms: Int) -> Observation {
       ]),
     ),
     scheduler: Ok(scheduler(seq * 100, seq * 200 + 1000)),
+    os: Error(observation_codec.no_os_readings),
   )
 }
 
@@ -176,6 +179,36 @@ pub fn healthy(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
       Error(remote.Refusal("no_such_probe", "no such probe"))
     wire.AskDetach -> Ok(wire.Detached("requested"))
   }
+}
+
+/// The healthy agent, except that a probe it started never ends: reading it
+/// finds it still running.
+pub fn healthy_with_open_probe(
+  request: wire.Request,
+) -> Result(wire.Reply, remote.Failure) {
+  case request {
+    wire.AskReadCounters(7) ->
+      Ok(
+        wire.CountersReport(
+          wire.CountersSnapshot(
+            probe_id: 7,
+            state: wire.ProbeRunning,
+            matched_functions: 3,
+            elapsed_ms: 100,
+            functions: 3,
+            with_calls: 0,
+            invalidated: 0,
+            rows: [],
+          ),
+        ),
+      )
+    other -> healthy(other)
+  }
+}
+
+/// A subject to subscribe to the hub with.
+pub fn updates() -> Subject(hub.Update) {
+  process.new_subject()
 }
 
 /// Collect every message currently in `subject`, waiting `wait_ms` for

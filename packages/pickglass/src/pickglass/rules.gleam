@@ -56,6 +56,9 @@ pub type Route {
   /// `GET /assets/<name>`.
   Asset(name: String)
 
+  /// `GET /download/<ticket>`: a file the viewer built, handed over once.
+  Download(ticket: String)
+
   /// Anything else, including every method but `GET`.
   Unknown
 }
@@ -84,6 +87,7 @@ pub fn route(request: Request(body)) -> Route {
         None -> Unknown
       }
     http.Get, ["assets", name] -> Asset(name)
+    http.Get, ["download", ticket] -> Download(ticket)
     http.Get, ["process", _] -> Page("process-detail")
     http.Get, [slug] ->
       case list.contains(page_slugs, slug) {

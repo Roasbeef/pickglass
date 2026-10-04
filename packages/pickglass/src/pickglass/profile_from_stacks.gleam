@@ -25,12 +25,6 @@
 //// one function however many stacks it appears in: frames are interned by
 //// module, name and arity, and the first line information seen for a
 //// function is kept.
-////
-//// ## Flow
-////
-//// - `build` interns the frames and builds the profile.
-//// - `caveats` writes the sentences the page shows about how the stacks
-////   were taken and what was cut.
 
 import gleam/dict.{type Dict}
 import gleam/int

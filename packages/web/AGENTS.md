@@ -22,8 +22,10 @@ Two requests name a selection or a process and nothing else:
 graph node) and `PlanProbeFor(process)` (the detail page's "Plan probe…").
 The viewer turns the first into a chain step with `view/profile.step_at`,
 which builds an exact-match pattern from the function it holds, so no function
-name travels from the browser. `Feed` also has `FedOwnerMovers`, a separate
-feed for the overview's "largest change by owner" list. `Ui(SelectReading)`
+name travels from the browser. `Feed` also has `FedOwnerMovers` (the overview's "largest change by
+owner" list), `FedCaptures` (the capture files the compare page offers, chosen
+with `ChooseBaseline` and `ChooseCandidate`) and `FedPlanTarget` (a pin the
+plan form offers first, applied only if it is among the targets). `Ui(SelectReading)`
 selects a timeline bar or span.
 
 `key.Key` is the only name a browser event may carry: 1 to 64 characters from
@@ -47,8 +49,10 @@ request or changes a selection.
 Depends on `gleam_stdlib`, `lustre` (pinned `== 5.7.1`) and `pickglass_core`
 (path dependency). Layout and analysis come from core (`layout/flame`,
 `layout/dag`, `analysis/*`); this package only draws them. The viewer
-(`pickglass`) will depend on it. `build/owners` turns a census into the
-owners model through core's `owner.group_by`.
+(`pickglass`) will depend on it. `census/owners` turns a census into the
+owners model through core's `owner.group_by`, and `build/profile` turns a
+profile and a chain into the profile page's model (`NoStacks` where core
+refuses a flame).
 
 `chart/*` draws SVG from core layouts: `flame` (flame, icicle, differential),
 `call_graph`, `spark`, `timeline`. `view/*` has one module per page and

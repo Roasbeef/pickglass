@@ -25,11 +25,14 @@ import pickglass/attach.{type Session}
 import pickglass/capture_build
 import pickglass/capture_file
 import pickglass/cli
+import pickglass/clock
 import pickglass/discover.{type Target}
 import pickglass/internal/ffi_dist
 import pickglass/observation
+import pickglass/os_reader
 import pickglass/remote
 import pickglass/secret
+import pickglass_core/identity
 import pickglass_core/measure
 
 /// What `once` needs to know about the version and the destination.
@@ -92,6 +95,7 @@ fn capture_once(
       0,
       observation.TurnOnAndRead,
       ffi_dist.system_time_ms,
+      fn() { os_reader.read(target.os_pid) },
     )
   let facts =
     capture_build.Facts(
@@ -103,6 +107,12 @@ fn capture_once(
       workload: "",
       top_k: 200,
       deadline_ms: observation.ask_deadline_ms,
+      os_start: os_start_of(observation),
+      clock: option.from_result(clock.measure(
+        remote,
+        ffi_dist.system_time_ms,
+        ffi_dist.monotonic_ns,
+      )),
     )
 
   use #(header, records) <- result.try(
@@ -111,6 +121,7 @@ fn capture_once(
       "cap-" <> secret.token(9),
       [observation],
       measure.OneShot,
+      [],
       [],
       [],
     ),
@@ -124,4 +135,17 @@ fn capture_once(
     <> int.to_string(list.length(records))
     <> " records plus header and footer)",
   )
+}
+
+// The target's start identity from the OS reading taken with the pass, or
+// the word that it could not be read.
+fn os_start_of(observation: observation.Observation) -> identity.StartIdentity {
+  case observation.os {
+    Ok(readings) ->
+      case os_reader.target_of(readings) {
+        option.Some(reading) -> reading.start
+        option.None -> identity.UnreadableStart
+      }
+    Error(_) -> identity.UnreadableStart
+  }
 }

@@ -36,6 +36,7 @@ import gleam/erlang/process.{type Down, type Subject}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import pickglass/observation.{type Observation}
+import pickglass/os_reader
 import pickglass/remote.{type Remote}
 import pickglass/ring.{type Ring}
 import weft
@@ -61,6 +62,8 @@ pub type Config {
     budget: observation.Budget,
     /// Wall-clock milliseconds.
     clock: fn() -> Int,
+    /// Reads the OS's account of the target's process, once per pass.
+    os: fn() -> Result(List(os_reader.Reading), String),
   )
 }
 
@@ -140,6 +143,7 @@ pub fn default_config(clock: fn() -> Int) -> Config {
     ring_capacity: 300,
     budget: observation.Budget(max_scanned: 200_000, top_k: 200),
     clock:,
+    os: fn() { Error("no OS reader is configured for this viewer") },
   )
 }
 
@@ -332,7 +336,14 @@ fn start_pass(state: State, remote: Remote) -> State {
   let _ =
     weft.new([
       fn() {
-        Ok(observation.collect(remote, config.budget, seq, step, config.clock))
+        Ok(observation.collect(
+          remote,
+          config.budget,
+          seq,
+          step,
+          config.clock,
+          config.os,
+        ))
       },
     ])
     |> weft.deadline(pass_deadline_ms)

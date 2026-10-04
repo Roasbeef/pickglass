@@ -48,6 +48,9 @@ pub type Command {
 
   /// Serve the pages over a capture file, with no target.
   View(ViewOptions)
+
+  /// Print two captures side by side.
+  Compare(baseline: String, candidate: String)
 }
 
 /// Options of `pickglass open`.
@@ -93,13 +96,16 @@ pub const usage =
   "usage: pickglass open [--state-dir DIR] [--pid PID] [--agent-ebin DIR]
                       [--port N] [--save-dir DIR] [--cadence SECONDS]
        pickglass view FILE [--port N]
+       pickglass compare BASELINE CANDIDATE
        pickglass attach [--state-dir DIR] [--pid PID] [--agent-ebin DIR]
                         [--probe-counters MODULE --seconds N]
        pickglass attach --once --out FILE [--state-dir DIR] [--pid PID]
 
 open attaches to a profiled Loom daemon (loomd --profile), serves the pages
 on 127.0.0.1 and prints a single-use URL. view serves the pages over a
-capture file with no target. attach prints memory, the top processes and the
+capture file with no target. compare prints two capture files side by
+side: which fields of their provenance differ, which of those block a
+statement of direction, and each figure with its verdict. attach prints memory, the top processes and the
 owner totals and detaches; with --once --out it writes one capture and
 detaches; with --probe-counters it also runs a counters probe over every
 process for N seconds. The state directory defaults to ~/.loom."
@@ -131,6 +137,14 @@ pub fn parse(arguments: List(String)) -> Result(Command, String) {
         False -> parse_view(rest, ViewOptions(file, None))
       }
     ["view"] -> Error("view needs a capture file")
+    ["compare", baseline, candidate] ->
+      case
+        string.starts_with(baseline, "-") || string.starts_with(candidate, "-")
+      {
+        True -> Error("compare takes two capture files and no options")
+        False -> Ok(Compare(baseline:, candidate:))
+      }
+    ["compare", ..] -> Error("compare needs two capture files")
     [other, ..] -> Error("unknown command: " <> other)
   }
 }

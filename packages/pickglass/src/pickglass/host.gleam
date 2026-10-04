@@ -37,9 +37,11 @@ import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/int
 import gleam/json
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/set
+import gleam/string
 import lustre/attribute
 import lustre/element
 import lustre/element/html
@@ -134,6 +136,7 @@ fn handle(
         rules.Page(slug) -> page(config, request, host, slug)
         rules.Socket(slug, nonce) -> socket(config, request, host, slug, nonce)
         rules.Asset(name) -> asset(config, name)
+        rules.Download(presented) -> download(config, request, presented)
         rules.Unknown -> status(404, "not found") |> rules.refused
       }
   }
@@ -295,6 +298,71 @@ fn asset(config: Config, name: String) -> Response(mist.ResponseData) {
       |> response.set_body(mist.Bytes(bytes_tree.from_bit_array(file.bytes)))
       |> rules.hardened
   }
+}
+
+// A download is an ordinary request with the session cookie. The ticket is
+// consumed by the attempt, so a second request for it, and a request with
+// no session, both get the same bare 404 and the audit log says which.
+fn download(
+  config: Config,
+  request: Request(mist.Connection),
+  presented: String,
+) -> Response(mist.ResponseData) {
+  case
+    admission.check_session(config.admission, rules.session_cookies(request))
+  {
+    Error(_) -> {
+      refuse_request(config, "download", "no session")
+
+      status(403, "forbidden") |> rules.refused
+    }
+    Ok(session) ->
+      case service.take_download(config.service, presented) {
+        Error(_) -> {
+          refuse_request(config, "download", "unknown, used or expired ticket")
+
+          status(404, "not found") |> rules.refused
+        }
+        Ok(file) -> {
+          audit.append(
+            config.audit,
+            audit.Host(
+              config.clock(),
+              audit.DownloadServed(session.principal.text),
+            ),
+          )
+
+          response.new(200)
+          |> response.set_header("content-type", file.content_type)
+          |> response.set_header(
+            "content-disposition",
+            "attachment; filename=\"" <> safe_name(file.file_name) <> "\"",
+          )
+          |> response.set_body(mist.Bytes(bytes_tree.from_string(file.body)))
+          |> rules.refused
+        }
+      }
+  }
+}
+
+// The viewer builds file names from a probe id and a format, but a header is
+// no place to trust a name: anything outside letters, digits, dot, dash and
+// underscore becomes an underscore.
+fn safe_name(name: String) -> String {
+  name
+  |> string.to_graphemes
+  |> list.map(fn(grapheme) {
+    case
+      string.contains(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_",
+        grapheme,
+      )
+    {
+      True -> grapheme
+      False -> "_"
+    }
+  })
+  |> string.concat
 }
 
 // ------------------------------------------------------------------ socket

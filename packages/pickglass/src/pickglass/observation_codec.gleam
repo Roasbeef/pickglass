@@ -45,7 +45,9 @@ import gleam/order
 import gleam/result
 import gleam/string
 import pickglass/observation.{type Observation, Observation}
+import pickglass/os_reader
 import pickglass_core/capture.{type Record}
+import pickglass_core/identity
 import pickglass_core/measure.{
   type Cadence, type Measurement, type MissingReason, type Series, Additive,
   Known, Missing, NotApplicable, Overlapping,
@@ -81,6 +83,12 @@ const method_queue = "process_info:message_queue_len"
 
 const method_reductions = "process_info:reductions"
 
+const method_os_rss = "os:rss"
+
+const method_os_anon = "os:rss_anon"
+
+const method_os_cpu = "os:cpu_time"
+
 const method_owner_processes = "census:owner:processes"
 
 const method_owner_memory = "census:owner:memory"
@@ -88,6 +96,10 @@ const method_owner_memory = "census:owner:memory"
 const method_owner_queue = "census:owner:message_queue_len"
 
 const method_owner_reductions = "census:owner:reductions"
+
+/// What an observation says about the OS when its capture holds no OS
+/// series.
+pub const no_os_readings = "the capture holds no OS readings"
 
 const kind_pass = "pass"
 
@@ -325,6 +337,7 @@ fn specs_of(
     scheduler_specs(observations),
     list.flat_map(procs, fn(proc) { process_specs(proc.pid_text, word_size) }),
     owner_specs(observations, table),
+    os_specs(observations),
   ])
 }
 
@@ -582,6 +595,80 @@ fn owner_spec(
           case list.find(census.owners, fn(total) { total.owner == reading }) {
             Ok(total) -> Known(pick(total))
             Error(Nil) -> Missing(measure.BudgetExhausted)
+          }
+        Error(reason) -> Missing(missing_for(reason))
+      }
+    },
+  )
+}
+
+// ---------------------------------------------------------------------- os
+
+// One subject per OS process: the pid and the role the reader gave it,
+// joined by the separator. A pass whose OS reading failed has nothing for
+// any of them, which reads back as the same failure.
+fn os_subject(reading: os_reader.Reading) -> String {
+  int.to_string(reading.pid) <> separator <> reading.role
+}
+
+fn os_subjects(observations: List(Observation)) -> List(String) {
+  list.flat_map(observations, fn(observation) {
+    case observation.os {
+      Ok(readings) -> list.map(readings, os_subject)
+      Error(_) -> []
+    }
+  })
+  |> list.unique
+}
+
+fn os_specs(observations: List(Observation)) -> List(Spec) {
+  list.flat_map(os_subjects(observations), fn(subject) {
+    [
+      os_spec(method_os_rss, subject, unit.Bytes, measure.Gauge, fn(reading) {
+        reading.rss
+      }),
+      os_spec(method_os_anon, subject, unit.Bytes, measure.Gauge, fn(reading) {
+        reading.anon
+      }),
+      // CPU time is stored in nanoseconds, the one time unit the format has.
+      os_spec(
+        method_os_cpu,
+        subject,
+        unit.Nanoseconds,
+        measure.Counter,
+        fn(reading) {
+          case reading.cpu_ms {
+            Known(ms) -> Known(ms * 1_000_000)
+            other -> other
+          }
+        },
+      ),
+    ]
+  })
+}
+
+fn os_spec(
+  method: String,
+  subject: String,
+  unit: unit.Unit,
+  kind: measure.SeriesKind,
+  pick: fn(os_reader.Reading) -> Measurement,
+) -> Spec {
+  Spec(
+    kind:,
+    unit:,
+    additivity: Overlapping(
+      "processes share pages, so their resident sets are not summed",
+    ),
+    method:,
+    scope: measure.OsProcessScope,
+    subject:,
+    value: fn(observation) {
+      case observation.os {
+        Ok(readings) ->
+          case list.find(readings, fn(r) { os_subject(r) == subject }) {
+            Ok(reading) -> pick(reading)
+            Error(Nil) -> Missing(measure.ProcessExited)
           }
         Error(reason) -> Missing(missing_for(reason))
       }
@@ -923,6 +1010,7 @@ fn observation_at(
         scheduler: section(scheduler, fn() {
           scheduler_at(index, at_ms, position)
         }),
+        os: os_at(index, position),
       ))
     _ -> Error("a pass needs three coverage records")
   }
@@ -981,6 +1069,60 @@ fn memory_at(
     erts_version: index.runtime.erts_version,
     schedulers_online: index.runtime.schedulers_online,
   ))
+}
+
+// The OS readings of a pass, from whichever OS series the capture holds. A
+// capture with none (an older one, or a viewer with no OS reader) reads back
+// as a reading that says so.
+fn os_at(
+  index: Index,
+  position: Int,
+) -> Result(List(os_reader.Reading), String) {
+  let readings =
+    index.ordered
+    |> list.filter(fn(series) { series.method == method_os_rss })
+    |> list.filter_map(fn(series) {
+      use #(pid_text, role) <- result.try(string.split_once(
+        series.subject,
+        separator,
+      ))
+      use pid <- result.try(int.parse(pid_text))
+
+      Ok(os_reader.Reading(
+        pid:,
+        role:,
+        rss: measurement_at(index, method_os_rss, series.subject, position),
+        anon: measurement_at(index, method_os_anon, series.subject, position),
+        cpu_ms: case
+          measurement_at(index, method_os_cpu, series.subject, position)
+        {
+          Known(ns) -> Known(ns / 1_000_000)
+          other -> other
+        },
+        start: identity.UnreadableStart,
+      ))
+    })
+
+  case readings {
+    [] -> Error(no_os_readings)
+    _ -> Ok(readings)
+  }
+}
+
+fn measurement_at(
+  index: Index,
+  method: String,
+  subject: String,
+  position: Int,
+) -> Measurement {
+  let found = {
+    use id <- result.try(dict.get(index.series, #(method, subject)))
+    use column <- result.try(dict.get(index.samples, id))
+
+    dict.get(column, position)
+  }
+
+  result.unwrap(found, Missing(measure.UnsupportedOnRuntime))
 }
 
 fn scheduler_at(

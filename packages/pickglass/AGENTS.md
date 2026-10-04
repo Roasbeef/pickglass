@@ -15,7 +15,9 @@ Commands: `pickglass open` attaches, starts the HTTP and WebSocket host on
 same pages over a capture file with no target; `pickglass attach --once
 --out FILE` takes one reading and writes a capture; `pickglass attach`
 prints memory, a census top list and owner totals and detaches, and
-`--probe-counters MODULE --seconds N` runs a counters probe. With no
+`--probe-counters MODULE --seconds N` runs a counters probe. `pickglass
+compare BASELINE CANDIDATE` prints two capture files side by side with core's
+comparability verdicts. With no
 arguments it prints the banner the release smoke test compares.
 
 ## Key Types
@@ -54,6 +56,23 @@ admission) and `seam.Mount`. `web_mount` mounts `pickglass_web`'s real
 application per socket: a feeder actor subscribes to the hub, builds the
 page models (`feeds`) and sends `Fed` messages, and resolves the
 application's `msg.Request` keys against current data into `seam.Request`s.
+
+Probes and profiles: `probe_book` is the viewer's record of each probe (running,
+or finished with its profile, outcome and cost); `service` polls running
+probes once a second and takes a result into `counters_profile` before the
+agent discards it. `profile_from_stacks` turns an aggregated-stacks result
+(its own input type) into a `SampledStacks` profile whose total equals the
+input counts. `profile_export` builds collapsed, speedscope and Chrome trace
+files; `downloads` holds them as one-time tickets served at
+`/download/<ticket>`.
+
+OS and checkpoints: `os_reader` reads `ps` (one fixed command line) and
+`/proc` for the target and its children; `Observation.os` carries them.
+`marks.Mark` is a checkpoint with a copy of the observation it is compared
+against, and `deltas` computes every change since it. `timeline_build`,
+`compare_build` and `compare_report` build the Timeline and Compare pages
+and the `compare` command; `clock` relates the agent's clock to the viewer's
+by timing a ping.
 
 Captures: `observation_codec` maps observations to `pickglass.capture/1`
 records and back, `capture_build` assembles header and records,
@@ -115,8 +134,16 @@ messages to the feeder's subject.
 - A key a browser sends names a thing by identity (pid text, pin token, plan
   id), and `web_mount` resolves it against current data. A key that names
   nothing now makes no request.
-- Pages the viewer has no data for (supervision, profile, timeline, compare,
-  process detail) get no feed and say they are waiting; nothing is invented.
+- Pages the viewer has no data for (supervision, process detail) get no feed
+  and say they are waiting; nothing is invented. A missing figure (OS reading
+  not taken, run queue, node uptime) is a word, never zero. The pong's
+  `uptime_ms` is the agent's age, not the node's, so the strip's uptime stays
+  missing.
+- A page's filter chain, exports, baseline and chosen captures live in its own
+  feeder, so two tabs are independent. A download ticket is stored as a digest,
+  consumed by the attempt, and needs the session cookie.
+- `exec.poll_counters` is the one agent request made outside `exec.run`: it
+  reads a probe an authorized command already started.
 - A capture's footer digest is the SHA-256 of every line before the footer,
   each with its newline; `capture_file.read` recomputes it from the file text.
 - `pickglass_agent@@main.beam` is never pushed.

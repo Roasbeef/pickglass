@@ -52,6 +52,9 @@ pub type HostEvent {
   /// A WebSocket was upgraded for this principal.
   SocketAdmitted(principal: String)
 
+  /// A one-time download was served to this principal.
+  DownloadServed(principal: String)
+
   /// A WebSocket upgrade was refused: bad `Origin`, no cookie, no nonce.
   SocketRefused(reason: String)
 
@@ -174,6 +177,7 @@ fn describe_event(event: HostEvent) -> String {
     RequestRefused(route, reason) ->
       "request refused on " <> route <> ": " <> reason
     SocketAdmitted(principal) -> "socket admitted for " <> principal
+    DownloadServed(principal) -> "download served to " <> principal
     SocketRefused(reason) -> "socket refused: " <> reason
     FrameRefused(principal, reason) ->
       "frame from " <> principal <> " refused: " <> reason

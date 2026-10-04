@@ -13,6 +13,7 @@ fn config() -> hub.Config {
     ring_capacity: 5,
     budget: Budget(100, 10),
     clock: fn() { 1_790_000_000_000 },
+    os: fn() { Error("no OS reader in this test") },
   )
 }
 

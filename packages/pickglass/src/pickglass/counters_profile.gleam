@@ -16,11 +16,6 @@
 ////
 //// Each row becomes one sample of one frame, which is how core represents
 //// a function total: the function is its own and only frame.
-////
-//// ## Flow
-////
-//// - `build` maps a snapshot to a profile.
-//// - `value_types` names the two columns, for callers that pick one.
 
 import gleam/list
 import gleam/option.{None}

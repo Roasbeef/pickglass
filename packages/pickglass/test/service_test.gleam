@@ -325,6 +325,8 @@ fn import_facts() -> capture_build.Facts {
     workload: "",
     top_k: 10,
     deadline_ms: 1000,
+    os_start: identity.UnreadableStart,
+    clock: option.None,
   )
 }
 

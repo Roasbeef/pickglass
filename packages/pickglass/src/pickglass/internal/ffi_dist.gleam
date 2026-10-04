@@ -224,6 +224,12 @@ pub fn now_ms() -> Int {
   monotonic_time(atom.create("millisecond"))
 }
 
+/// The monotonic clock in nanoseconds, for timing a round trip. Like
+/// `now_ms` it has no fixed origin and can be negative.
+pub fn monotonic_ns() -> Int {
+  monotonic_time(atom.create("nanosecond"))
+}
+
 @external(erlang, "erlang", "system_time")
 fn system_time(unit: Atom) -> Int
 

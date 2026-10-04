@@ -7,6 +7,7 @@ import gleam/option.{None, Some}
 import pickglass/audit
 import pickglass/hub
 import pickglass/observation.{Budget}
+import pickglass/probe_book
 import pickglass/remote
 import pickglass/seam
 import pickglass/service
@@ -49,18 +50,23 @@ pub fn live(
       ring_capacity: 10,
       budget: Budget(100, 10),
       clock:,
+      os: fn() { Error("no OS reader in this test") },
     )
   let assert Ok(log) = audit.start()
   let assert Ok(the_hub) = hub.start_live(agent, config)
   let assert Ok(the_service) =
-    service.start(service.Config(
-      remote: Some(agent),
-      hub: the_hub,
-      audit: log,
-      clock:,
-      mode: mode(),
-      saver:,
-    ))
+    service.start(
+      service.Config(
+        remote: Some(agent),
+        hub: the_hub,
+        audit: log,
+        clock:,
+        mode: mode(),
+        saver:,
+        marks: [],
+        probes: [],
+      ),
+    )
 
   Rig(service: the_service, hub: the_hub, log:, seen:)
 }
@@ -70,12 +76,23 @@ pub fn replay(
   observations: List(observation.Observation),
   saver: option.Option(service.Saver),
 ) -> Rig {
+  replay_with(observations, [], saver)
+}
+
+/// A replay rig that already holds probes, as a capture with probe records
+/// would.
+pub fn replay_with(
+  observations: List(observation.Observation),
+  probes: List(probe_book.ProbeRecord),
+  saver: option.Option(service.Saver),
+) -> Rig {
   let config =
     hub.Config(
       cadence_ms: 0,
       ring_capacity: 10,
       budget: Budget(100, 10),
       clock:,
+      os: fn() { Error("no OS reader in this test") },
     )
   let assert Ok(log) = audit.start()
   let assert Ok(the_hub) = hub.start_replay(observations, config)
@@ -87,6 +104,8 @@ pub fn replay(
       clock:,
       mode: mode(),
       saver:,
+      marks: [],
+      probes:,
     ))
 
   Rig(service: the_service, hub: the_hub, log:, seen: process.new_subject())

@@ -18,11 +18,6 @@
 //// The registry is a plain value. The service owns one and nothing else
 //// mutates it, so two requests for one ticket are handled one after the
 //// other and the second finds nothing.
-////
-//// ## Flow
-////
-//// - `put` stores a download under the digest of a ticket.
-//// - `take` consumes a ticket and returns the file, or says why not.
 
 import gleam/bit_array
 import gleam/crypto

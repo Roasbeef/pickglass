@@ -162,6 +162,7 @@ pub fn estimate_for(command: Command) -> Estimate {
     | policy.StopProbe(_)
     | policy.SelfMeasure(_)
     | policy.ExportCapture(..)
+    | policy.Checkpoint(_)
     | policy.Detach ->
       policy.Estimate(events_low: 0, events_high: 0, bytes_high: 0, wall_ms: 0)
   }

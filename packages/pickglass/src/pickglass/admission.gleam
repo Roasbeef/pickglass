@@ -62,6 +62,10 @@ pub opaque type Message {
     nonce: String,
     reply: Subject(Result(Session, SocketRefusal)),
   )
+  CheckSession(
+    cookies: List(String),
+    reply: Subject(Result(Session, SessionRefusal)),
+  )
 }
 
 type State {
@@ -120,6 +124,16 @@ fn handle(state: State, message: Message) -> actor.Next(State, Message) {
       )
 
       actor.continue(State(..state, registry:))
+    }
+
+    CheckSession(cookies, reply) -> {
+      process.send(
+        reply,
+        ticket.session_for(state.registry, cookies, now)
+          |> result.map(fn(found) { found.1 }),
+      )
+
+      actor.continue(state)
     }
 
     BeginPage(cookies, reply) -> {
@@ -208,6 +222,24 @@ pub fn begin_page(
   cookies: List(String),
 ) -> Result(#(Session, String), SessionRefusal) {
   process.call(admission.subject, 5000, fn(reply) { BeginPage(cookies, reply) })
+}
+
+/// Check that a cookie names a live session, without starting a page. The
+/// download route uses it: a download is a request with the session cookie
+/// and no page behind it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// admission.check_session(admission, cookies)
+/// ```
+pub fn check_session(
+  admission: Admission,
+  cookies: List(String),
+) -> Result(Session, SessionRefusal) {
+  process.call(admission.subject, 5000, fn(reply) {
+    CheckSession(cookies, reply)
+  })
 }
 
 /// Check a WebSocket upgrade: the cookie must name a session

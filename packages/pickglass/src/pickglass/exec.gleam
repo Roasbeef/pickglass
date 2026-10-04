@@ -91,7 +91,8 @@ pub fn run(remote: Remote, authorized: Authorized(Command)) -> Outcome {
     | policy.ReadOwners
     | policy.ReadMemory
     | policy.ReadAudit(_)
-    | policy.ExportCapture(..) -> NotAnAgentCommand
+    | policy.ExportCapture(..)
+    | policy.Checkpoint(_) -> NotAnAgentCommand
   }
 }
 
@@ -156,6 +157,60 @@ fn stop_probe(remote: Remote, probe_id: String) -> Outcome {
         Ok(other) -> Unexpected(string.inspect(other))
         Error(failure) -> Failed(failure)
       }
+  }
+}
+
+/// What asking a running counters probe how it is doing gave.
+pub type Poll {
+  /// The agent's snapshot, whose state says whether the probe has ended.
+  Polled(snapshot: wire.CountersSnapshot)
+
+  /// The agent no longer has the probe, or refused; the text says why.
+  PollRefused(reason: String)
+
+  /// The agent did not answer in time. Ask again later.
+  PollPending
+}
+
+/// Ask the agent how a probe the viewer started is doing. This is the one
+/// agent request made outside `run`: it reads the result of a probe an
+/// authorized command already started, and changes nothing in the target.
+///
+/// ## Examples
+///
+/// ```gleam
+/// exec.poll_counters(remote, "7")
+/// ```
+pub fn poll_counters(remote: Remote, probe_id: String) -> Poll {
+  case int.parse(probe_id) {
+    Error(Nil) -> PollRefused("a probe id is the integer the agent issued")
+    Ok(id) ->
+      case remote.ask(wire.AskReadCounters(id), ask_deadline_ms) {
+        Ok(wire.CountersReport(snapshot)) -> Polled(snapshot)
+        Ok(other) -> PollRefused(string.inspect(other))
+        Error(remote.TimedOut) -> PollPending
+        Error(failure) -> PollRefused(remote.describe(failure))
+      }
+  }
+}
+
+/// Tell the agent to let go of an ended probe whose result the viewer has
+/// taken. It is a release of the viewer's own earlier request, and its
+/// answer changes nothing the viewer holds.
+///
+/// ## Examples
+///
+/// ```gleam
+/// exec.release_counters(remote, "7")
+/// ```
+pub fn release_counters(remote: Remote, probe_id: String) -> Nil {
+  case int.parse(probe_id) {
+    Error(Nil) -> Nil
+    Ok(id) -> {
+      let _ = remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
+
+      Nil
+    }
   }
 }
 

@@ -14,6 +14,7 @@
 //// blocks the hub.
 
 import gleam/result
+import pickglass/os_reader
 import pickglass/remote.{type Remote}
 import pickglass_core/wire
 
@@ -32,6 +33,9 @@ pub type Observation {
     memory: Result(wire.MemorySnapshot, String),
     census: Result(wire.CensusSnapshot, String),
     scheduler: Result(wire.SchedulerSnapshot, String),
+    /// The OS's account of the target's process and the processes it
+    /// started. Not part of `answered`: the agent has nothing to do with it.
+    os: Result(List(os_reader.Reading), String),
   )
 }
 
@@ -64,12 +68,12 @@ pub fn answered(observation: Observation) -> Bool {
 }
 
 /// Run one pass against the remote. `clock` returns wall-clock
-/// milliseconds.
+/// milliseconds, and `os` reads the OS's account of the target.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// observation.collect(remote, Budget(200_000, 200), 0, ReadOnly, clock)
+/// observation.collect(remote, Budget(200_000, 200), 0, ReadOnly, clock, os)
 /// ```
 pub fn collect(
   remote: Remote,
@@ -77,6 +81,7 @@ pub fn collect(
   seq: Int,
   step: SchedulerStep,
   clock: fn() -> Int,
+  os: fn() -> Result(List(os_reader.Reading), String),
 ) -> Observation {
   let started = clock()
   let memory = case remote.ask(wire.AskMemory, ask_deadline_ms) {
@@ -93,6 +98,7 @@ pub fn collect(
     other -> Error(reason_of(other, "census"))
   }
   let scheduler = read_scheduler(remote, step)
+  let os = os()
 
   Observation(
     seq:,
@@ -101,6 +107,7 @@ pub fn collect(
     memory:,
     census:,
     scheduler:,
+    os:,
   )
 }
 
