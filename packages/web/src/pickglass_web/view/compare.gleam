@@ -203,7 +203,7 @@ fn field_row(
     html.td([attribute.class("mono")], [
       element.text(field_value(field, data.candidate)),
     ]),
-    html.td([attribute.title(detail)], [ui.badge("field", mark)]),
+    html.td([attribute.title(detail)], [ui.badge("match-mark", mark)]),
   ])
 }
 
@@ -213,7 +213,7 @@ fn field_row(
 ///
 /// ```gleam
 /// compare.field_value(provenance.Budget, provenance)
-/// // -> "top 200 · 15.0 s"
+/// // -> "top 200 · 15.0 s · event cap not stated"
 /// ```
 pub fn field_value(field: Field, p: Provenance) -> String {
   case field {
@@ -225,6 +225,11 @@ pub fn field_value(field: Field, p: Provenance) -> String {
       <> int.to_string(p.collection.budgets.top_k)
       <> " · "
       <> fmt.duration_ms(p.collection.budgets.deadline_ms)
+      <> " · event cap "
+      <> case p.collection.budgets.max_events {
+        Some(cap) -> fmt.count(cap)
+        None -> "not stated"
+      }
     provenance.WorkloadField ->
       case p.workload.label {
         "" -> "not stated"
@@ -233,7 +238,7 @@ pub fn field_value(field: Field, p: Provenance) -> String {
     provenance.Warmup ->
       case p.workload.warmup_ms {
         Some(ms) -> fmt.duration_ms(ms)
-        None -> "not recorded"
+        None -> "not stated"
       }
     provenance.CadenceField ->
       case p.collection.cadence {
@@ -319,7 +324,7 @@ pub fn verdict_text(comparability: Comparability) -> String {
     [] -> sentence
     _ ->
       sentence
-      <> " Not stated by either capture: "
+      <> " Not stated by one or both captures: "
       <> string.join(unstated, ", ")
       <> ". A direction here does not show that the same "
       <> "work ran."
@@ -427,7 +432,7 @@ fn verdict_cell(row: CompareRow, comparability: Comparability) -> Element(Msg) {
     provenance.InsideNoise(range:, ..) ->
       ui.badge(
         "muted",
-        "within variation (" <> fmt.known(range, row.unit) <> ")",
+        "within variation (band " <> fmt.known(range, row.unit) <> " wide)",
       )
     provenance.Moved(direction: provenance.Increased) ->
       ui.badge("up", "higher")

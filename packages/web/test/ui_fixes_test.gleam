@@ -310,7 +310,10 @@ pub fn the_owners_page_has_a_remainder_row_for_what_the_rows_leave_out_test() {
   string.contains(html, "other, not in the listed owners") |> should.be_true
   string.contains(html, "3,398") |> should.be_true
   string.contains(html, "14 of 3,412 processes") |> should.be_true
-  string.contains(html, "Labels read on 11 of the 14 processes listed")
+  string.contains(
+    html,
+    "Labels read on 11 of the 14 processes listed (3,412 counted); 3 carried none.",
+  )
   |> should.be_true
 }
 
@@ -420,7 +423,8 @@ pub fn a_difference_inside_the_variation_seen_is_not_called_higher_test() {
 
   let html = element.to_string(compare.view(model.CompareModel(..same, rows:)))
 
-  string.contains(html, "within variation (400 MiB)") |> should.be_true
+  string.contains(html, "within variation (band 400 MiB wide)")
+  |> should.be_true
   string.contains(html, "class=\"band\"") |> should.be_true
 }
 
