@@ -63,6 +63,8 @@ fn all_commands() -> List(Command) {
     policy.ReadOwners,
     policy.ReadMemory,
     policy.ReadSupervision,
+    policy.ReadEtsTables,
+    policy.ReadBinaries(token(1)),
     policy.ReadAudit(10),
     policy.PinProcess("<0.1.0>"),
     policy.UnpinProcess(token(1)),
@@ -225,6 +227,35 @@ pub fn a_plan_carries_scope_cost_class_digest_and_expiry_test() {
   assert policy.plan_principal(plan) == PrincipalId("owner")
   assert policy.plan_command(plan) == policy.StartProbe(spec(policy.CallTree))
   assert policy.plan_digest(plan) != policy.PlanDigest("")
+}
+
+// A table listing is a read that needs no plan. Reading a process's binaries
+// builds a tuple per reference in the target, so it is planned and confirmed
+// and is a polling read, and it names its pin.
+pub fn ets_and_binaries_reads_are_classed_test() {
+  assert policy.required_capabilities(policy.ReadEtsTables) == [Observe]
+  assert policy.confirmation_of(policy.ReadEtsTables) == policy.Direct
+  assert policy.perturbation_of(policy.ReadEtsTables) == policy.Passive
+  assert policy.command_pins(policy.ReadEtsTables) == []
+
+  let read = policy.ReadBinaries(token(1))
+
+  assert policy.required_capabilities(read) == [Observe]
+  assert policy.confirmation_of(read) == policy.PlanFirst
+  assert policy.perturbation_of(read) == policy.Polling
+  assert policy.command_pins(read) == [token(1)]
+  assert policy.command_name(read) == "read_binaries"
+  assert policy.describe(read)
+    == "read_binaries pin=" <> identity.pin_to_string(token(1))
+}
+
+pub fn a_binaries_read_is_planned_then_confirmed_test() {
+  let plan = plan_of(policy.ReadBinaries(token(1)), owner_principal())
+  let Audited(result:, ..) =
+    policy.confirm(plan, owner_principal(), [live(1)], estimate(), 2000)
+
+  let assert Ok(authorized) = result as "confirms"
+  assert policy.authorized_command(authorized) == policy.ReadBinaries(token(1))
 }
 
 pub fn perturbation_classes_test() {

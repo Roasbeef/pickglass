@@ -8,6 +8,9 @@ import pickglass_core/capture.{
   type Header, type Record, FooterRecord, HeaderRecord, UnknownRecord,
 }
 import pickglass_core/measure
+import pickglass_core/owner
+import pickglass_core/readings
+import pickglass_core/wire
 import qcheck
 
 fn encode(record: Record(String)) -> String {
@@ -441,4 +444,124 @@ pub fn over_long_lines_are_refused_test() {
 pub fn the_tally_counts_kinds_in_order_test() {
   assert capture.tally([stack_record(1), stack_record(2)]) == [#("stack", 2)]
   assert capture.tally([]) == []
+}
+
+// ---------------------------------------------------- memory readings
+
+fn an_owners_detail() -> Record(String) {
+  capture.OwnersDetailRecord(readings.OwnersDetail(
+    at_ms: 1000,
+    initial_calls: [#("<0.9.0>", "supervisor:my_sup/1")],
+    owners: [
+      readings.OwnerEts(
+        owner: wire.Labelled(
+          path: [owner.Segment(kind: "session", id: "abc")],
+          role: "gateway",
+        ),
+        tables: 2,
+        bytes: 4096,
+      ),
+      readings.OwnerEts(owner: wire.Unlabelled, tables: 7, bytes: 9000),
+    ],
+    ets: wire.EtsPass(
+      tables: 9,
+      memory_bytes: 13_096,
+      skipped: 1,
+      stop: wire.EtsDeadline,
+    ),
+  ))
+}
+
+fn an_ets_listing() -> Record(String) {
+  capture.EtsRecord(readings.EtsListing(
+    at_ms: 1000,
+    snapshot: wire.EtsSnapshot(
+      coverage: wire.EtsCoverage(
+        total: 9,
+        counted: 8,
+        skipped: 1,
+        stop: wire.EtsFinished,
+        elapsed_ms: 3,
+      ),
+      tables: [
+        wire.EtsTable(
+          id_text: "#Ref<0.1.2.3>",
+          name: "",
+          owner_pid_text: "<0.9.0>",
+          owner: wire.Unlabelled,
+          kind: "set",
+          objects: 12,
+          memory_bytes: 2048,
+          protection: "protected",
+          heir_pid_text: "",
+        ),
+      ],
+      totals: wire.EtsTotals(tables: 8, objects: 99, memory_bytes: 8192),
+    ),
+  ))
+}
+
+fn a_binaries_reading() -> Record(String) {
+  capture.BinariesRecord(readings.BinariesReading(
+    at_ms: 2000,
+    snapshot: wire.BinariesSnapshot(
+      pid_text: "<0.9.0>",
+      distinct: 2,
+      bytes: 121_000,
+      references: 100,
+      binaries: [
+        wire.BinaryRef(address_text: "7f00aa", bytes: 121_000, refc: 3),
+      ],
+    ),
+  ))
+}
+
+pub fn the_memory_readings_round_trip_test() {
+  assert decode_one(encode(an_owners_detail())) == Ok(an_owners_detail())
+  assert decode_one(encode(an_ets_listing())) == Ok(an_ets_listing())
+  assert decode_one(encode(a_binaries_reading())) == Ok(a_binaries_reading())
+}
+
+pub fn the_memory_readings_have_their_own_kinds_test() {
+  assert capture.kind_of(an_owners_detail()) == "owners_detail"
+  assert capture.kind_of(an_ets_listing()) == "ets_tables"
+  assert capture.kind_of(a_binaries_reading()) == "binaries"
+}
+
+// A capture written before the readings existed reads as it always did, and
+// one that has them keeps them in order, counted in the footer.
+pub fn a_capture_with_and_without_the_readings_reads_test() {
+  let header = a_header()
+  let old = written(header, [stack_record(1)])
+  let new =
+    written(header, [
+      stack_record(1),
+      an_owners_detail(),
+      an_ets_listing(),
+      a_binaries_reading(),
+    ])
+
+  let assert Ok(before) = read(old) as "old reads"
+  let assert Ok(after) = read(new) as "new reads"
+
+  assert before.status == measure.Complete
+  assert after.status == measure.Complete
+  assert capture.unknown_counts(after) == []
+  assert list.contains(after.records, an_ets_listing())
+  assert list.contains(after.records, a_binaries_reading())
+}
+
+// A record of a known kind with the wrong shape is an error and not a
+// default-filled record.
+pub fn a_malformed_memory_reading_is_an_error_test() {
+  let assert Error(capture.BadRecord(kind: "ets_tables", ..)) =
+    decode_one("{\"t\":\"ets_tables\",\"at_ms\":1}")
+  let assert Error(capture.BadRecord(kind: "binaries", ..)) =
+    decode_one(
+      "{\"t\":\"binaries\",\"at_ms\":1,\"pid\":\"<0.1.0>\",\"distinct\":1,\"bytes\":1,\"references\":1,\"binaries\":[{\"address\":\"a\",\"bytes\":\"x\",\"refc\":1}]}",
+    )
+  let assert Error(capture.BadRecord(kind: "owners_detail", ..)) =
+    decode_one(
+      "{\"t\":\"owners_detail\",\"at_ms\":1,\"initial_calls\":[],\"owners\":[],\"ets\":{\"tables\":1,\"bytes\":1,\"skipped\":0,\"stop\":\"never\"}}",
+    )
 }

@@ -52,6 +52,7 @@ import pickglass_core/measure.{
 import pickglass_core/owner.{type Source}
 import pickglass_core/policy.{type AuditEntry}
 import pickglass_core/provenance.{type Provenance}
+import pickglass_core/readings
 import pickglass_core/trace_codec
 import pickglass_core/wire
 
@@ -399,6 +400,16 @@ pub type Record(p) {
   CheckpointRecord(Checkpoint)
   ProbeCostRecord(ProbeCost)
   AuditRecord(AuditEntry)
+
+  /// What an `owners_detail` pass adds to a census: initial calls and ETS
+  /// per owner. Absent from captures written before it existed.
+  OwnersDetailRecord(readings.OwnersDetail)
+
+  /// An ETS table listing: the largest tables by memory, never contents.
+  EtsRecord(readings.EtsListing)
+
+  /// The binaries one process held when the operator read them.
+  BinariesRecord(readings.BinariesReading)
   FooterRecord(Footer)
 
   /// A record of a kind this build does not know, kept whole so it can be
@@ -431,6 +442,9 @@ pub fn kind_of(record: Record(p)) -> String {
     CheckpointRecord(_) -> "checkpoint"
     ProbeCostRecord(_) -> "perturbation"
     AuditRecord(_) -> "audit"
+    OwnersDetailRecord(_) -> "owners_detail"
+    EtsRecord(_) -> "ets_tables"
+    BinariesRecord(_) -> "binaries"
     FooterRecord(_) -> "footer"
     UnknownRecord(kind:, ..) -> kind
   }
@@ -469,6 +483,9 @@ pub fn encode_record(
     | CheckpointRecord(_)
     | ProbeCostRecord(_)
     | AuditRecord(_)
+    | OwnersDetailRecord(_)
+    | EtsRecord(_)
+    | BinariesRecord(_)
     | FooterRecord(_) ->
       json.to_string(
         json.object([
@@ -578,6 +595,9 @@ fn fields_of(
       ..codec.outcome_fields(cost.outcome)
     ]
     AuditRecord(entry) -> codec.audit_fields(entry)
+    OwnersDetailRecord(detail) -> readings.owners_detail_fields(detail)
+    EtsRecord(listing) -> readings.ets_listing_fields(listing)
+    BinariesRecord(reading) -> readings.binaries_fields(reading)
     FooterRecord(footer) -> [
       #(
         "counts",
@@ -718,6 +738,10 @@ fn record_decoder(
     "checkpoint" -> Ok(decode.map(checkpoint_decoder(), CheckpointRecord))
     "perturbation" -> Ok(decode.map(cost_decoder(), ProbeCostRecord))
     "audit" -> Ok(decode.map(codec.audit_decoder(), AuditRecord))
+    "owners_detail" ->
+      Ok(decode.map(readings.owners_detail_decoder(), OwnersDetailRecord))
+    "ets_tables" -> Ok(decode.map(readings.ets_listing_decoder(), EtsRecord))
+    "binaries" -> Ok(decode.map(readings.binaries_decoder(), BinariesRecord))
     "footer" -> Ok(decode.map(footer_decoder(), FooterRecord))
     _ -> Error(Nil)
   }
@@ -1290,6 +1314,9 @@ fn is_unknown(record: Record(p)) -> Bool {
     | CheckpointRecord(_)
     | ProbeCostRecord(_)
     | AuditRecord(_)
+    | OwnersDetailRecord(_)
+    | EtsRecord(_)
+    | BinariesRecord(_)
     | FooterRecord(_) -> False
   }
 }

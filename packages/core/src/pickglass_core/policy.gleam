@@ -160,6 +160,15 @@ pub type Command {
   /// Walk the supervision tree.
   ReadSupervision
 
+  /// List the largest ETS tables by memory: their properties and owners,
+  /// never their contents.
+  ReadEtsTables
+
+  /// Read the reference-counted binaries one pinned process holds. It is
+  /// costly for a process holding many, so it is planned and confirmed like
+  /// a probe. Authorized only through `plan` and `confirm`.
+  ReadBinaries(token: PinToken)
+
   /// Read the last `n` agent audit entries.
   ReadAudit(n: Int)
 
@@ -212,6 +221,8 @@ pub fn required_capabilities(command: Command) -> List(Capability) {
     | ReadOwners
     | ReadMemory
     | ReadSupervision
+    | ReadEtsTables
+    | ReadBinaries(_)
     | ReadAudit(_)
     | PinProcess(_)
     | UnpinProcess(_)
@@ -246,12 +257,14 @@ pub type Confirmation {
 /// Which commands need a plan.
 pub fn confirmation_of(command: Command) -> Confirmation {
   case command {
-    StartProbe(_) | TargetedGc(_) | SelfMeasure(_) -> PlanFirst
+    StartProbe(_) | TargetedGc(_) | SelfMeasure(_) | ReadBinaries(_) ->
+      PlanFirst
 
     ReadCensus(_)
     | ReadOwners
     | ReadMemory
     | ReadSupervision
+    | ReadEtsTables
     | ReadAudit(_)
     | PinProcess(_)
     | UnpinProcess(_)
@@ -301,12 +314,13 @@ pub fn perturbation_of(command: Command) -> Perturbation {
   case command {
     StartProbe(spec:) -> probe_perturbation(spec.kind)
     TargetedGc(_) -> ForcedGc
-    SelfMeasure(_) -> Polling
+    SelfMeasure(_) | ReadBinaries(_) -> Polling
 
     ReadCensus(_)
     | ReadOwners
     | ReadMemory
     | ReadSupervision
+    | ReadEtsTables
     | ReadAudit(_)
     | PinProcess(_)
     | UnpinProcess(_)
@@ -331,7 +345,10 @@ fn probe_perturbation(kind: ProbeKind) -> Perturbation {
 pub fn command_pins(command: Command) -> List(PinToken) {
   case command {
     StartProbe(spec:) -> spec.targets
-    TargetedGc(token:) | SelfMeasure(token:) | ReadProcess(token:) -> [token]
+    TargetedGc(token:)
+    | SelfMeasure(token:)
+    | ReadProcess(token:)
+    | ReadBinaries(token:) -> [token]
 
     // A release must work on a pin whose process has died.
     UnpinProcess(_) -> []
@@ -340,6 +357,7 @@ pub fn command_pins(command: Command) -> List(PinToken) {
     | ReadOwners
     | ReadMemory
     | ReadSupervision
+    | ReadEtsTables
     | ReadAudit(_)
     | PinProcess(_)
     | StopProbe(_)
@@ -356,6 +374,8 @@ pub fn command_name(command: Command) -> String {
     ReadOwners -> "read_owners"
     ReadMemory -> "read_memory"
     ReadSupervision -> "read_supervision"
+    ReadEtsTables -> "read_ets_tables"
+    ReadBinaries(_) -> "read_binaries"
     ReadAudit(_) -> "read_audit"
     PinProcess(_) -> "pin_process"
     UnpinProcess(_) -> "unpin_process"
@@ -387,7 +407,8 @@ pub fn describe(command: Command) -> String {
     UnpinProcess(token:)
     | ReadProcess(token:)
     | TargetedGc(token:)
-    | SelfMeasure(token:) -> ["pin=" <> identity.pin_to_string(token)]
+    | SelfMeasure(token:)
+    | ReadBinaries(token:) -> ["pin=" <> identity.pin_to_string(token)]
     StartProbe(spec:) -> describe_spec(spec)
     StopProbe(probe_id:) -> ["probe=" <> probe_id]
     Checkpoint(name:) -> ["name=" <> name]
@@ -395,7 +416,7 @@ pub fn describe(command: Command) -> String {
       "capture=" <> capture_id,
       "format=" <> export_code(format),
     ]
-    ReadOwners | ReadMemory | ReadSupervision | Detach -> []
+    ReadOwners | ReadMemory | ReadSupervision | ReadEtsTables | Detach -> []
   }
 
   string.join([command_name(command), ..arguments], " ")
@@ -813,6 +834,8 @@ fn check_spec(command: Command) -> Result(Nil, Denial) {
     | ReadOwners
     | ReadMemory
     | ReadSupervision
+    | ReadEtsTables
+    | ReadBinaries(_)
     | ReadAudit(_)
     | PinProcess(_)
     | UnpinProcess(_)
@@ -915,6 +938,8 @@ fn scope_of(command: Command) -> PlanScope {
     | ReadOwners
     | ReadMemory
     | ReadSupervision
+    | ReadEtsTables
+    | ReadBinaries(_)
     | ReadAudit(_)
     | PinProcess(_)
     | UnpinProcess(_)

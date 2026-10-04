@@ -13,6 +13,7 @@ import pickglass_core/measure
 import pickglass_core/owner
 import pickglass_core/policy
 import pickglass_core/provenance
+import pickglass_core/readings
 import pickglass_core/unit
 import pickglass_core/wire
 import qcheck.{type Generator}
@@ -403,7 +404,130 @@ pub fn record() -> Generator(Record(String)) {
     ),
     cost_record(),
     qcheck.map(audit_entry(), capture.AuditRecord),
+    owners_detail_record(),
+    ets_record(),
+    binaries_record(),
   ])
+}
+
+fn owner_reading() -> Generator(wire.OwnerReading) {
+  qcheck.from_generators(qcheck.constant(wire.Unlabelled), [
+    qcheck.map2(small_list(segment()), ident(), fn(path, role) {
+      wire.Labelled(path:, role:)
+    }),
+  ])
+}
+
+fn ets_stop() -> Generator(wire.EtsStop) {
+  one_of(wire.EtsFinished, [wire.EtsDeadline])
+}
+
+fn owners_detail_record() -> Generator(Record(String)) {
+  use at_ms <- qcheck.bind(non_negative())
+  use initial_calls <- qcheck.bind(
+    small_list(qcheck.map2(text(), text(), fn(pid, call) { #(pid, call) })),
+  )
+  use owners <- qcheck.bind(
+    small_list(
+      qcheck.map3(
+        owner_reading(),
+        non_negative(),
+        non_negative(),
+        fn(owner, tables, bytes) { readings.OwnerEts(owner:, tables:, bytes:) },
+      ),
+    ),
+  )
+  use tables <- qcheck.bind(non_negative())
+  use memory_bytes <- qcheck.bind(non_negative())
+  use skipped <- qcheck.bind(non_negative())
+  use stop <- qcheck.map(ets_stop())
+
+  capture.OwnersDetailRecord(readings.OwnersDetail(
+    at_ms:,
+    initial_calls:,
+    owners:,
+    ets: wire.EtsPass(tables:, memory_bytes:, skipped:, stop:),
+  ))
+}
+
+fn ets_table() -> Generator(wire.EtsTable) {
+  use id_text <- qcheck.bind(text())
+  use name <- qcheck.bind(text())
+  use owner_pid_text <- qcheck.bind(text())
+  use owner <- qcheck.bind(owner_reading())
+  use kind <- qcheck.bind(ident())
+  use objects <- qcheck.bind(non_negative())
+  use memory_bytes <- qcheck.bind(non_negative())
+  use protection <- qcheck.bind(ident())
+  use heir_pid_text <- qcheck.map(text())
+
+  wire.EtsTable(
+    id_text:,
+    name:,
+    owner_pid_text:,
+    owner:,
+    kind:,
+    objects:,
+    memory_bytes:,
+    protection:,
+    heir_pid_text:,
+  )
+}
+
+fn ets_record() -> Generator(Record(String)) {
+  use at_ms <- qcheck.bind(non_negative())
+  use total <- qcheck.bind(non_negative())
+  use counted <- qcheck.bind(non_negative())
+  use skipped <- qcheck.bind(non_negative())
+  use stop <- qcheck.bind(ets_stop())
+  use elapsed_ms <- qcheck.bind(non_negative())
+  use tables <- qcheck.bind(small_list(ets_table()))
+  use objects <- qcheck.bind(non_negative())
+  use memory_bytes <- qcheck.map(non_negative())
+
+  capture.EtsRecord(readings.EtsListing(
+    at_ms:,
+    snapshot: wire.EtsSnapshot(
+      coverage: wire.EtsCoverage(total:, counted:, skipped:, stop:, elapsed_ms:),
+      tables:,
+      totals: wire.EtsTotals(
+        tables: list.length(tables),
+        objects:,
+        memory_bytes:,
+      ),
+    ),
+  ))
+}
+
+fn binaries_record() -> Generator(Record(String)) {
+  use at_ms <- qcheck.bind(non_negative())
+  use pid_text <- qcheck.bind(text())
+  use distinct <- qcheck.bind(non_negative())
+  use bytes <- qcheck.bind(non_negative())
+  use references <- qcheck.bind(non_negative())
+  use binaries <- qcheck.map(
+    small_list(
+      qcheck.map3(
+        text(),
+        non_negative(),
+        non_negative(),
+        fn(address_text, bytes, refc) {
+          wire.BinaryRef(address_text:, bytes:, refc:)
+        },
+      ),
+    ),
+  )
+
+  capture.BinariesRecord(readings.BinariesReading(
+    at_ms:,
+    snapshot: wire.BinariesSnapshot(
+      pid_text:,
+      distinct:,
+      bytes:,
+      references:,
+      binaries:,
+    ),
+  ))
 }
 
 fn clock_record() -> Generator(Record(String)) {

@@ -102,8 +102,18 @@ shapes, new replies are new `Reply` variants, and the requests added later
 their own, so the viewer's exhaustive matches keep compiling. The agent's
 `CLAUDE.md` lists every request and reply shape.
 
+`readings` holds the capture's three memory-reading records and their JSON:
+`OwnersDetail` (the initial calls and per-owner ETS an `owners_detail` reply
+adds to a census, with the ETS pass's totals), `EtsListing` (an `ets_tables`
+reply) and `BinariesReading` (a `binaries` reply). They are the `owners_detail`,
+`ets_tables` and `binaries` kinds of `capture.Record`, each with the viewer's
+wall-clock `at_ms`; a capture written before they existed has none and reads as
+it always did.
+
 `policy.Command` is the closed set of viewer-to-agent actions.
-`required_capabilities` is an exhaustive `case`. `Authorized(a)` is opaque
+`required_capabilities` is an exhaustive `case`. `ReadEtsTables` is a direct
+passive read the hub makes; `ReadBinaries(token)` is plan-first (a polling read
+of a pinned process, costly for one that holds many binaries). `Authorized(a)` is opaque
 and only `authorize` and `confirm` build it. Probes and targeted GC go
 through `plan` then `confirm` (same principal, unexpired, digest unchanged).
 Every gate returns `Audited(a)`: the decision and its `AuditEntry`.
