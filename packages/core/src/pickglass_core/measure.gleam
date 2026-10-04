@@ -69,6 +69,11 @@ pub type MissingReason {
   /// A rate needs the subject in two consecutive passes, and it was in only
   /// one of them, or there was no earlier pass.
   NotInBothPasses
+
+  /// The runtime can provide the counter and this collector does not read it
+  /// yet. It is different from `UnsupportedOnRuntime`, which says the
+  /// runtime cannot, and a reader must be able to tell the two apart.
+  NotCollected
 }
 
 /// Every missing reason, for codecs and exhaustive tests.
@@ -81,6 +86,7 @@ pub const all_missing_reasons: List(MissingReason) = [
   DeadlineReached,
   DecodeFailed,
   NotInBothPasses,
+  NotCollected,
 ]
 
 /// The stable code of a missing reason, used in capture files.
@@ -101,6 +107,7 @@ pub fn missing_reason_code(reason: MissingReason) -> String {
     DeadlineReached -> "deadline_reached"
     DecodeFailed -> "decode_failed"
     NotInBothPasses -> "not_in_both_passes"
+    NotCollected -> "not_collected"
   }
 }
 

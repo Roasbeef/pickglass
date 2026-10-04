@@ -223,13 +223,7 @@ pub fn comparability(
       Budget,
       budget_result(baseline.collection.budgets, candidate.collection.budgets),
     ),
-    #(
-      WorkloadField,
-      blocking(
-        workload_text(baseline.workload),
-        workload_text(candidate.workload),
-      ),
-    ),
+    #(WorkloadField, workload_result(baseline.workload, candidate.workload)),
     #(
       Warmup,
       recorded_values(baseline.workload.warmup_ms, candidate.workload.warmup_ms),
@@ -242,8 +236,37 @@ pub fn comparability(
       ),
     ),
     #(Role, blocking(baseline.target.role, candidate.target.role)),
-    #(BuildField, expected(baseline.build, candidate.build)),
+    #(BuildField, build_result(baseline.build, candidate.build)),
   ])
+}
+
+/// The text a capture's build carries when nothing recorded which build ran.
+pub const unstated = "unknown"
+
+// A field neither side stated cannot be called the same: two blanks are two
+// absences, and the comparison does not know that the same work or the same
+// build ran. When at least one side stated it, the ordinary comparison
+// decides, so a stated value against a blank is a difference.
+fn workload_result(baseline: Workload, candidate: Workload) -> FieldResult {
+  case workload_stated(baseline) || workload_stated(candidate) {
+    True -> blocking(workload_text(baseline), workload_text(candidate))
+    False -> NotRecorded
+  }
+}
+
+fn workload_stated(workload: Workload) -> Bool {
+  workload.label != "" || workload.sessions != []
+}
+
+fn build_result(baseline: Build, candidate: Build) -> FieldResult {
+  case build_stated(baseline) || build_stated(candidate) {
+    True -> expected(baseline, candidate)
+    False -> NotRecorded
+  }
+}
+
+fn build_stated(build: Build) -> Bool {
+  build.application != unstated || build.revision != unstated
 }
 
 fn blocking(baseline: a, candidate: a) -> FieldResult {

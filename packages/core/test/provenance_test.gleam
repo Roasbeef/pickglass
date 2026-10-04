@@ -302,3 +302,56 @@ pub fn an_unrecorded_event_limit_leaves_the_budget_not_recorded_test() {
   assert list.key_find(provenance.comparability(b, unrecorded).fields, Budget)
     == Ok(provenance.NotRecorded)
 }
+
+// Two captures that state no workload did not run the same workload; they
+// ran an unstated one each. The field is neither the same nor different, so
+// no figure leans on it, and it is not called the same.
+pub fn a_workload_neither_capture_states_is_not_the_same_test() {
+  let b = base()
+  let blank =
+    provenance.Provenance(
+      ..b,
+      workload: provenance.Workload(..b.workload, label: "", sessions: []),
+    )
+  let result = provenance.comparability(blank, blank)
+
+  assert list.key_find(result.fields, WorkloadField)
+    == Ok(provenance.NotRecorded)
+  assert provenance.blocking_fields(result) == []
+
+  // A stated workload against a blank one is a difference.
+  let against = provenance.comparability(base(), blank)
+
+  assert provenance.blocking_fields(against) == [WorkloadField]
+}
+
+pub fn a_build_neither_capture_states_is_not_the_same_test() {
+  let b = base()
+  let unstated =
+    provenance.Provenance(
+      ..b,
+      build: provenance.Build(
+        provenance.unstated,
+        provenance.unstated,
+        provenance.unstated,
+        provenance.unstated,
+      ),
+    )
+  let result = provenance.comparability(unstated, unstated)
+
+  assert list.key_find(result.fields, BuildField) == Ok(provenance.NotRecorded)
+
+  // A build against an unstated one is the expected kind of difference.
+  assert list.key_find(
+      provenance.comparability(base(), unstated).fields,
+      BuildField,
+    )
+    == Ok(provenance.DiffersExpected)
+}
+
+pub fn the_not_collected_reason_has_its_own_stable_code_test() {
+  assert measure.missing_reason_code(measure.NotCollected) == "not_collected"
+  assert measure.parse_missing_reason("not_collected")
+    == Ok(measure.NotCollected)
+  assert measure.NotCollected != measure.UnsupportedOnRuntime
+}
