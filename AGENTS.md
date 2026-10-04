@@ -6,10 +6,11 @@ It is a sibling of [Loom](https://github.com/Roasbeef/loom) and follows
 Loom's Gleam house style. Its first goal is closing
 [loom#720](https://github.com/Roasbeef/loom/issues/720).
 
-**Status: pre-design.** The workspace, style rules, lint, doc graph, CI and
-the self-contained release exist. The product design is not settled, and
-`packages/pickglass` is a placeholder that prints a banner. Do not add
-product code until a design lands; do not guess one into the tree.
+**Status: working.** The viewer, the pushed agent, the pure core and the web
+pages exist and have been driven against a live Loom daemon. `README.md` says
+what it does and how to run it, `docs/attach.md` is the operator's guide and
+`docs/design/plan.md` is the plan of record that the code is built to; read the
+plan before changing a boundary it draws.
 
 ## Required reading
 
@@ -27,10 +28,9 @@ Loom originals, so a rule change is made in Loom first.
 
 ## Layout
 
-- `packages/` — the workspace. One placeholder package today,
-  `packages/pickglass`. The expected shape is a pure `core`, an impure
-  collector host that reads the live VM, and a Lustre web package; create
-  each when the design needs it, not before.
+- `packages/` — the workspace: `core` (pure), `agent` (pushed into the
+  target, no dependencies), `web` (the Lustre pages) and `pickglass` (the
+  viewer). Each has a `CLAUDE.md`.
 - `tools/lint` — Loom's house lint, vendored. Keep local changes to it at
   the minimum; a rule that needs changing is changed in Loom first and
   re-vendored.

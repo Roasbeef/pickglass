@@ -75,11 +75,52 @@ the named modules in at most four processes for at most ten seconds, stops at
 100,000 events or when its collector falls behind, and says so. The result is a
 call tree with exact call counts and times (exclusive time is what the views
 draw). Tracing every function, or a module every process calls such as `lists`,
-is refused. On the pages the same probes are planned from Probes, the Process
+is refused. A module name that ends in one `*` is a prefix: `--module 'my_app*'`
+traces every loaded module whose name starts with `my_app`, which is how to
+name an application whose modules are `my_app@session`, `my_app@store` and so
+on. The agent matches the prefix against the names of the modules the code
+server has loaded and makes no new atom from it. A bare `*`, a prefix that
+reaches a module every process calls, and one that matches more than 1,000
+modules are refused, and a prefix no loaded module starts with is refused as an
+unknown module. The plan says that a star was given and that the number of
+modules it matches is known when the probe starts. On the pages the same probes are planned from Probes, the Process
 page ("Trace calls…", "Record scheduling…"), a profile plan card ("Trace calls
 instead") and owner rows ("Record"). A recording draws each traced process's
 runs and garbage collections on the Timeline page with per-process totals;
 both probes export as Chrome traces.
+
+## ETS tables and binaries
+
+The Memory page lists the largest ETS tables by memory: the table's name (or
+its identifier when it has none), its owner and the owner's label, its type,
+object count, bytes and protection, with the totals over every table read and
+how many were deleted before they could be. The agent calls `ets:info/1`, which
+returns a table's properties and no object, so a table with secret contents is
+described without being read. The walk has a two-second deadline; when it stops
+early the page says every figure understates.
+
+The Owners page has an ETS column, from the same walk: the bytes and the number
+of tables owned by each group's processes. A table belongs to the label of the
+process that owns it, so tables of a process with no label count under
+`unknown`. A row the agent's per-owner list does not cover says why and is
+never shown as zero.
+
+The Process page has a "Read binaries…" action for a pinned process. It lists
+the distinct reference-counted binaries the process holds, their total size,
+how many references it holds to them and the largest with how many references
+each has on the node. A binary held through many references counts once, and a
+sub-binary counts the whole binary it points into, so the size is what the
+process keeps alive and not memory it alone owns. The read builds one entry per
+reference in the target, so it is planned and confirmed first, and a process
+that holds more than 50,000 references is refused (`too_many_binaries`) with no
+partial figure. Captures keep these readings as `owners_detail`, `ets_tables`
+and `binaries` records; a capture written before they existed reads as it
+always did.
+
+The Supervision page tells a supervisor from a worker by the process's own
+`proc_lib` initial call (`supervisor:my_sup/1` is a supervisor) for the
+processes the census lists, and falls back to the registered name and the
+spawn call for the rest.
 
 ## What a distributed node is
 
