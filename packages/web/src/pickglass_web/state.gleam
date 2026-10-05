@@ -21,6 +21,7 @@ import gleam/set.{type Set}
 import pickglass_core/policy
 import pickglass_web/key.{type Key}
 import pickglass_web/msg
+import pickglass_web/zoom
 
 /// The plan form's choices. Its module patterns are not kept here: they are
 /// free text, and free text reaches `update` inside the submit that uses it.
@@ -52,6 +53,10 @@ pub type UiState {
     expanded: Set(Key),
     /// The selected box or node.
     selected: Option(Key),
+    /// How large the call graph is drawn.
+    graph_zoom: zoom.Zoom,
+    /// Whether the wheel over the call graph zooms it.
+    wheel: zoom.Wheel,
     /// The search text on the profile page.
     search: String,
     /// The plan form.
@@ -72,6 +77,8 @@ pub fn initial() -> UiState {
     tab: msg.FlameTab,
     expanded: set.new(),
     selected: None,
+    graph_zoom: zoom.Fit,
+    wheel: zoom.WheelScrolls,
     search: "",
     plan: PlanDraft(
       kind: policy.Counters,

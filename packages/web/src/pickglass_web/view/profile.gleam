@@ -33,7 +33,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import lustre/attribute
+import lustre/attribute.{type Attribute}
 import lustre/element.{type Element}
 import lustre/element/html
 import pickglass_core/analysis/graph
@@ -54,6 +54,7 @@ import pickglass_web/msg.{type Msg}
 import pickglass_web/state.{type UiState}
 import pickglass_web/view/ui
 import pickglass_web/wire
+import pickglass_web/zoom
 
 /// The most rows the Top and Source tabs draw.
 pub const max_table_rows: Int = 100
@@ -889,14 +890,15 @@ fn graph_tab(
 
   html.div([], [
     single_path_note(g, u),
-    size_toggle(),
-    html.div([attribute.class("graph-frame scroll")], [
+    zoom_controls(ui_state),
+    html.div(frame_attributes(ui_state.wheel), [
       call_graph.view(
         layout: placed,
         total: g.total,
         name_of:,
         unit: u,
         selected: ui_state.selected,
+        zoom: ui_state.graph_zoom,
         on_select: fn(node) { msg.Ui(msg.SelectNode(node)) },
       ),
     ]),
@@ -914,34 +916,88 @@ fn graph_tab(
       <> "between its ends. Text size follows flat value; shade follows "
       <> "cumulative share. Each box shows flat, then cumulative, with their "
       <> "shares of the total; an edge shows its weight when that is at least "
-      <> "2% of the total. The graph is scaled to fit the frame; choose Full size "
-      <> "to draw it at its natural size and scroll the frame.",
+      <> "2% of the total. The graph is scaled to fit the frame until you zoom; "
+      <> "zoom in or out with the buttons, or turn on Wheel zoom to use the "
+      <> "mouse wheel, and scroll the frame to reach the rest.",
     ),
   ])
 }
 
-// A checkbox and the label that toggles it, with no handler: the stylesheet
-// reads the checkbox's state through the sibling selector, so the choice
-// needs no script and no round trip, and a re-render leaves it alone. The
-// frame has to follow them in the tree for that selector to reach it.
-fn size_toggle() -> Element(Msg) {
-  element.fragment([
-    html.input([
-      attribute.class("graph-size"),
-      attribute.type_("checkbox"),
-      attribute.id("graph-size"),
-    ]),
-    html.label(
+// The frame scrolls on its own scroll bars. Only while the wheel is set to
+// zoom does it also carry the wheel handler: that handler cancels the
+// browser's action for every wheel turn it sees, including the one that
+// would scroll, so attaching it all the time would stop the frame scrolling
+// with the wheel. `wire.wheel_zoom` says why that cannot be conditional.
+fn frame_attributes(wheel: zoom.Wheel) -> List(Attribute(Msg)) {
+  let frame = attribute.class("graph-frame scroll")
+
+  case wheel {
+    zoom.WheelScrolls -> [frame]
+    zoom.WheelZooms -> [
+      frame,
+      wire.wheel_zoom(fn(change) { msg.Ui(msg.ZoomGraph(change)) }),
+    ]
+  }
+}
+
+// Zoom out, the level, zoom in, then the two fixed sizes and the wheel
+// switch. The level is the server's own state, so it is drawn as text and
+// the buttons carry fixed messages.
+fn zoom_controls(ui_state: UiState) -> Element(Msg) {
+  html.div([attribute.class("graph-tools")], [
+    zoom_button("\u{2212}", "Zoom out", msg.Ui(msg.ZoomGraph(zoom.ZoomOut))),
+    html.span(
       [
-        attribute.class("btn btn-small graph-size-label"),
-        attribute.for("graph-size"),
+        attribute.class("zoom-level mono"),
+        attribute.role("status"),
+        attribute.data("test-id", "zoom-level"),
       ],
+      [element.text(zoom.label(ui_state.graph_zoom))],
+    ),
+    zoom_button("+", "Zoom in", msg.Ui(msg.ZoomGraph(zoom.ZoomIn))),
+    zoom_button(
+      "Fit",
+      "Scale the graph to the frame",
+      msg.Ui(msg.ZoomGraph(zoom.ZoomToFit)),
+    ),
+    zoom_button(
+      "100%",
+      "Draw the graph at its natural size",
+      msg.Ui(msg.ZoomGraph(zoom.ZoomActual)),
+    ),
+    html.button(
       [
-        html.span([attribute.class("when-fit")], [element.text("Full size")]),
-        html.span([attribute.class("when-full")], [element.text("Fit to frame")]),
+        attribute.class(case ui_state.wheel {
+          zoom.WheelZooms -> "btn btn-small btn-current"
+          zoom.WheelScrolls -> "btn btn-small"
+        }),
+        attribute.type_("button"),
+        attribute.title(
+          "While on, the mouse wheel over the graph zooms it and the frame "
+          <> "scrolls by its scroll bars.",
+        ),
+        attribute.attribute("aria-pressed", case ui_state.wheel {
+          zoom.WheelZooms -> "true"
+          zoom.WheelScrolls -> "false"
+        }),
+        wire.click(msg.Ui(msg.ToggleWheelZoom)),
       ],
+      [element.text("Wheel zoom")],
     ),
   ])
+}
+
+fn zoom_button(label: String, title: String, message: Msg) -> Element(Msg) {
+  html.button(
+    [
+      attribute.class("btn btn-small"),
+      attribute.type_("button"),
+      attribute.title(title),
+      attribute.attribute("aria-label", title),
+      wire.click(message),
+    ],
+    [element.text(label)],
+  )
 }
 
 // When every sample took the same path, each box reads 100% and four red

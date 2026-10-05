@@ -10,6 +10,7 @@ import pickglass_core/unit
 import pickglass_web/chart/call_graph
 import pickglass_web/chart/names
 import pickglass_web/key
+import pickglass_web/zoom
 import support
 
 fn name_of(id: Int) -> String {
@@ -47,6 +48,7 @@ fn drawn() -> String {
     name_of:,
     unit: unit.Count,
     selected: None,
+    zoom: zoom.Fit,
     on_select: fn(node) { key.to_string(node) },
   )
   |> element.to_string
@@ -124,6 +126,7 @@ pub fn a_reversed_edge_does_not_hide_the_module_test() {
       name_of: same_module,
       unit: unit.Count,
       selected: None,
+      zoom: zoom.Fit,
       on_select: fn(node) { key.to_string(node) },
     )
     |> element.to_string

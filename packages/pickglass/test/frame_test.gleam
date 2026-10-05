@@ -12,6 +12,17 @@ pub fn an_event_with_exactly_its_keys_passes_test() {
     == Ok(Nil)
 }
 
+pub fn a_wheel_event_with_exactly_its_keys_passes_test() {
+  assert frame.check(
+      "{\"kind\":1,\"path\":\"0\\t1\",\"name\":\"wheel\",\"event\":{\"deltaY\":-100}}",
+    )
+    == Ok(Nil)
+  assert frame.check(
+      "{\"kind\":1,\"path\":\"0\",\"name\":\"wheel\",\"event\":{},\"principal\":\"x\"}",
+    )
+    == Error("unexpected keys")
+}
+
 pub fn an_extra_key_is_refused_test() {
   assert frame.check(
       "{\"kind\":1,\"path\":\"0\",\"name\":\"click\",\"event\":{},\"principal\":\"admin\"}",

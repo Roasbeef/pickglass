@@ -72,6 +72,7 @@ import pickglass_web/view/supervision
 import pickglass_web/view/timeline
 import pickglass_web/view/ui
 import pickglass_web/wire
+import pickglass_web/zoom
 
 /// Data that may not have arrived yet. A page with `Waiting` data says so,
 /// which an empty table would not.
@@ -360,6 +361,26 @@ fn ui_event(
 
     msg.ClearSelection ->
       with_ui(model, state.UiState(..current, selected: None))
+
+    // The change names a step and never a size, so the new level is computed
+    // here from the old one and is always on the list.
+    msg.ZoomGraph(change) ->
+      with_ui(
+        model,
+        state.UiState(
+          ..current,
+          graph_zoom: zoom.apply(current.graph_zoom, change),
+        ),
+      )
+
+    msg.ToggleWheelZoom ->
+      with_ui(
+        model,
+        state.UiState(..current, wheel: case current.wheel {
+          zoom.WheelScrolls -> zoom.WheelZooms
+          zoom.WheelZooms -> zoom.WheelScrolls
+        }),
+      )
 
     msg.Search(text) -> with_ui(model, state.UiState(..current, search: text))
 

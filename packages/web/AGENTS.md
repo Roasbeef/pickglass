@@ -59,6 +59,17 @@ zero. `Request.PlanBinaries` plans a binaries read of a pinned process, and
 "Detached: no target" with no grants, not the role it had. A "Requested: ..."
 notice is cleared when the profile feed that answers it arrives.
 
+The call graph's zoom is page state: `state.UiState.graph_zoom` (a `zoom.Zoom`,
+`Fit` or one of the percentages in `zoom.steps`) and `state.UiState.wheel`
+(`zoom.Wheel`). `Ui(ZoomGraph(zoom.Change))` and `Ui(ToggleWheelZoom)` change
+them; a `Change` is one of four steps and never carries a percentage, and
+`zoom.apply` is the only place a level is computed. `call_graph.view` draws the
+level as the SVG's `width` and `height` and adds the `zoomed` class, which
+lifts the stylesheet's `max-width`. A server component cannot cancel a browser
+event conditionally, so the wheel handler (`wire.wheel_zoom`, which always
+cancels and is throttled to one step per 150 ms) is attached to the frame only
+while `WheelZooms` is chosen; otherwise the wheel scrolls the frame.
+
 `key.Key` is the only name a browser event may carry:`key.Key` is the only name a browser event may carry: 1 to 64 characters from
 a closed alphabet, issued by the viewer for rows, boxes, nodes, plans and
 checkpoints. Pids, module names and function names never travel from the

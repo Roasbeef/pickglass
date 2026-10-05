@@ -44,6 +44,7 @@ import pickglass_web/chart/names
 import pickglass_web/chart/svg_util
 import pickglass_web/fmt
 import pickglass_web/key.{type Key}
+import pickglass_web/zoom.{type Zoom}
 
 const svg_namespace: String = "http://www.w3.org/2000/svg"
 
@@ -67,13 +68,16 @@ pub fn node_key(function: Int) -> Key {
 
 /// Draw a graph layout. `total` is the profile total the shares are taken
 /// against; `name_of` gives function names; `selected` is the highlighted
-/// node's key; `on_select` builds the message a click sends.
+/// node's key; `zoom` is how large to draw it, `Fit` scaling it to the frame
+/// and a percentage drawing it at that share of its natural size, and
+/// `on_select` builds the message a click sends.
 pub fn view(
   layout layout: Layout,
   total total: Int,
   name_of name_of: fn(Int) -> String,
   unit u: Unit,
   selected selected: Option(Key),
+  zoom level: Zoom,
   on_select on_select: fn(Key) -> msg,
 ) -> Element(msg) {
   let #(min_x, max_x, min_y, max_y) = bounds(layout)
@@ -96,8 +100,8 @@ pub fn view(
 
   svg.svg(
     [
-      svg_util.num("width", width),
-      svg_util.num("height", height),
+      svg_util.num("width", zoom.scaled(level, width)),
+      svg_util.num("height", zoom.scaled(level, height)),
       attribute.attribute(
         "viewBox",
         int.to_string(min_x - margin)
@@ -108,7 +112,10 @@ pub fn view(
           <> " "
           <> int.to_string(height),
       ),
-      attribute.class("graph call-graph"),
+      attribute.class(case level {
+        zoom.Fit -> "graph call-graph"
+        zoom.Scaled(_) -> "graph call-graph zoomed"
+      }),
       attribute.attribute("role", "img"),
       attribute.attribute("aria-label", "Call graph"),
     ],
