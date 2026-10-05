@@ -15,7 +15,7 @@ TOOLS := lint
 
 .PHONY: check
 check: ## Full gate: format, warning-free build, tests, lint, doc-check, agent checks
-	@$(MAKE) --no-print-directory fmt-check build test lint doc-check agent-imports agent-e2e
+	@$(MAKE) --no-print-directory fmt-check build test test-install lint doc-check agent-imports agent-e2e
 	@echo "check clean"
 
 .PHONY: build
@@ -29,6 +29,13 @@ test: ## Run tests only (skips format check)
 	@set -e; for p in $(PACKAGES); do \
 		echo "==> $$p"; (cd packages/$$p && gleam test); \
 	done
+
+# The installer's prune rules are shell, so they get a shell test. It uses a
+# fake release in a scratch directory and needs neither Erlang nor `make
+# release`, which is why `check` runs it.
+.PHONY: test-install
+test-install: ## Test scripts/install.sh and scripts/prune_installs.sh on scratch prefixes
+	@scripts/test_install.sh
 
 # --------------------------------------------------------------- formatting
 
@@ -103,8 +110,9 @@ dist: release release-smoke ## Package the release as a tarball under dist/
 # Everything a person needs to type `pickglass` in a directory: a fresh copy
 # of the release under $(PREFIX)/lib/pickglass, a `current` link to it and a
 # launcher in $(PREFIX)/bin. A reinstall adds a directory and repoints the
-# link, so it never rewrites files under a viewer that is already running.
-# scripts/install.sh says why, and why old copies are kept.
+# link, so it never rewrites files under a viewer that is already running, and
+# then removes old copies that nothing uses.
+# scripts/install.sh says why, and when old copies are removed.
 PREFIX ?= $(HOME)/.local
 
 .PHONY: install

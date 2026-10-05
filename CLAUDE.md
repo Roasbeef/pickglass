@@ -35,7 +35,8 @@ Loom originals, so a rule change is made in Loom first.
   the minimum; a rule that needs changing is changed in Loom first and
   re-vendored.
 - `scripts/` — the gates (`lint.sh`, `doc_check.sh`), the release build and
-  the installer (`install.sh`).
+  the installer (`install.sh`, `prune_installs.sh`) and its test
+  (`test_install.sh`).
 - `docs/` — the style guides.
 
 ## Literate code
@@ -112,9 +113,14 @@ into `dist/`.
 `make install` runs both, then copies the release into a fresh directory
 under `$(PREFIX)/lib/pickglass`, repoints the `current` link there and writes
 the `$(PREFIX)/bin/pickglass` shim (`PREFIX` defaults to `~/.local`). It never
-rewrites or prunes an earlier copy, because a running VM loads modules from its
-release directory for as long as it lives. Keep that property if you change
-`scripts/install.sh`.
+rewrites an earlier copy, because a running VM loads modules from its release
+directory for as long as it lives. It does remove old copies, through
+`scripts/prune_installs.sh`, but only ones that are not `current`, not the copy
+`current` pointed at before this install, and not in use by a live process
+(`ps` command lines and, when installed, `lsof`); it deletes nothing if that
+check fails. Keep those properties if you change either script.
+`make test-install` tests them on scratch prefixes with a fake release, needs no
+Erlang, and runs inside `make check`.
 
 **Verify a gate by its own exit code.** Backgrounding
 `make check > log; echo $?; tail log` reports `tail`'s status, not `make`'s,
