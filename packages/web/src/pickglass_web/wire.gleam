@@ -39,6 +39,7 @@
 //// becomes part of a request.
 
 import gleam/dynamic/decode.{type Decoder}
+import gleam/int
 import gleam/list
 import gleam/string
 import lustre/attribute.{type Attribute}
@@ -47,6 +48,7 @@ import lustre/server_component
 import pickglass_core/policy
 import pickglass_web/key.{type Key}
 import pickglass_web/msg.{type Msg}
+import pickglass_web/zoom
 
 /// The longest text a free-text field may carry.
 pub const max_text: Int = 200
@@ -154,6 +156,49 @@ pub fn form_decoder(field: String) -> Decoder(String) {
 pub fn submitted(field: String, make: fn(String) -> Msg) -> Attribute(Msg) {
   event.on("submit", decode.map(form_decoder(field), make))
   |> event.prevent_default
+}
+
+/// Decode a `wheel` event's `deltaY` as a zoom step: a turn away from the
+/// operator (negative `deltaY`) zooms in, a turn toward them zooms out, and
+/// the size of the turn does not matter. A zero or non-numeric `deltaY`, or a
+/// horizontal turn that carries none, fails. Browsers report the value as an
+/// integer or a fraction, so both are read.
+///
+/// ## Examples
+///
+/// ```gleam
+/// decode.run(forged_dynamic, wire.wheel_decoder())
+/// // -> Ok(zoom.ZoomIn) for deltaY -120
+/// // -> Error(_) for deltaY 0 or "up"
+/// ```
+pub fn wheel_decoder() -> Decoder(zoom.Change) {
+  use delta <- decode.field(
+    "deltaY",
+    decode.one_of(decode.float, or: [decode.map(decode.int, int.to_float)]),
+  )
+
+  case delta <. 0.0, delta >. 0.0 {
+    True, _ -> decode.success(zoom.ZoomIn)
+    _, True -> decode.success(zoom.ZoomOut)
+    _, _ -> decode.failure(zoom.ZoomIn, "a non-zero wheel turn")
+  }
+}
+
+/// A `wheel` handler that sends one zoom step per turn, at most one every
+/// 150 ms so a spinning wheel or a trackpad's momentum does not flood the
+/// socket.
+///
+/// The browser's own action for a wheel turn (scrolling, or page zoom with a
+/// modifier held) is cancelled for every turn the handler sees. A server
+/// component decides what to send on the server, so it cannot cancel only
+/// when a modifier is held; the caller attaches this handler only while the
+/// operator has asked the wheel to zoom. Cancelling happens in the browser
+/// before the throttle, so a turn the throttle drops does not scroll either.
+pub fn wheel_zoom(make: fn(zoom.Change) -> Msg) -> Attribute(Msg) {
+  event.on("wheel", decode.map(wheel_decoder(), make))
+  |> server_component.include(["deltaY"])
+  |> event.prevent_default
+  |> event.throttle(150)
 }
 
 /// A `change` handler that sends the chosen key.

@@ -102,9 +102,9 @@ pub fn a_notice_for_another_request_is_not_cleared_by_a_profile_feed_test() {
   assert after.ui.notice == Some(app.describe(msg.ProfileBusiest))
 }
 
-// The graph is scaled to the frame, and the page offers the full size, where
-// the frame scrolls, beside the graph.
-pub fn the_graph_note_offers_full_size_and_says_the_frame_scrolls_test() {
+// The graph is scaled to the frame until the operator zooms, and the page
+// says the frame scrolls once it is larger.
+pub fn the_graph_note_offers_zoom_and_says_the_frame_scrolls_test() {
   let model =
     app.init(fixture.start(page.Profile, page.Files))
     |> fn(model) {
@@ -118,8 +118,8 @@ pub fn the_graph_note_offers_full_size_and_says_the_frame_scrolls_test() {
   let html = element.to_string(app.view(model))
 
   assert string.contains(html, "scroll the frame")
-  assert string.contains(html, "Full size")
-  assert string.contains(html, "type=\"checkbox\"")
+  assert string.contains(html, "Zoom in")
+  assert string.contains(html, "Wheel zoom")
 }
 
 // An owner row holds no processes itself, so it opens onto its role rows;

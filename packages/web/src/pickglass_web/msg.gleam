@@ -31,6 +31,7 @@ import pickglass_core/profile/activity
 import pickglass_web/key.{type Key}
 import pickglass_web/model
 import pickglass_web/timeline_model
+import pickglass_web/zoom
 
 /// One browser-visible message.
 pub type Msg {
@@ -218,6 +219,12 @@ pub type UiEvent {
 
   /// Select a reading or span on the timeline.
   SelectReading(Key)
+
+  /// Change the zoom of the call graph by one of its closed steps.
+  ZoomGraph(zoom.Change)
+
+  /// Switch whether the wheel over the call graph zooms it or scrolls.
+  ToggleWheelZoom
 
   /// Clear the selection.
   ClearSelection
