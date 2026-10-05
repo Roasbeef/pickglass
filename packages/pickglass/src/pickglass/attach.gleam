@@ -635,8 +635,20 @@ fn unload(node: Atom, module: String) -> Nil {
   Nil
 }
 
+// Each module is purged first. A janitor that has deleted a module but not yet
+// purged it leaves old code behind, and loading over old code fails with
+// `not_purged`. Purging a module with no old code does nothing.
 fn push(node: Atom, beams: List(Beam)) -> Result(Nil, String) {
   list.try_each(beams, fn(beam) {
+    let _ =
+      ffi_dist.call(
+        node,
+        "code",
+        "purge",
+        [ffi_dist.to_dynamic(atom.create(beam.module))],
+        5000,
+      )
+
     ffi_dist.load_binary(node, beam.module, beam.file_name, beam.bytes)
   })
 }
