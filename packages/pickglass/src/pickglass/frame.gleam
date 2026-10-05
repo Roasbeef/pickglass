@@ -44,8 +44,9 @@ pub const max_bytes = 65_536
 /// The most events one batch may carry.
 pub const max_batch = 32
 
-/// The event names the views attach.
-const event_names = ["click", "input", "change", "submit"]
+/// The event names the views attach. `wheel` is attached to the call graph's
+/// frame only while the operator has set the wheel to zoom.
+const event_names = ["click", "input", "change", "submit", "wheel"]
 
 /// Check one text frame from a browser.
 ///
