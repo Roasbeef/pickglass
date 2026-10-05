@@ -41,7 +41,7 @@ behind a single-use ticket.
 
 ## Get started
 
-Building needs Erlang/OTP 29, `rebar3` and Gleam >= 1.19.0-rc2. The release it
+Building needs Erlang/OTP 29, `rebar3` and Gleam >= 1.19.0. The release it
 produces is self-contained and runs on a machine with no Erlang installed.
 
 ```sh
@@ -320,7 +320,7 @@ platform, and `make dist` packages it.
 ![Overview page on Linux, attached to a plain OTP 29 node](docs/images/linux-overview.jpg)
 
 The target needs OTP 28 or newer (the viewer refuses an older one). Building
-the viewer needs OTP 29 and Gleam >= 1.19.0-rc2; with Gleam 1.18.1 the format
+the viewer needs OTP 29 and Gleam >= 1.19.0; with Gleam 1.18.1 the format
 check in `make check` fails.
 
 ## A worked example: Loom #720

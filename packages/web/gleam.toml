@@ -4,7 +4,7 @@ licences = ["Apache-2.0"]
 description = "Every pickglass page as Lustre views, plus a static preview renderer."
 target = "erlang"
 
-gleam = ">= 1.19.0-rc2"
+gleam = ">= 1.19.0"
 
 repository = { type = "github", user = "Roasbeef", repo = "pickglass" }
 
