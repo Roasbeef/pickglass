@@ -46,10 +46,10 @@ produces is self-contained and runs on a machine with no Erlang installed.
 
 ```sh
 make release          # self-contained release in build/release/pickglass
-
-P=build/release/pickglass/bin/pickglass
+make install          # release, smoke test, then install under ~/.local
 
 # A Loom daemon started with --profile, found from its state directory.
+P=pickglass           # or build/release/pickglass/bin/pickglass without installing
 $P open --state-dir ~/.loom
 
 # Any node on this machine that was started with a name.
@@ -65,6 +65,15 @@ $P compare baseline.pgcap candidate.pgcap
 # The same pages over a capture file, with no target.
 $P view baseline.pgcap
 ```
+
+`make install` copies the release into a new directory under
+`$PREFIX/lib/pickglass`, points `$PREFIX/lib/pickglass/current` at it, and
+writes a `pickglass` launcher into `$PREFIX/bin`. `PREFIX` defaults to
+`~/.local`; add its `bin` directory to `PATH` to type `pickglass`. Each install
+makes a new directory and never rewrites an old one, so installing again while a
+viewer is running does not touch that viewer's files; the new copy is used the
+next time it starts. Old directories are kept, because the install cannot tell
+whether a viewer still runs from one. Delete them by hand when none does.
 
 `open` joins the target, prints a single-use URL on `127.0.0.1`, and serves the
 pages until you press Ctrl-C or use the Detach button. `--save-dir`, `--port`
@@ -359,7 +368,7 @@ The repository is a workspace of Gleam packages under `packages/`:
 `make help` lists the commands. `make check` is the full gate: format check,
 warning-free build, tests, lint, doc-check, and the agent's import and
 end-to-end checks against a peer node. `make release-smoke` boots the release
-with no `erl` on `PATH`. Each package has a `CLAUDE.md` with its types,
+with no `erl` on `PATH`. `make install` installs it under `PREFIX`. Each package has a `CLAUDE.md` with its types,
 traffic and invariants.
 
 The docs map:
