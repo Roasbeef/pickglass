@@ -33,7 +33,8 @@ mode (chosen from the host: a dot or colon is a long name) and its cookie
 file, and `endpoint.check_loopback` is the single place that scopes targets to
 this machine. `discover.Target` is a node with its OS pid and cookie file.
 `attach.AttachError` is the typed failure of an attach (node not running,
-cookie mismatch, naming-mode mismatch, OTP too old), with `attach.describe`
+cookie mismatch, naming-mode mismatch, OTP too old, an agent of another build
+already running, an agent that is full), with `attach.describe`
 for the one-line message.
 `attach.Session` is one attach. `link.Link` is a weft actor that owns
 requests in flight and is the process the agent monitors. `remote.Remote` is
@@ -157,8 +158,9 @@ beams are read as data, from `priv/agent` in a release or from
 
 ## Traffic
 
-The viewer calls the target with `rpc:call` (`code:load_binary`, a release
-check, `pickglass_agent@server:start`) and then sends `{<<"pg">>, 1, ReplyTo,
+The viewer calls the target with `rpc:call` (a release check, `whereis`, and
+when no agent is registered the push claim, `code:load_binary` and
+`pickglass_agent@server:start`) and then sends `{<<"pg">>, 1, ReplyTo,
 Ref, Request}` messages to the registered name `pickglass_agent`. The link
 actor receives the replies as raw messages and decodes them with
 `wire.decode_envelope`. It pings the agent every 5 s to renew a 30 s lease.
@@ -184,9 +186,22 @@ messages to the feeder's subject.
   distribution in a VM that has neither `-nocookie` nor `-setcookie`, because
   OTP would then create `~/.erlang.cookie` in the operator's home. In
   development run with `ERL_FLAGS=-nocookie`.
-- Every attach ends with `attach.detach`, which asks the agent to tear down
-  and waits for its modules to be unloaded. If the viewer dies instead, the
-  agent notices the dead link process or lost connection by itself.
+- Several viewers share one agent per node. A viewer never pushes over a
+  registered agent: it asks to `join`, and the agent admits it only if
+  `agent_beams.identity` (a digest of the beams) equals the build the agent
+  started with, so a viewer of another build gets `AgentBuildMismatch` naming
+  both builds and nothing is replaced. When no agent is registered the viewer
+  takes the push claim (a registered name, `pickglass_agent_claim`, on a
+  process that sleeps 15 s on the target), looks again, then pushes and
+  starts; a viewer that loses the claim waits and joins the winner's agent.
+  A join that gets no answer means the agent stopped, and the viewer waits for
+  the old modules to leave before it starts over.
+- Every attach ends with `attach.detach`, which asks the agent to release this
+  viewer. When it was the last viewer the agent unloads its modules and
+  `detach` waits for that; when others remain the agent answers `left` and
+  `detach` reports `OtherViewersRemain`. If the viewer dies instead, the agent
+  notices the dead link process or lost connection by itself and releases only
+  that viewer.
 - The only path from a page to the agent link is `service` then `gate` then
   `exec`. A command reaches `exec` only as `policy.Authorized`. A probe or
   targeted GC needs `policy.plan` then `policy.confirm`, and the plan store

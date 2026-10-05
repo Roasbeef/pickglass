@@ -87,10 +87,12 @@ pub type Phase {
   Finished(snapshot: Snapshot)
 }
 
-/// One probe.
+/// One probe. `owner` is the link process of the viewer that started it; the
+/// agent lets only that viewer read, stop or see it.
 pub type Probe {
   Probe(
     id: Int,
+    owner: Pid,
     patterns: List(Pattern),
     mode: CounterMode,
     matched: Int,
@@ -128,11 +130,12 @@ const hot_modules = [
 /// ## Examples
 ///
 /// ```gleam
-/// start(1, agent_pid, [Pattern(module, function)], TimeOnly, EveryProcess, 10_000)
+/// start(1, viewer_pid, agent_pid, [Pattern(module, function)], TimeOnly, EveryProcess, 10_000)
 /// // -> Ok(Probe(id: 1, ...))
 /// ```
 pub fn start(
   id: Int,
+  owner: Pid,
   agent: Pid,
   patterns: List(Pattern),
   mode: CounterMode,
@@ -151,6 +154,7 @@ pub fn start(
 
       Ok(Probe(
         id: id,
+        owner: owner,
         patterns: distinct,
         mode: mode,
         matched: matched,

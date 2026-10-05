@@ -8,6 +8,13 @@
 //// request over distribution runs in a temporary process that ends when the
 //// call returns.
 ////
+//// One agent serves every viewer attached to its node. The first viewer
+//// pushes and starts it; a later viewer of the same build asks to `join`, and
+//// the agent adds it to its `viewers` table. A viewer is known by its link
+//// process, the reply address of its requests. Every pin, probe and worker
+//// carries the pid of the viewer that made it, and every lookup by token or
+//// probe id also names the requester, so a viewer sees only its own.
+////
 //// This module is the documented exemption to the rule that process
 //// machinery goes through weft. The agent cannot depend on weft, on
 //// `gleam_otp` or on the standard library, because loading them would
@@ -19,23 +26,31 @@
 ////
 //// ## Flow
 ////
-//// The viewer calls `start`, which decodes the start arguments and starts the
-//// gen_server. `init` monitors the viewer's link process and the viewer's
-//// node and arms a tick. `handle_info` then runs for every message:
-//// `dispatch` answers a request, `on_down` handles a monitored process
-//// ending, and `on_tick` enforces the lease and the probe deadlines. Anything
-//// that ends the attach goes through `shut_down`, which destroys every
-//// session and releases every flag, and then `terminate` hands the modules to
-//// the janitor module.
+//// The first viewer calls `start`, which decodes the start arguments and
+//// starts the gen_server. `init` admits that viewer, which monitors its link
+//// process and its node, and arms a tick. `handle_info` then runs for every
+//// message: `admit_request` lets a `join` through and refuses a request from a
+//// pid that is not attached, `dispatch` answers an admitted request, `on_down`
+//// handles a monitored process ending, and `on_tick` enforces the leases and
+//// the probe deadlines.
 ////
 //// ## Teardown
 ////
-//// Four things end an agent: an explicit `detach`, the viewer's link process
-//// dying, the viewer's node going down, and the lease expiring because the
-//// viewer stopped pinging. All four reach `shut_down`. A crash in the agent
-//// reaches `terminate`, which runs the same cleanup. A kill signal runs
-//// neither, and the VM then destroys the sessions because the agent was
-//// their sole holder.
+//// Four things end one viewer's attach: an explicit `detach`, its link process
+//// dying, its node going down, and its lease expiring because it stopped
+//// pinging. Each reaches `release`, which destroys that viewer's sessions,
+//// kills its samplers, tracers and workers, drops its pins and gives up its
+//// share of the `scheduler_wall_time` flag, and touches nothing another
+//// viewer owns. When the last viewer is released the agent stops, `shut_down`
+//// clears whatever is left, and `terminate` hands the modules to the janitor
+//// module. The decision to stop is made in the agent's own mailbox order with
+//// the count of viewers it holds, so a `join` handled before the last
+//// `detach` keeps the agent and modules alive, and one handled after it finds
+//// no agent and its sender starts a new one.
+////
+//// A crash in the agent reaches `terminate`, which runs the same cleanup for
+//// every viewer. A kill signal runs neither, and the VM then destroys the
+//// sessions because the agent was their sole holder.
 
 import pickglass_agent/activitytrace
 import pickglass_agent/binaries
@@ -64,6 +79,9 @@ import pickglass_agent/sampler
 import pickglass_agent/supervision
 import pickglass_agent/system
 import pickglass_agent/tracer
+import pickglass_agent/viewers.{
+  type Scheduler, type Viewer, Collecting, NotCollecting, Viewer,
+}
 
 /// How often the agent looks at its lease and its probe deadlines.
 const tick_ms = 250
@@ -124,23 +142,29 @@ const worker_grace_ms = 1000
 /// The longest a single-process read may take, in milliseconds.
 const read_deadline_ms = 2000
 
-/// How the agent is configured at start.
+/// How the agent is configured at start: by the first viewer, which becomes
+/// the first row of the viewers table.
 pub type Config {
   Config(
-    /// The viewer's link process. Its death ends the attach.
+    /// The viewer's link process. Its death ends that viewer's attach.
     viewer: Pid,
     /// An identifier the viewer generated for this attach. Pin tokens are
     /// bound to it, so a token from an earlier agent is refused.
     boot_id: String,
     /// How long the agent waits without hearing from the viewer before it
-    /// tears itself down, in milliseconds.
+    /// drops that viewer, in milliseconds.
     lease_ms: Int,
+    /// The identity of the agent build, which the viewer computed from the
+    /// beams it pushed. A viewer that asks to join must carry the same one,
+    /// because joining shares the code already running and never replaces it.
+    build: String,
   )
 }
 
-/// A process the viewer asked the agent to watch.
+/// A process a viewer asked the agent to watch. `owner` is that viewer's link
+/// process: only it may use or release the pin.
 pub type Pin {
-  Pin(id: Int, pid: Pid, text: String, monitor: Reference)
+  Pin(id: Int, pid: Pid, text: String, monitor: Reference, owner: Pid)
 }
 
 /// A read-only request running in a worker process, so that a slow answer
@@ -165,10 +189,12 @@ pub type StackPhase {
 }
 
 /// A stack sampling probe: the sampler process, its monitor and its
-/// deadline. The aggregate lives in the sampler, not here.
+/// deadline. The aggregate lives in the sampler, not here. `owner` is the
+/// viewer that started it.
 pub type StackProbe {
   StackProbe(
     id: Int,
+    owner: Pid,
     sampler: Pid,
     monitor: Reference,
     deadline_at_ms: Int,
@@ -193,10 +219,12 @@ pub type TracePhase {
 }
 
 /// An event probe: the tracer process that folds the events, its monitor and
-/// its deadline. The aggregate lives in the tracer, not here.
+/// its deadline. The aggregate lives in the tracer, not here. `owner` is the
+/// viewer that started it.
 pub type TraceProbe {
   TraceProbe(
     id: Int,
+    owner: Pid,
     kind: TraceKind,
     tracer: Pid,
     monitor: Reference,
@@ -205,20 +233,15 @@ pub type TraceProbe {
   )
 }
 
-/// Whether the agent holds the `scheduler_wall_time` flag.
-pub type Scheduler {
-  Collecting
-  NotCollecting
-}
-
-/// The agent's state.
+/// The agent's state. Pins, probes and workers of every viewer share these
+/// lists, each tagged with its owner; the ids come from one counter, so an id
+/// never names two things, and the limits that protect the target are counted
+/// across all viewers.
 pub type State {
   State(
-    config: Config,
-    viewer_monitor: Reference,
-    viewer_node: Atom,
+    build: String,
     started_ms: Int,
-    last_heard_ms: Int,
+    viewers: List(Viewer),
     pins: List(Pin),
     next_pin: Int,
     probes: List(Probe),
@@ -226,7 +249,6 @@ pub type State {
     traces: List(TraceProbe),
     next_probe: Int,
     workers: List(Worker),
-    scheduler: Scheduler,
   )
 }
 
@@ -237,16 +259,15 @@ type Notice {
   Nodedown
 }
 
-/// Why an attach ended, as the viewer sees it in `detached` replies.
-type Cause {
-  Requested
-  ViewerGone
-  NodeDown
-  LeaseExpired
-}
-
 type Event {
   Asked(Envelope)
+  JoinAsked(
+    reply_to: Pid,
+    reference: Reference,
+    boot_id: String,
+    lease_ms: Int,
+    build: String,
+  )
   Refused(reply_to: Pid, reference: Reference, detail: String)
   Ticked
   StacksFinished(id: Int)
@@ -256,18 +277,19 @@ type Event {
   Ignored
 }
 
-/// Start the agent. The viewer calls this over `erpc` after pushing the
-/// modules. `args` is `{ViewerPid, BootId, LeaseMs}`; anything else is
+/// Start the agent. The first viewer calls this over `erpc` after pushing the
+/// modules. `args` is `{ViewerPid, BootId, LeaseMs, Build}`; anything else is
 /// refused. The agent is started unlinked from the caller, which is a
 /// temporary process that ends when the call returns.
 ///
-/// Returns `{ok, Pid}`, `{error, {already_started, Pid}}` when another
-/// viewer is attached, or `{error, Reason}`.
+/// Returns `{ok, Pid}`, `{error, {already_started, Pid}}` when an agent is
+/// already registered, or `{error, Reason}`. A viewer that finds an agent
+/// running joins it with a `join` request instead of starting another.
 ///
 /// ## Examples
 ///
 /// ```gleam
-/// start(coerce(#(viewer_pid, "boot-1", 30_000)))
+/// start(coerce(#(viewer_pid, "boot-1", 30_000, "build-1")))
 /// // -> {ok, Pid}
 /// ```
 pub fn start(args: Term) -> Term {
@@ -285,10 +307,11 @@ pub fn start(args: Term) -> Term {
 fn decode_config(args: Term) -> Result(Config, Nil) {
   case
     ffi_term.is_tuple(args)
-    && ffi_term.tuple_size(args) == 3
+    && ffi_term.tuple_size(args) == 4
     && ffi_term.is_pid(ffi_term.element(1, args))
     && ffi_term.is_binary(ffi_term.element(2, args))
     && ffi_term.is_integer(ffi_term.element(3, args))
+    && ffi_term.is_binary(ffi_term.element(4, args))
   {
     False -> Error(Nil)
     True ->
@@ -297,48 +320,69 @@ fn decode_config(args: Term) -> Result(Config, Nil) {
         boot_id: ffi_term.coerce(ffi_term.element(2, args)),
         lease_ms: request.clamp(
           ffi_term.coerce(ffi_term.element(3, args)),
-          1000,
-          600_000,
+          request.min_lease_ms,
+          request.max_lease_ms,
         ),
+        build: ffi_term.coerce(ffi_term.element(4, args)),
       ))
   }
 }
 
-/// The `gen_server` init callback. Watches the viewer's process and node and
-/// arms the first tick.
+/// The `gen_server` init callback. Admits the first viewer, which watches its
+/// process and node, and arms the first tick.
 pub fn init(config: Config) -> Result(State, Nil) {
   owner.claim_self()
 
   let now = ffi_proc.now_ms()
-  let viewer_node = ffi_proc.node_of(config.viewer)
-  let monitor = ffi_proc.monitor(ffi_proc.Process, config.viewer)
+  let first = watch_viewer(config.viewer, config.boot_id, config.lease_ms, now)
 
-  let _ = ffi_proc.monitor_node_flag(viewer_node, ffi_term.coerce(True))
   let _ = ffi_proc.send_after(tick_ms, ffi_proc.self(), ffi_term.coerce(Tick))
 
-  Ok(State(
-    config: config,
-    viewer_monitor: monitor,
-    viewer_node: viewer_node,
-    started_ms: now,
+  Ok(
+    State(
+      build: config.build,
+      started_ms: now,
+      viewers: viewers.add([], first),
+      pins: [],
+      next_pin: 1,
+      probes: [],
+      stacks: [],
+      traces: [],
+      next_probe: 1,
+      workers: [],
+    ),
+  )
+}
+
+// A viewer is watched twice, by a monitor on its link process and by a flag
+// on its node, so that a killed process, a killed VM and a lost connection all
+// end its attach. The monitor message alone would also carry a lost
+// connection; the node flag keeps the original behaviour of ending the attach
+// on `nodedown` without waiting for it.
+fn watch_viewer(pid: Pid, boot_id: String, lease_ms: Int, now: Int) -> Viewer {
+  let node = ffi_proc.node_of(pid)
+  let monitor = ffi_proc.monitor(ffi_proc.Process, pid)
+
+  let _ = ffi_proc.monitor_node_flag(node, ffi_term.coerce(True))
+
+  Viewer(
+    pid: pid,
+    boot_id: boot_id,
+    monitor: monitor,
+    node: node,
+    lease_ms: lease_ms,
     last_heard_ms: now,
-    pins: [],
-    next_pin: 1,
-    probes: [],
-    stacks: [],
-    traces: [],
-    next_probe: 1,
-    workers: [],
     scheduler: NotCollecting,
-  ))
+  )
 }
 
 /// The `gen_server` callback for every message. A message that is not one of
 /// the closed set is dropped.
 pub fn handle_info(message: Term, state: State) -> Next(State) {
   case classify(message) {
-    Asked(envelope) ->
-      dispatch(envelope, State(..state, last_heard_ms: ffi_proc.now_ms()))
+    Asked(envelope) -> admit_request(envelope, state)
+    JoinAsked(reply_to, reference, boot_id, lease_ms, build) ->
+      join(state, reply_to, reference, boot_id, lease_ms, build)
     Refused(reply_to, reference, detail) -> {
       reply.send(
         reply_to,
@@ -353,10 +397,7 @@ pub fn handle_info(message: Term, state: State) -> Next(State) {
     TraceFinished(id) -> Noreply(mark_trace_done(state, id))
     Exited(monitor, reason) -> on_down(monitor, reason, state)
     NodeLost(node) ->
-      case node == state.viewer_node {
-        True -> stop(state, NodeDown)
-        False -> Noreply(state)
-      }
+      release_viewers(state, viewers.on_node(state.viewers, node))
     Ignored -> Noreply(state)
   }
 }
@@ -381,6 +422,8 @@ fn classify(message: Term) -> Event {
 fn classify_tuple(message: Term) -> Event {
   case request.decode(message) {
     request.Valid(envelope) -> Asked(envelope)
+    request.Joining(reply_to, reference, boot_id, lease_ms, build) ->
+      JoinAsked(reply_to, reference, boot_id, lease_ms, build)
     request.Malformed(reply_to, reference, detail) ->
       Refused(reply_to, reference, detail)
     request.NotARequest -> classify_notice(message)
@@ -443,12 +486,92 @@ fn is_down(message: Term) -> Bool {
 
 // ----------------------------------------------------------------- requests
 
-fn dispatch(envelope: Envelope, state: State) -> Next(State) {
+// A request from an attached viewer renews that viewer's lease and no other's.
+// A request from a pid that is not attached is refused: the only message such
+// a pid may send is a join, which is classified apart and never reaches here.
+fn admit_request(envelope: Envelope, state: State) -> Next(State) {
+  let Envelope(reply_to, reference, _) = envelope
+
+  case viewers.find(state.viewers, reply_to) {
+    Ok(viewer) ->
+      dispatch(
+        envelope,
+        viewer,
+        State(
+          ..state,
+          viewers: viewers.touch(state.viewers, reply_to, ffi_proc.now_ms()),
+        ),
+      )
+    Error(Nil) ->
+      refuse(
+        state,
+        reply_to,
+        reference,
+        "not_attached",
+        "this process is not attached to the agent; send a join first",
+      )
+  }
+}
+
+// Joining shares the code that is running, so it is allowed only for the
+// build that is running: a viewer with other beams would need them loaded
+// under the same module names, and loading them replaces the code another
+// viewer's agent is executing. The refusal's detail is the running build, so
+// the viewer can say which two builds differ. The room check comes after the
+// build check because it is the one a viewer can fix by waiting. A pid that is
+// already attached is told so, which a viewer whose first join was answered
+// late takes as success.
+fn join(
+  state: State,
+  reply_to: Pid,
+  reference: Reference,
+  boot_id: String,
+  lease_ms: Int,
+  build: String,
+) -> Next(State) {
+  case
+    viewers.find(state.viewers, reply_to),
+    build == state.build,
+    viewers.has_room(state.viewers)
+  {
+    Ok(_), _, _ ->
+      refuse(
+        state,
+        reply_to,
+        reference,
+        "already_attached",
+        "this process is already attached to the agent",
+      )
+    Error(Nil), False, _ ->
+      refuse(state, reply_to, reference, "build_mismatch", state.build)
+    Error(Nil), True, False ->
+      refuse(
+        state,
+        reply_to,
+        reference,
+        "too_many_viewers",
+        "the agent already serves the most viewers it allows",
+      )
+    Error(Nil), True, True -> {
+      let viewer = watch_viewer(reply_to, boot_id, lease_ms, ffi_proc.now_ms())
+      let attached = viewers.add(state.viewers, viewer)
+
+      answer(
+        State(..state, viewers: attached),
+        reply_to,
+        reference,
+        reply.joined(seq.length(attached)),
+      )
+    }
+  }
+}
+
+fn dispatch(envelope: Envelope, viewer: Viewer, state: State) -> Next(State) {
   let Envelope(reply_to, reference, request) = envelope
 
   case request {
-    request.Detach -> detach(state, reply_to, reference)
-    request.Ping -> answer(state, reply_to, reference, ping(state))
+    request.Detach -> detach(state, viewer, reply_to, reference)
+    request.Ping -> answer(state, reply_to, reference, ping(state, viewer))
     request.MemoryReport -> answer(state, reply_to, reference, memory())
     request.Census(max_scanned, top_k) ->
       census_request(
@@ -551,9 +674,9 @@ fn dispatch(envelope: Envelope, state: State) -> Next(State) {
       start_worker(state, reply_to, reference, "system", read_deadline_ms, fn() {
         reply.system(system.read())
       })
-    request.Pin(text) -> pin(state, reply_to, reference, text)
+    request.Pin(text) -> pin(state, viewer, reference, text)
     request.Unpin(token) -> unpin(state, reply_to, reference, token)
-    request.Scheduler(action) -> scheduler(state, reply_to, reference, action)
+    request.Scheduler(action) -> scheduler(state, viewer, reference, action)
     request.StartCounters(patterns, targets, deadline_ms, mode) ->
       start_counters(
         state,
@@ -592,16 +715,23 @@ fn refuse(
   answer(state, to, reference, reply.failure(Failure(code, detail)))
 }
 
-fn ping(state: State) -> Term {
+// A viewer's ping counts what that viewer holds, not what the node holds, so
+// a viewer reads its own pins and probes however many others are attached.
+fn ping(state: State, viewer: Viewer) -> Term {
+  let pid = viewer.pid
+  let mine = fn(owner: Pid) { owner == pid }
+
   reply.pong(
-    state.config.boot_id,
+    viewer.boot_id,
     ffi_term.atom_name(ffi_vm.node_name()),
     ffi_vm.otp_release(),
     ffi_proc.now_ms() - state.started_ms,
-    seq.length(state.pins),
-    running_count(state.probes)
-      + sampling_count(state.stacks)
-      + tracing_count(state.traces),
+    seq.length(seq.filter(state.pins, fn(entry) { mine(entry.owner) })),
+    running_count(seq.filter(state.probes, fn(probe) { mine(probe.owner) }))
+      + sampling_count(
+      seq.filter(state.stacks, fn(probe) { mine(probe.owner) }),
+    )
+      + tracing_count(seq.filter(state.traces, fn(probe) { mine(probe.owner) })),
   )
 }
 
@@ -666,7 +796,7 @@ fn binaries_request(
   token: Token,
   top_k: Int,
 ) -> Next(State) {
-  case find_pin(state, token) {
+  case find_pin(state, reply_to, token) {
     Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
     Ok(entry) ->
       start_worker(
@@ -776,7 +906,7 @@ fn targeted_gc(
   token: Token,
   deadline_ms: Int,
 ) -> Next(State) {
-  case find_pin(state, token) {
+  case find_pin(state, reply_to, token) {
     Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
     Ok(entry) ->
       start_worker(state, reply_to, reference, "gc", deadline_ms, fn() {
@@ -830,7 +960,7 @@ fn self_measure(
   token: Token,
   budget_ms: Int,
 ) -> Next(State) {
-  case find_pin(state, token) {
+  case find_pin(state, reply_to, token) {
     Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
     Ok(entry) ->
       start_process(state, reply_to, reference, "measure", budget_ms, fn() {
@@ -872,7 +1002,7 @@ fn process_detail(
   reference: Reference,
   token: Token,
 ) -> Next(State) {
-  case find_pin(state, token) {
+  case find_pin(state, reply_to, token) {
     Error(Nil) -> refuse_stale_pin(state, reply_to, reference)
     Ok(entry) ->
       start_worker(
@@ -909,9 +1039,12 @@ fn refuse_stale_pin(
   )
 }
 
+// The pin table is one list for every viewer, but a viewer's pin is its own:
+// two viewers pinning the same process hold two pins, each with its own id,
+// monitor and token, so releasing one never releases the other.
 fn pin(
   state: State,
-  reply_to: Pid,
+  viewer: Viewer,
   reference: Reference,
   text: String,
 ) -> Next(State) {
@@ -919,32 +1052,36 @@ fn pin(
     Error(Nil) ->
       refuse(
         state,
-        reply_to,
+        viewer.pid,
         reference,
         "no_such_process",
         "no live local process has that identifier",
       )
     Ok(pid) ->
-      case find_pin_by_pid(state.pins, pid) {
+      case find_pin_by_pid(owned_pins(state.pins, viewer.pid), pid) {
         Ok(existing) ->
-          answer(state, reply_to, reference, pinned(state, existing))
-        Error(Nil) -> add_pin(state, reply_to, reference, pid, text)
+          answer(state, viewer.pid, reference, pinned(viewer, existing))
+        Error(Nil) -> add_pin(state, viewer, reference, pid, text)
       }
   }
 }
 
+fn owned_pins(pins: List(Pin), owner: Pid) -> List(Pin) {
+  seq.filter(pins, fn(entry) { entry.owner == owner })
+}
+
 fn add_pin(
   state: State,
-  reply_to: Pid,
+  viewer: Viewer,
   reference: Reference,
   pid: Pid,
   text: String,
 ) -> Next(State) {
-  case seq.length(state.pins) >= max_pins {
+  case seq.length(owned_pins(state.pins, viewer.pid)) >= max_pins {
     True ->
       refuse(
         state,
-        reply_to,
+        viewer.pid,
         reference,
         "pin_table_full",
         "the pin table is full",
@@ -956,6 +1093,7 @@ fn add_pin(
           pid: pid,
           text: text,
           monitor: ffi_proc.monitor(ffi_proc.Process, pid),
+          owner: viewer.pid,
         )
 
       answer(
@@ -964,16 +1102,16 @@ fn add_pin(
           pins: [entry, ..state.pins],
           next_pin: state.next_pin + 1,
         ),
-        reply_to,
+        viewer.pid,
         reference,
-        pinned(state, entry),
+        pinned(viewer, entry),
       )
     }
   }
 }
 
-fn pinned(state: State, entry: Pin) -> Term {
-  reply.pinned(state.config.boot_id, entry.id, entry.text)
+fn pinned(viewer: Viewer, entry: Pin) -> Term {
+  reply.pinned(viewer.boot_id, entry.id, entry.text)
 }
 
 // The text came from outside, so the conversion goes through the catching
@@ -1012,15 +1150,22 @@ fn find_pin_by_pid(pins: List(Pin), pid: Pid) -> Result(Pin, Nil) {
   }
 }
 
-fn find_pin(state: State, token: Token) -> Result(Pin, Nil) {
-  case token.boot_id == state.config.boot_id {
-    False -> Error(Nil)
-    True -> find_pin_by_id(state.pins, token.pin_id)
+// A token names a pin only for the viewer it was issued to: its boot id must
+// be the requester's, and the pin must be one the requester owns. Both checks
+// give the same `Error`, so a viewer cannot tell a pin that belongs to another
+// viewer from one that does not exist.
+fn find_pin(state: State, owner: Pid, token: Token) -> Result(Pin, Nil) {
+  case viewers.find(state.viewers, owner) {
+    Error(Nil) -> Error(Nil)
+    Ok(viewer) ->
+      case token.boot_id == viewer.boot_id {
+        False -> Error(Nil)
+        True ->
+          seq.find(owned_pins(state.pins, owner), fn(entry) {
+            entry.id == token.pin_id
+          })
+      }
   }
-}
-
-fn find_pin_by_id(pins: List(Pin), id: Int) -> Result(Pin, Nil) {
-  seq.find(pins, fn(entry) { entry.id == id })
 }
 
 fn unpin(
@@ -1029,7 +1174,7 @@ fn unpin(
   reference: Reference,
   token: Token,
 ) -> Next(State) {
-  case find_pin(state, token) {
+  case find_pin(state, reply_to, token) {
     Error(Nil) ->
       refuse(
         state,
@@ -1054,52 +1199,56 @@ fn unpin(
   }
 }
 
+// The flag is node-wide and the VM counts it per process, so the agent turns
+// it on when the first viewer asks and off when the last one releases, however
+// many viewers ask in between. Each viewer is told only its own request:
+// `collecting` means this viewer asked, and a viewer that did not ask gets no
+// readings even while another viewer holds the flag.
 fn scheduler(
   state: State,
-  reply_to: Pid,
+  viewer: Viewer,
   reference: Reference,
   action: request.SchedulerAction,
 ) -> Next(State) {
-  let next = case action {
-    request.SchedulerOn -> switch_scheduler(state, Collecting)
-    request.SchedulerOff -> switch_scheduler(state, NotCollecting)
-    request.SchedulerRead -> state
+  let wanted = case action {
+    request.SchedulerOn -> Collecting
+    request.SchedulerOff -> NotCollecting
+    request.SchedulerRead -> viewer.scheduler
   }
+  let #(updated, switch) =
+    viewers.set_scheduler(state.viewers, viewer.pid, wanted)
 
-  answer(next, reply_to, reference, scheduler_reply(next))
-}
+  apply_switch(switch)
 
-fn switch_scheduler(state: State, wanted: Scheduler) -> State {
-  case state.scheduler, wanted {
-    NotCollecting, Collecting -> {
-      ffi_vm.enable_scheduler_wall_time()
-
-      State(..state, scheduler: Collecting)
-    }
-    Collecting, NotCollecting -> {
-      ffi_vm.disable_scheduler_wall_time()
-
-      State(..state, scheduler: NotCollecting)
-    }
-    Collecting, Collecting -> state
-    NotCollecting, NotCollecting -> state
-  }
-}
-
-fn scheduler_reply(state: State) -> Term {
-  let readings = ffi_vm.scheduler_wall_time()
-  let rows = case ffi_term.is_atom(readings) {
-    True -> []
-    False -> ffi_term.coerce(readings)
-  }
-
-  reply.scheduler(
-    case state.scheduler {
-      Collecting -> "collecting"
-      NotCollecting -> "not_collecting"
-    },
-    rows,
+  answer(
+    State(..state, viewers: updated),
+    viewer.pid,
+    reference,
+    scheduler_reply(wanted),
   )
+}
+
+fn apply_switch(switch: viewers.Switch) -> Nil {
+  case switch {
+    viewers.TurnOn -> ffi_vm.enable_scheduler_wall_time()
+    viewers.TurnOff -> ffi_vm.disable_scheduler_wall_time()
+    viewers.Keep -> Nil
+  }
+}
+
+fn scheduler_reply(wanted: Scheduler) -> Term {
+  case wanted {
+    NotCollecting -> reply.scheduler("not_collecting", [])
+    Collecting -> {
+      let readings = ffi_vm.scheduler_wall_time()
+      let rows = case ffi_term.is_atom(readings) {
+        True -> []
+        False -> ffi_term.coerce(readings)
+      }
+
+      reply.scheduler("collecting", rows)
+    }
+  }
 }
 
 // ----------------------------------------------------------------- counters
@@ -1116,9 +1265,10 @@ fn start_counters(
   let started = {
     use _ <- fallible.then(check_probe_room(state))
     use resolved <- fallible.then(resolve_patterns(patterns, []))
-    use selection <- fallible.then(select(state, targets))
+    use selection <- fallible.then(select(state, reply_to, targets))
     use probe <- fallible.then(start_probe(
       state,
+      reply_to,
       resolved,
       mode,
       selection,
@@ -1146,6 +1296,7 @@ fn start_counters(
 
 fn start_probe(
   state: State,
+  owner: Pid,
   patterns: List(counters.Pattern),
   mode: CounterMode,
   selection: counters.Selection,
@@ -1154,6 +1305,7 @@ fn start_probe(
   case
     counters.start(
       state.next_probe,
+      owner,
       ffi_proc.self(),
       patterns,
       mode,
@@ -1260,12 +1412,13 @@ fn resolve_name(name: String, code: String) -> Result(Atom, Failure) {
 
 fn select(
   state: State,
+  owner: Pid,
   targets: request.Targets,
 ) -> Result(counters.Selection, Failure) {
   case targets {
     request.AllProcesses -> Ok(counters.EveryProcess)
     request.PinnedProcesses(tokens) -> {
-      use pids <- fallible.then(pids_of(state, tokens, []))
+      use pids <- fallible.then(pids_of(state, owner, tokens, []))
 
       Ok(counters.TheseProcesses(pids))
     }
@@ -1274,14 +1427,15 @@ fn select(
 
 fn pids_of(
   state: State,
+  owner: Pid,
   tokens: List(Token),
   acc: List(Pid),
 ) -> Result(List(Pid), Failure) {
   case tokens {
     [] -> Ok(seq.reverse(acc))
     [token, ..rest] ->
-      case find_pin(state, token) {
-        Ok(entry) -> pids_of(state, rest, [entry.pid, ..acc])
+      case find_pin(state, owner, token) {
+        Ok(entry) -> pids_of(state, owner, rest, [entry.pid, ..acc])
         Error(Nil) ->
           Error(Failure(
             "stale_pin",
@@ -1291,8 +1445,11 @@ fn pids_of(
   }
 }
 
-fn find_probe(probes: List(Probe), id: Int) -> Result(Probe, Nil) {
-  seq.find(probes, fn(probe) { probe.id == id })
+// A probe id names a probe only for the viewer that started it, so another
+// viewer's read, stop or memory request finds nothing and gets the same
+// `no_such_probe` as an id that was never issued.
+fn find_probe(probes: List(Probe), owner: Pid, id: Int) -> Result(Probe, Nil) {
+  seq.find(probes, fn(probe) { probe.id == id && probe.owner == owner })
 }
 
 fn read_counters(
@@ -1301,7 +1458,7 @@ fn read_counters(
   reference: Reference,
   id: Int,
 ) -> Next(State) {
-  case find_probe(state.probes, id) {
+  case find_probe(state.probes, reply_to, id) {
     Error(Nil) ->
       refuse(
         state,
@@ -1324,7 +1481,7 @@ fn read_counter_memory(
   reference: Reference,
   id: Int,
 ) -> Next(State) {
-  case find_probe(state.probes, id) {
+  case find_probe(state.probes, reply_to, id) {
     Error(Nil) ->
       refuse(
         state,
@@ -1349,7 +1506,7 @@ fn stop_counters(
   reference: Reference,
   id: Int,
 ) -> Next(State) {
-  case find_probe(state.probes, id) {
+  case find_probe(state.probes, reply_to, id) {
     Error(Nil) ->
       refuse(
         state,
@@ -1426,7 +1583,7 @@ fn start_stacks(
   let started = {
     use _ <- fallible.then(check_probe_room(state))
     use _ <- fallible.then(check_stack_room(state))
-    use pids <- fallible.then(pids_of(state, tokens, []))
+    use pids <- fallible.then(pids_of(state, reply_to, tokens, []))
     use sampler_pid <- fallible.then(
       start_sampler(sampler.Config(
         agent: ffi_proc.self(),
@@ -1447,6 +1604,7 @@ fn start_stacks(
       let probe =
         StackProbe(
           id: state.next_probe,
+          owner: reply_to,
           sampler: sampler_pid,
           monitor: ffi_proc.monitor(ffi_proc.Process, sampler_pid),
           deadline_at_ms: ffi_proc.now_ms() + duration_ms,
@@ -1490,9 +1648,10 @@ fn start_sampler(config: sampler.Config) -> Result(Pid, Failure) {
 
 fn find_stack_probe(
   probes: List(StackProbe),
+  owner: Pid,
   id: Int,
 ) -> Result(StackProbe, Nil) {
-  seq.find(probes, fn(probe) { probe.id == id })
+  seq.find(probes, fn(probe) { probe.id == id && probe.owner == owner })
 }
 
 // A read is answered by the sampler, which holds the aggregate. The agent
@@ -1503,7 +1662,7 @@ fn read_stacks(
   reference: Reference,
   id: Int,
 ) -> Next(State) {
-  case find_stack_probe(state.stacks, id) {
+  case find_stack_probe(state.stacks, reply_to, id) {
     Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
     Ok(probe) -> {
       sampler.read(probe.sampler, reply_to, reference)
@@ -1522,7 +1681,7 @@ fn stop_stacks(
   reference: Reference,
   id: Int,
 ) -> Next(State) {
-  case find_stack_probe(state.stacks, id) {
+  case find_stack_probe(state.stacks, reply_to, id) {
     Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
     Ok(probe) -> {
       let _ = ffi_proc.demonitor(probe.monitor, [ffi_proc.Flush])
@@ -1626,7 +1785,7 @@ fn start_calltrace(
   let started = {
     use _ <- fallible.then(check_probe_room(state))
     use _ <- fallible.then(check_trace_room(state, CallTree))
-    use pids <- fallible.then(trace_targets(state, tokens))
+    use pids <- fallible.then(trace_targets(state, reply_to, tokens))
     use resolved <- fallible.then(resolve_patterns(patterns, []))
     use launched <- fallible.then(
       launch(calltrace.start(
@@ -1650,7 +1809,7 @@ fn start_calltrace(
     Error(failure) -> answer(state, reply_to, reference, reply.failure(failure))
     Ok(#(launched, targets)) ->
       answer(
-        add_trace(state, CallTree, launched, duration_ms),
+        add_trace(state, reply_to, CallTree, launched, duration_ms),
         reply_to,
         reference,
         reply.calltrace_started(
@@ -1679,7 +1838,7 @@ fn start_events(
   let started = {
     use _ <- fallible.then(check_probe_room(state))
     use _ <- fallible.then(check_trace_room(state, SchedulingGc))
-    use pids <- fallible.then(trace_targets(state, tokens))
+    use pids <- fallible.then(trace_targets(state, reply_to, tokens))
     use launched <- fallible.then(
       launch(activitytrace.start(
         activitytrace.Config(
@@ -1703,7 +1862,7 @@ fn start_events(
     Error(failure) -> answer(state, reply_to, reference, reply.failure(failure))
     Ok(#(launched, targets)) ->
       answer(
-        add_trace(state, SchedulingGc, launched, duration_ms),
+        add_trace(state, reply_to, SchedulingGc, launched, duration_ms),
         reply_to,
         reference,
         reply.events_started(
@@ -1732,9 +1891,10 @@ fn launch(
 // traced: a probe over the tracer or a sampler would measure the probe.
 fn trace_targets(
   state: State,
+  owner: Pid,
   tokens: List(Token),
 ) -> Result(List(Pid), Failure) {
-  use pids <- fallible.then(pids_of(state, tokens, []))
+  use pids <- fallible.then(pids_of(state, owner, tokens, []))
 
   let distinct = distinct_pids(pids, [])
 
@@ -1786,6 +1946,7 @@ fn check_trace_room(state: State, kind: TraceKind) -> Result(Nil, Failure) {
 // nowhere else.
 fn add_trace(
   state: State,
+  owner: Pid,
   kind: TraceKind,
   launched: tracer.Launched,
   duration_ms: Int,
@@ -1793,6 +1954,7 @@ fn add_trace(
   let probe =
     TraceProbe(
       id: state.next_probe,
+      owner: owner,
       kind: kind,
       tracer: launched.tracer,
       monitor: ffi_proc.monitor(ffi_proc.Process, launched.tracer),
@@ -1809,10 +1971,13 @@ fn add_trace(
 
 fn find_trace(
   probes: List(TraceProbe),
+  owner: Pid,
   id: Int,
   kind: TraceKind,
 ) -> Result(TraceProbe, Nil) {
-  seq.find(probes, fn(probe) { probe.id == id && probe.kind == kind })
+  seq.find(probes, fn(probe) {
+    probe.id == id && probe.kind == kind && probe.owner == owner
+  })
 }
 
 // A read is answered by the tracer, which holds the aggregate. The agent only
@@ -1824,7 +1989,7 @@ fn read_trace(
   id: Int,
   kind: TraceKind,
 ) -> Next(State) {
-  case find_trace(state.traces, id, kind) {
+  case find_trace(state.traces, reply_to, id, kind) {
     Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
     Ok(probe) -> {
       tracer.read(probe.tracer, reply_to, reference)
@@ -1846,7 +2011,7 @@ fn stop_trace(
   id: Int,
   kind: TraceKind,
 ) -> Next(State) {
-  case find_trace(state.traces, id, kind) {
+  case find_trace(state.traces, reply_to, id, kind) {
     Error(Nil) -> refuse_no_such_probe(state, reply_to, reference)
     Ok(probe) -> {
       let _ = ffi_proc.demonitor(probe.monitor, [ffi_proc.Flush])
@@ -1974,26 +2139,30 @@ fn drop_dead_traces(
 
 // ------------------------------------------------------------ time and exits
 
-// Each tick enforces two deadlines: the viewer's lease, and every running
-// probe's own. A probe past its deadline is collected and its session
-// destroyed in this handler, so no probe outlives its deadline by more than a
-// tick. The tick is re-armed last, after everything it may have changed.
+// Each tick enforces two deadlines: every viewer's lease, and every running
+// probe's own. A viewer past its lease is released alone; the others keep
+// their attach, and the agent stops only when none is left. A probe past its
+// deadline is collected and its session destroyed in this handler, so no probe
+// outlives its deadline by more than a tick. The tick is re-armed last, after
+// everything it may have changed.
 fn on_tick(state: State) -> Next(State) {
   let now = ffi_proc.now_ms()
 
-  case now - state.last_heard_ms > state.config.lease_ms {
-    True -> stop(state, LeaseExpired)
-    False -> {
+  let released = seq.fold(viewers.lapsed(state.viewers, now), state, release)
+
+  case released.viewers {
+    [] -> Stop(Normal, released)
+    _ -> {
       let _ =
         ffi_proc.send_after(tick_ms, ffi_proc.self(), ffi_term.coerce(Tick))
 
       Noreply(
         State(
-          ..state,
-          probes: expire_probes(state.probes, now),
-          stacks: expire_stacks(state.stacks, now),
-          traces: expire_traces(state.traces, now),
-          workers: expire_workers(state.workers, now),
+          ..released,
+          probes: expire_probes(released.probes, now),
+          stacks: expire_stacks(released.stacks, now),
+          traces: expire_traces(released.traces, now),
+          workers: expire_workers(released.workers, now),
         ),
       )
     }
@@ -2061,9 +2230,9 @@ fn drop_one_finished(oldest_first: List(Probe)) -> List(Probe) {
 }
 
 fn on_down(monitor: Reference, reason: Term, state: State) -> Next(State) {
-  case monitor == state.viewer_monitor {
-    True -> stop(state, ViewerGone)
-    False ->
+  case viewers.find_by_monitor(state.viewers, monitor) {
+    Ok(viewer) -> release_viewers(state, [viewer])
+    Error(Nil) ->
       Noreply(
         State(
           ..on_worker_down(monitor, reason, state),
@@ -2123,54 +2292,123 @@ fn worker_failure(worker: Worker, reason: Term) -> Failure {
 
 // ----------------------------------------------------------------- teardown
 
-fn detach(state: State, reply_to: Pid, reference: Reference) -> Next(State) {
-  let stopped = shut_down(state)
+// An explicit detach releases the requesting viewer. The last viewer's detach
+// stops the agent, and its reply is `detached`, which is also the signal that
+// the modules are about to be unloaded. A detach that leaves other viewers
+// attached is answered `left` with how many remain, because the agent and its
+// modules stay.
+fn detach(
+  state: State,
+  viewer: Viewer,
+  reply_to: Pid,
+  reference: Reference,
+) -> Next(State) {
+  let released = release(state, viewer)
 
-  reply.send(reply_to, reference, reply.detached(cause_name(Requested)))
+  case released.viewers {
+    [] -> {
+      reply.send(reply_to, reference, reply.detached("requested"))
 
-  Stop(Normal, stopped)
-}
+      Stop(Normal, released)
+    }
+    remaining -> {
+      reply.send(reply_to, reference, reply.left(seq.length(remaining)))
 
-fn stop(state: State, cause: Cause) -> Next(State) {
-  let _ = cause_name(cause)
-
-  Stop(Normal, shut_down(state))
-}
-
-fn cause_name(cause: Cause) -> String {
-  case cause {
-    Requested -> "requested"
-    ViewerGone -> "viewer_gone"
-    NodeDown -> "node_down"
-    LeaseExpired -> "lease_expired"
+      Noreply(released)
+    }
   }
 }
 
-// Releases everything the agent holds on the target and returns the state
-// with nothing left to release, so that running it a second time, from
-// `terminate` after a request-driven stop, does nothing. Sessions are
-// destroyed explicitly rather than left to the VM, because the explicit path
-// is the one that has already returned by the time the viewer is told.
+// Releases the viewers an event named, and stops the agent if that leaves
+// none. The count is read from the state this handler holds, so the decision
+// is made in mailbox order: a `join` handled earlier is already in the table,
+// and one handled later finds no agent.
+fn release_viewers(state: State, victims: List(Viewer)) -> Next(State) {
+  let released = seq.fold(victims, state, release)
+
+  case released.viewers {
+    [] -> Stop(Normal, released)
+    _ -> Noreply(released)
+  }
+}
+
+// Releases everything one viewer holds on the target, and nothing another
+// viewer holds: its sessions, samplers, tracers and workers are destroyed or
+// killed, its pins are dropped, and its claim on the accounting flag is given
+// up (the flag itself goes off only if no other viewer wants it). A viewer
+// that detaches is released before it is answered, so the explicit path has
+// already returned by the time the viewer is told.
+fn release(state: State, viewer: Viewer) -> State {
+  let pid = viewer.pid
+  let owned = fn(owner: Pid) { owner == pid }
+  let foreign = fn(owner: Pid) { owner != pid }
+
+  seq.each(
+    seq.filter(state.probes, fn(probe) { owned(probe.owner) }),
+    counters.destroy,
+  )
+  seq.each(
+    seq.filter(state.stacks, fn(probe) { owned(probe.owner) }),
+    kill_stack_probe,
+  )
+  seq.each(
+    seq.filter(state.traces, fn(probe) { owned(probe.owner) }),
+    kill_trace,
+  )
+  seq.each(
+    seq.filter(state.workers, fn(worker) { owned(worker.reply_to) }),
+    kill_worker,
+  )
+  seq.each(owned_pins(state.pins, viewer.pid), fn(entry) {
+    ffi_proc.demonitor(entry.monitor, [ffi_proc.Flush])
+  })
+
+  let _ = ffi_proc.demonitor(viewer.monitor, [ffi_proc.Flush])
+  let _ = ffi_proc.monitor_node_flag(viewer.node, ffi_term.coerce(False))
+  let #(remaining, switch) = viewers.leave(state.viewers, viewer.pid)
+
+  apply_switch(switch)
+
+  State(
+    ..state,
+    viewers: remaining,
+    probes: seq.filter(state.probes, fn(probe) { foreign(probe.owner) }),
+    stacks: seq.filter(state.stacks, fn(probe) { foreign(probe.owner) }),
+    traces: seq.filter(state.traces, fn(probe) { foreign(probe.owner) }),
+    workers: seq.filter(state.workers, fn(worker) { foreign(worker.reply_to) }),
+    pins: seq.filter(state.pins, fn(entry) { foreign(entry.owner) }),
+  )
+}
+
+fn kill_worker(worker: Worker) -> Nil {
+  let _ = ffi_proc.exit_with(worker.pid, ffi_proc.Kill)
+
+  Nil
+}
+
+// Releases everything the agent holds on the target, for every viewer, and
+// returns the state with nothing left to release, so that running it a second
+// time, from `terminate` after a request-driven stop, does nothing. Sessions
+// are destroyed explicitly rather than left to the VM, because the explicit
+// path is the one that has already returned by the time a viewer is told.
 fn shut_down(state: State) -> State {
   seq.each(state.probes, counters.destroy)
   seq.each(state.stacks, kill_stack_probe)
   seq.each(state.traces, kill_trace)
-  seq.each(state.workers, fn(worker) {
-    ffi_proc.exit_with(worker.pid, ffi_proc.Kill)
-  })
+  seq.each(state.workers, kill_worker)
 
-  case state.scheduler {
+  case viewers.demand(state.viewers) {
     Collecting -> ffi_vm.disable_scheduler_wall_time()
     NotCollecting -> Nil
   }
 
   State(
     ..state,
+    viewers: [],
     probes: [],
     stacks: [],
     traces: [],
     workers: [],
     pins: [],
-    scheduler: NotCollecting,
   )
 }

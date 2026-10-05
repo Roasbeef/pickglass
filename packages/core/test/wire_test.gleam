@@ -295,6 +295,29 @@ pub fn small_replies_decode_test() {
     == Ok(wire.Unpinned(4))
 }
 
+// Sharing the agent adds one request and two replies. A viewer that joins is
+// told how many viewers the agent serves, and a viewer that detaches from a
+// shared agent is told how many remain.
+pub fn shared_attach_wire_round_trips_test() {
+  assert wire.decode_reply(tuple([text("joined"), num(2)]))
+    == Ok(wire.Joined(2))
+  assert wire.decode_reply(tuple([text("left"), num(1)])) == Ok(wire.Left(1))
+  assert is_error(wire.decode_reply(tuple([text("joined"), text("two")])))
+  assert is_error(wire.decode_reply(tuple([text("left")])))
+  assert wire.encode_extended_request(
+      text("pid"),
+      text("ref"),
+      wire.AskJoin("pg1", 30_000, "abc"),
+    )
+    == tuple([
+      text("pg"),
+      num(1),
+      text("pid"),
+      text("ref"),
+      tuple([text("join"), text("pg1"), num(30_000), text("abc")]),
+    ])
+}
+
 pub fn pinned_reply_builds_a_pin_token_test() {
   let body = tuple([text("pinned"), text("boot-1"), num(3), text("<0.91.0>")])
 

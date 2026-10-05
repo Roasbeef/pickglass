@@ -2,23 +2,31 @@
 
 ## Purpose
 
-The agent pickglass pushes into a running BEAM node. The viewer loads these
-modules with `code:load_binary` over distribution and starts `server` as one
-registered process, `pickglass_agent`. The agent is the only code that touches
-the target's runtime: it owns every trace session, the pin table, the
-`scheduler_wall_time` reference and the census workers, because those die with
-the process that created them and a request over distribution runs in a
-temporary process.
+The agent pickglass pushes into a running BEAM node. The first viewer loads
+these modules with `code:load_binary` over distribution and starts `server` as
+one registered process, `pickglass_agent`. Later viewers do not load anything:
+they ask the running agent to `join`, so one agent serves up to eight viewers.
+The agent is the only code that touches the target's runtime: it owns every
+trace session, the pin table, the `scheduler_wall_time` reference and the
+census workers, because those die with the process that created them and a
+request over distribution runs in a temporary process.
 
 ## Key Types
 
-`request.Request` is the closed set of things the viewer may ask, and
-`request.decode` the total decoder for it. `server.State` holds the pins, the
+`request.Request` is the closed set of things a viewer may ask, and
+`request.decode` the total decoder for it; a `join` is classified apart from it
+(`request.Joining`) because it is the one message an unadmitted pid may send.
+`viewers.Viewer` is one attached viewer: its link process, boot id, monitor,
+node, lease and whether it asked for `scheduler_wall_time`; `viewers` is the
+pure table of them and the rules about joining, leases and the shared flag.
+`server.State` holds the viewers, the pins, the
 counters probes (`counters.Probe`, whose `Running` phase holds the only strong
 trace session handle), the stack probes (`server.StackProbe`, a sampler pid and
 its monitor), the event probes (`server.TraceProbe`, a tracer pid, its monitor
-and, while it runs, the only strong session handle of its kind), the workers and
-the lease. `census.Report`, `ets.Report`, `binaries.Report`,
+and, while it runs, the only strong session handle of its kind) and the workers.
+Every pin, probe and worker carries an `owner`, the link process of the viewer
+that made it, and every lookup by token or probe id also names the requester,
+so a viewer finds only its own. `census.Report`, `ets.Report`, `binaries.Report`,
 `supervision.Report`, `detail.Detail`, `system.Report`,
 `counters.Snapshot`, `stacks.Built`, `calltree.Built` and `activity.Built` are
 the bounded results.
@@ -54,8 +62,9 @@ Requests are `{<<"pg">>, 1, ReplyTo, Ref, {<<"tag">>, ...}}` messages sent to
 the registered name; replies are `{<<"pg">>, 1, Ref, {<<"tag">>, ...}}`. The
 wire uses binaries, integers, lists, tuples and `true`/`false` only, never an
 atom, so the agent creates no atom from input. Names in a probe spec resolve
-with `binary_to_existing_atom`. The agent monitors the viewer's link process
-and node, and ticks every 250 ms to enforce a lease and probe deadlines. A tracer sends
+with `binary_to_existing_atom`. The agent monitors each viewer's link
+process and node, and ticks every 250 ms to enforce each viewer's lease and the
+probe deadlines. A tracer sends
 the agent `{pickglass_trace_finished, ProbeId}` when its probe stops, and the
 agent sends it the session's weak handle `{pickglass_trace_session, Weak}`,
 `{pickglass_trace_read, ReplyTo, Ref}` and `{pickglass_trace_stop, ReplyTo, Ref}`.
@@ -79,15 +88,45 @@ that overruns its deadline is `deadline`. A reply the viewer never receives
 the viewer's own request timeout, and `ping`'s `probes` count tells it what
 is still running.
 
+**Viewers.** A viewer is known by the process its requests name as `ReplyTo`,
+its link process. The first viewer is the one that starts the agent, with
+`start({ViewerPid, BootId, LeaseMs, Build})` (`Build` is a digest of the beams
+the viewer pushed). Another viewer sends `{<<"join">>, BootId, LeaseMs, Build}`
+and gets `{<<"joined">>, Viewers}`, the count the agent serves now. `BootId` is
+that viewer's own, and its pin tokens carry it; `LeaseMs` is clamped to 1,000
+to 600,000. The join is answered only if `Build` equals the build the agent was
+started with. A request from a pid that has not joined is refused
+`not_attached`, and a `join` is the only message an unadmitted pid may send.
+Errors: `build_mismatch` (the detail is the running build, and nothing is
+replaced), `too_many_viewers` (eight are attached), `already_attached`.
+- Pins, probes and workers belong to the viewer that made them. A token, probe
+  id or `unpin` from another viewer is `stale_pin` or `no_such_probe`, the same
+  answers as for something that was never issued.
+- The limits that protect the target are counted over the node, not per
+  viewer: two probes in all (one stack probe, one call tree probe, one events
+  probe), four workers, and the finished-probe bounds. A viewer that finds the
+  slot taken gets `probe_limit` or `busy`. A pin table is bounded per viewer
+  (64).
+- `scheduler` `on` and `off` are per viewer, and the agent holds the one
+  `scheduler_wall_time` reference on the node while any viewer wants it: it is
+  turned on for the first request and off after the last release. A viewer's
+  reply says whether it asked, and it gets readings only if it did.
+- A viewer ends by `detach`, by its link process or node dying, or by its
+  lease lapsing. Only that viewer's pins, probes, samplers, tracers and workers
+  are released. The agent exits, and unloads its modules, when none is left.
+
 **Existing, unchanged.** `{<<"ping">>}` gives `{<<"pong">>, BootId, Node,
-OtpRelease, UptimeMs, Pins, Probes}` (`Probes` counts running counters probes,
-running stack probes and running call tree and events probes). `{<<"memory">>}` gives `{<<"memory">>,
+OtpRelease, UptimeMs, Pins, Probes}` for the requesting viewer (`BootId` is its
+own, `Pins` its pins, and `Probes` counts its running counters probes, stack
+probes and call tree and events probes). `{<<"memory">>}` gives `{<<"memory">>,
 [{Category, Bytes}], WordSize, ProcessCount, OtpRelease, ErtsVersion,
 SchedulersOnline}`. `{<<"pin">>, PidText}` gives `{<<"pinned">>, BootId,
 PinId, PidText}`; `{<<"unpin">>, Token}` gives `{<<"unpinned">>, PinId}`.
 `{<<"scheduler">>, <<"on"|"off"|"read">>}` gives `{<<"scheduler">>,
 <<"collecting"|"not_collecting">>, [{Id, Active, Total}]}`. `{<<"detach">>}`
-gives `{<<"detached">>, Reason}` after every session and sampler is gone.
+gives `{<<"detached">>, Reason}` after every session and sampler is gone, when
+the detaching viewer was the last, and `{<<"left">>, Remaining}` when other
+viewers are still attached and the agent stays.
 
 **Census.** `{<<"census">>, MaxScanned, TopK}` gives `{<<"census">>,
 Coverage, Rows, Owners}`, the shape of the first wire release, which does not
@@ -464,9 +503,23 @@ and dropped 60,000 to 70,000.
   by more than a second is killed by the agent's tick with its session. At most
   one call tree probe and one events probe run at once, and both count toward
   the two-probe limit. A probe never traces the agent's own processes.
-- Every exit path calls `shut_down`: detach, viewer link DOWN, `nodedown`,
-  lease expiry, and `terminate` after a crash. A kill signal skips it and the
-  VM destroys the sessions because the agent was their sole holder.
+- Every exit path of one viewer calls `release`: detach, link DOWN, `nodedown`
+  and lease expiry. `release` touches nothing another viewer owns, and the
+  agent stops when it leaves none. The decision is made in the agent's own
+  mailbox order with the count it holds, so a `join` handled before the last
+  `detach` keeps the agent and its modules, and one handled after it gets no
+  answer from an agent that is stopping; the viewer then waits for the
+  janitor and pushes a fresh agent. `terminate` after a crash calls
+  `shut_down` for every viewer. A kill signal skips both and the VM destroys
+  the sessions because the agent was their sole holder.
+- Nothing the agent owns on the node is counted per request: the
+  `scheduler_wall_time` reference is one per process, so the agent switches it
+  on the first viewer's request and off the last viewer's release
+  (`viewers.Switch`), never once per viewer. Every probe has its own trace
+  session, so viewers share no session.
+- Joining never loads code. A viewer of another build is refused, because a
+  second push would reload the modules under a live agent and a purge kills
+  the processes running the old code.
 - The janitor calls no other agent module while it runs, because it purges
   them. It purges its own module last, which ends it.
 - Calls that can raise on outside input go through `ffi_safe.call`.
@@ -477,7 +530,12 @@ and dropped 60,000 to 70,000.
 - `make agent-e2e` pushes the beams into a peer and checks teardown after a
   killed link, a detach and `kill -9` of the viewer, with counters, stack, call
   tree and events probes running, and drives each event probe to its window, its
-  budget and, with flooding targets, to `overrun`.
+  budget and, with flooding targets, to `overrun`. It also attaches several
+  viewers to one agent and checks that each sees only its own pins and probes,
+  that one viewer's detach, `kill -9` or lease expiry leaves the others
+  running, that a build mismatch, the cap and a non-viewer are refused, that a
+  join and the last detach are decided in mailbox order, and that after the
+  last viewer leaves nothing remains.
 
 ## Deep Docs
 

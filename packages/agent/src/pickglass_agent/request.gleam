@@ -39,6 +39,11 @@
 //// | read or stop an events probe | `{<<"read_events">>, Id}`, `{<<"stop_events">>, Id}` |
 //// | detach | `{<<"detach">>}` |
 ////
+//// One more message has the same envelope and is not a `Request`: a sender
+//// that is not yet a viewer asks to become one with `{<<"join">>, BootId,
+//// LeaseMs, Build}`. It is classified apart as `Joining` because it is the
+//// only message the agent answers from a pid it has not admitted.
+////
 //// `Targets` is `{<<"all">>}` or `{<<"pins">>, [{BootId, PinId}]}`. Numeric
 //// limits are clamped to the agent's own bounds rather than refused, so a
 //// viewer asking for more than the budget allows gets the budget and sees
@@ -90,6 +95,12 @@ pub const max_stack_samples = 200_000
 
 /// The most rows one census returns.
 pub const max_top_k = 200
+
+/// The shortest and longest lease a viewer may ask for, in milliseconds.
+pub const min_lease_ms = 1000
+
+/// The longest lease a viewer may ask for, in milliseconds.
+pub const max_lease_ms = 600_000
 
 /// The most processes a counters probe may target by pin.
 pub const max_targets = 16
@@ -214,6 +225,18 @@ pub type Decoded {
   /// refusal goes to the sender, so a viewer with a bug learns of it.
   Malformed(reply_to: Pid, reference: Reference, detail: String)
 
+  /// A sender asking to become a viewer of this agent. `build` must be the
+  /// identity of the build that is running, `boot_id` is the identifier the
+  /// sender's pin tokens will carry, and the lease is clamped to the agent's
+  /// bounds.
+  Joining(
+    reply_to: Pid,
+    reference: Reference,
+    boot_id: String,
+    lease_ms: Int,
+    build: String,
+  )
+
   /// Not a request. Another subsystem's message, or noise.
   NotARequest
 }
@@ -248,10 +271,22 @@ fn decode_envelope(message: Term) -> Decoded {
   let reply_to: Pid = ffi_term.coerce(ffi_term.element(3, message))
   let reference: Reference = ffi_term.coerce(ffi_term.element(4, message))
 
-  case decode_request(ffi_term.element(5, message)) {
-    Ok(request) -> Valid(Envelope(reply_to, reference, request))
-    Error(detail) -> Malformed(reply_to, reference, detail)
+  let body = ffi_term.element(5, message)
+
+  case is_join(body) {
+    True -> decode_join(reply_to, reference, body)
+    False ->
+      case decode_request(body) {
+        Ok(request) -> Valid(Envelope(reply_to, reference, request))
+        Error(detail) -> Malformed(reply_to, reference, detail)
+      }
   }
+}
+
+fn is_join(body: Term) -> Bool {
+  ffi_term.is_tuple(body)
+  && ffi_term.tuple_size(body) >= 1
+  && ffi_term.element(1, body) == ffi_term.coerce("join")
 }
 
 fn decode_request(term: Term) -> Result(Request, String) {
@@ -333,6 +368,32 @@ fn decode_binaries(term: Term) -> Result(Request, String) {
   use top_k <- fallible.then(integer(ffi_term.element(3, term), "top_k"))
 
   Ok(Binaries(token, clamp(top_k, 1, binaries.max_top_k)))
+}
+
+fn decode_join(reply_to: Pid, reference: Reference, body: Term) -> Decoded {
+  let fields = {
+    use _ <- fallible.then(case ffi_term.tuple_size(body) == 4 {
+      True -> Ok(Nil)
+      False -> Error("a join takes a boot id, a lease and a build")
+    })
+    use boot_id <- fallible.then(name(ffi_term.element(2, body), "boot id"))
+    use lease <- fallible.then(integer(ffi_term.element(3, body), "lease"))
+    use build <- fallible.then(name(ffi_term.element(4, body), "build"))
+
+    Ok(#(boot_id, lease, build))
+  }
+
+  case fields {
+    Ok(#(boot_id, lease, build)) ->
+      Joining(
+        reply_to,
+        reference,
+        boot_id,
+        clamp(lease, min_lease_ms, max_lease_ms),
+        build,
+      )
+    Error(detail) -> Malformed(reply_to, reference, detail)
+  }
 }
 
 fn decode_pin(term: Term) -> Result(Request, String) {

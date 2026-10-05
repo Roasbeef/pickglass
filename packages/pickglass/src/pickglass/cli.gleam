@@ -922,6 +922,10 @@ fn describe_unload(unload: attach.Unload) -> String {
       <> " agent modules were still loaded after the wait"
     attach.ModulesUnreadable ->
       "detached; the target could not be asked whether the agent unloaded"
+    attach.OtherViewersRemain(count) ->
+      "detached; the agent stays on the target for the other viewers ("
+      <> int.to_string(count)
+      <> " attached)"
   }
 }
 

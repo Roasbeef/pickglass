@@ -7,6 +7,8 @@
 //// compiler's entry module for running the agent as a program; it imports
 //// the standard library and is never pushed.
 
+import gleam/bit_array
+import gleam/crypto
 import gleam/list
 import gleam/result
 import gleam/string
@@ -57,6 +59,41 @@ pub fn load(directory: Result(String, Nil)) -> Result(List(Beam), String) {
       )
     Ok(found) -> read_all(found)
   }
+}
+
+/// The identity of the build these beams make: a digest of every module's
+/// name and bytes, in module order, so the same beams give the same identity
+/// whatever order they were read in, and any change to any module gives a
+/// different one. The agent keeps it from its start, and a viewer is allowed
+/// to join a running agent only when the two are equal, because joining
+/// shares the code already loaded and never replaces it. The text is the
+/// first sixteen hexadecimal digits of a SHA-256, which is long enough to
+/// tell builds apart and short enough to put in a message.
+///
+/// ## Examples
+///
+/// ```gleam
+/// agent_beams.identity([Beam("pickglass_agent@server", "server.beam", <<1>>)])
+/// // -> "3f0e5d21a8c4b697"
+/// ```
+pub fn identity(beams: List(Beam)) -> String {
+  let digest =
+    beams
+    |> list.sort(fn(a, b) { string.compare(a.module, b.module) })
+    |> list.map(fn(beam) {
+      bit_array.concat([
+        bit_array.from_string(beam.module),
+        <<0>>,
+        beam.bytes,
+      ])
+    })
+    |> bit_array.concat
+    |> crypto.hash(crypto.Sha256, _)
+
+  digest
+  |> bit_array.base16_encode
+  |> string.lowercase
+  |> string.slice(0, 16)
 }
 
 fn read_all(directory: String) -> Result(List(Beam), String) {

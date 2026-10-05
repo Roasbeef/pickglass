@@ -65,6 +65,19 @@ pub fn pong(
   ffi_term.coerce(#("pong", boot_id, node, otp_release, uptime_ms, pins, probes))
 }
 
+/// The answer to `join`: the viewer is attached, and `viewers` is how many
+/// viewers the agent now serves, this one included.
+pub fn joined(viewers: Int) -> Term {
+  ffi_term.coerce(#("joined", viewers))
+}
+
+/// The answer to a `detach` that leaves other viewers attached: `remaining`
+/// is how many there are. The agent and its modules stay. The detach that
+/// leaves none is answered `detached`.
+pub fn left(remaining: Int) -> Term {
+  ffi_term.coerce(#("left", remaining))
+}
+
 /// The answer to `memory`: the VM's categories in bytes plus the facts
 /// needed to read them.
 pub fn memory(
