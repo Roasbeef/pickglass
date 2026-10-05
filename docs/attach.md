@@ -129,7 +129,8 @@ them, load code into them. This is called distribution, and every tool that
 inspects a running node from outside (`observer`, `rpc`, remote shells) uses
 it. Pickglass does too: it starts its own small, hidden node, connects to
 yours, loads its agent into your node, and asks the agent for readings. When
-it detaches, the agent unloads itself.
+it detaches, the agent unloads itself, unless another pickglass is still
+attached to the same node (see "More than one viewer" below).
 
 Four things have to line up for a connection.
 
@@ -273,8 +274,35 @@ this page.
 
 OTP 28 or newer, and nothing else installed. Pickglass refuses an older
 node with a message. It loads its agent into the node at attach time, and
-unloads it at detach; if pickglass is killed, the agent notices within about
-30 seconds and removes what it set up.
+unloads it when the last pickglass detaches; if a pickglass is killed, the
+agent notices within about 30 seconds and removes what that pickglass set up.
+
+### More than one viewer
+
+Several pickglass processes can be attached to one node at once, for example
+one `pickglass open` and a few `pickglass attach` or `pickglass profile`
+commands run by scripts or other agents. They share one agent in the target.
+The first to attach loads the agent into the node. Each later one asks the
+running agent to admit it, and does not load anything.
+
+An agent admits a viewer only if it was built from the same agent modules as
+the viewer carries. Pickglass compares a digest of those modules, and a viewer
+of another build is refused, with both builds named, because loading its
+modules would replace code the other viewers are running. To use a different
+build, detach the other viewers first, or attach with the same pickglass
+build as theirs.
+
+Each viewer has its own pins, probes and `scheduler_wall_time` request, and
+cannot read, stop or release another viewer's. When a viewer detaches, dies or
+stops answering for 30 seconds, only what that viewer holds is released. The
+agent unloads itself when the last viewer leaves. An agent serves at most 8
+viewers at once.
+
+Some limits protect the target and so are shared, not per viewer: at most two
+probes run on a node at once, one of them a stack probe, and at most four
+reads such as a census run at once. A viewer that starts a probe while another
+viewer holds the slot is refused with `probe_limit` and can try again when
+that probe ends.
 
 Two optional features improve what you see:
 
@@ -405,6 +433,9 @@ Each failure has one message.
 | `the target runs OTP N; pickglass needs OTP 28 or newer` | Upgrade the target. |
 | `refusing HOST: pickglass attaches to nodes on this machine only for now` | The host is not local. |
 | `--node cannot be combined with --state-dir or --pid` | Pick one way to find the target. |
+| `a pickglass agent of another build is already attached to this node (it runs build A; this viewer carries build B)` | Another pickglass is attached, and it was built with different agent modules from this one. Detach it, or use the same pickglass build. Several viewers of the same build can attach at once. |
+| `the pickglass agent on this node already serves the most viewers it allows` | Eight viewers are attached. Detach one and try again. |
+| `another pickglass viewer has held this node's attach claim for too long` | Another viewer was loading the agent into the node and did not finish. The claim expires on its own after 15 seconds; try again. |
 
 OTP reports a refused connection by a bare `false`, whether the cookie
 differs, the naming mode differs, or the node is down. Pickglass tells these
