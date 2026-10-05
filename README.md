@@ -177,7 +177,8 @@ one call trace taken on a live Loom strand.
 In the call graph each node shows its flat (self) time and its cumulative time
 with their shares of the total, shade follows the cumulative share, and an edge
 shows its weight when that is at least 2% of the total. It is scaled to fit the
-frame by default, with a "Full size" toggle. On the 46-function trace we
+frame by default; the zoom buttons step it between 25% and 400% of its natural
+size, and a "Wheel zoom" switch lets the mouse wheel do the same. On the 46-function trace we
 measured, the unfocused graph was 3,233 px wide at natural size and 1,196 px
 drawn to fit, and a focus step brought it to 902 px.
 
