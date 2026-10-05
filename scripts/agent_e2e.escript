@@ -9,6 +9,13 @@
 %%% destroyed, `scheduler_wall_time` is released, every agent module is
 %%% unloaded, and no process of the target was touched.
 %%%
+%%% The agent is shared: any number of viewers (up to a cap) attach to one
+%%% agent, each known by the link process its requests name as the reply
+%%% address. The scenarios at the end of `main` check that they share the code
+%%% and the target but not each other's pins and probes, that one viewer's
+%%% detach, death or lease expiry releases only its own resources, and that the
+%%% last one out leaves nothing behind.
+%%%
 %%% It is an escript rather than a gleeunit test because the test needs
 %%% distribution and OS processes: gleeunit runs in a node with neither.
 %%% The target peer loads no Gleam module, so the run also shows the agent
@@ -16,6 +23,10 @@
 %%%
 %%% Usage: escript scripts/agent_e2e.escript <agent ebin directory>
 -mode(compile).
+
+%% The identity every viewer in these scenarios carries. A real viewer sends a
+%% digest of the beams it pushes; the agent only compares the two.
+-define(BUILD, <<"e2e-build-1">>).
 
 main([Ebin]) ->
     %% The controller's name is unique per run, so two runs on one machine,
@@ -33,6 +44,12 @@ main([Ebin]) ->
     scenario_detach(Target, Work),
     scenario_viewer_killed(Target, Work),
     scenario_viewer_killed_tracing(Target, Work),
+    scenario_shared_attach(Target, Work),
+    scenario_shared_cap(Target, Work),
+    scenario_shared_detach(Target, Work),
+    scenario_shared_viewer_killed(Target, Work),
+    scenario_shared_lease(Target, Work),
+    scenario_shared_join_race(Target, Work),
     scenario_attach_again(Target),
     peer:stop(TPeer),
     finish().
@@ -42,7 +59,7 @@ main([Ebin]) ->
 %% The viewer's link process is killed: the agent must tear everything down.
 scenario_link_killed(Target, Work) ->
     heading("link process killed"),
-    Link = spawn(fun() -> receive stop -> ok end end),
+    Link = local_viewer(),
     Agent = start_agent(Target, Link),
     {<<"pong">>, <<"boot-1">>, _, _, _, _, _} = ask(Target, {<<"ping">>}),
     {<<"memory">>, Cats, _, _, _, _, _} = ask(Target, {<<"memory">>}),
@@ -636,7 +653,7 @@ scenario_binaries(Target) ->
 %% An explicit detach replies after the session is destroyed.
 scenario_detach(Target, Work) ->
     heading("explicit detach"),
-    Link = spawn(fun() -> receive stop -> ok end end),
+    Link = local_viewer(),
     Agent = start_agent(Target, Link),
     {<<"counters_started">>, _, _, _} =
         ask(Target, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>, {<<"all">>}, 60000}),
@@ -661,10 +678,11 @@ scenario_viewer_killed(Target, Work) ->
     heading("viewer killed with SIGKILL"),
     {ok, _VPeer, V} = peer:start(#{name => node_name("pg_e2e_viewer"),
                                   args => ["-hidden", "-setcookie", "pg_e2e_cookie"]}),
-    VLink = erpc:call(V, erlang, spawn, [timer, sleep, [infinity]]),
+    VLink = remote_viewer(V),
+    put(viewer, VLink),
     {ok, Agent} = erpc:call(V, erpc, call,
                             [Target, pickglass_agent@server, start,
-                             [{VLink, <<"boot-2">>, 30000}]]),
+                             [{VLink, <<"boot-2">>, 30000, ?BUILD}]]),
     check("the agent started from the viewer node", is_pid(Agent)),
     {<<"scheduler">>, <<"collecting">>, _} = ask(Target, {<<"scheduler">>, <<"on">>}),
     {<<"counters_started">>, _, _, _} =
@@ -692,10 +710,11 @@ scenario_viewer_killed_tracing(Target, Work) ->
     heading("viewer killed with SIGKILL while tracing"),
     {ok, _VPeer, V} = peer:start(#{name => node_name("pg_e2e_viewer"),
                                   args => ["-hidden", "-setcookie", "pg_e2e_cookie"]}),
-    VLink = erpc:call(V, erlang, spawn, [timer, sleep, [infinity]]),
+    VLink = remote_viewer(V),
+    put(viewer, VLink),
     {ok, Agent} = erpc:call(V, erpc, call,
                             [Target, pickglass_agent@server, start,
-                             [{VLink, <<"boot-3">>, 30000}]]),
+                             [{VLink, <<"boot-3">>, 30000, ?BUILD}]]),
     {<<"pinned">>, <<"boot-3">>, Pin, _} = ask(Target, {<<"pin">>, pid_text(Target, Work)}),
     {<<"calltrace_started">>, _, 1, _, _, _, _} =
         ask(Target, {<<"start_calltrace">>, [{<<"boot-3">>, Pin}],
@@ -713,12 +732,291 @@ scenario_viewer_killed_tracing(Target, Work) ->
     torn_down(Target, Agent, Work, "after kill -9 of the viewer mid trace"),
     ok.
 
+%% ----------------------------------------------------------- shared attach
+
+%% Two viewers on one agent. Both read, each holds its own pins and probes,
+%% and neither can use, read, stop or release what the other holds. The
+%% refusals that keep the agent's code and size fixed are checked here too.
+scenario_shared_attach(Target, Work) ->
+    heading("two viewers share one agent"),
+    V1 = local_viewer(),
+    V2 = local_viewer(),
+    V3 = local_viewer(),
+    Agent = start_agent(Target, V1),
+    {<<"joined">>, 2} = join_as(Target, V2, <<"boot-2">>),
+    check("a second viewer joins the running agent", true),
+    {<<"pong">>, <<"boot-1">>, _, _, _, 0, 0} = ask_as(Target, V1, {<<"ping">>}),
+    {<<"pong">>, <<"boot-2">>, _, _, _, 0, 0} = ask_as(Target, V2, {<<"ping">>}),
+    check("each viewer's ping carries its own boot id", true),
+    {<<"memory">>, _, _, _, _, _, _} = ask_as(Target, V1, {<<"memory">>}),
+    {<<"memory">>, _, _, _, _, _, _} = ask_as(Target, V2, {<<"memory">>}),
+    {<<"census">>, _, R1, _} = ask_as(Target, V1, {<<"census">>, 100000, 5}),
+    {<<"census">>, _, R2, _} = ask_as(Target, V2, {<<"census">>, 100000, 5}),
+    check("both viewers read a census", length(R1) >= 1 andalso length(R2) >= 1),
+    %% Refusals that protect the running code and the agent's size.
+    {<<"error">>, <<"build_mismatch">>, Detail} =
+        ask_as(Target, V3, {<<"join">>, <<"boot-3">>, 30000, <<"another-build">>}),
+    check("a viewer of another build is refused and told the running build",
+          binary:match(Detail, ?BUILD) =/= nomatch),
+    {<<"error">>, <<"already_attached">>, _} = join_as(Target, V2, <<"boot-2">>),
+    check("a viewer that is attached cannot join twice", true),
+    {<<"error">>, <<"not_attached">>, _} = ask_as(Target, V3, {<<"ping">>}),
+    {<<"error">>, <<"not_attached">>, _} =
+        ask_as(Target, V3, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
+                            {<<"all">>}, 1000}),
+    check("a process that never joined is refused every request", true),
+    %% Pins belong to the viewer that made them.
+    {<<"pinned">>, <<"boot-1">>, P1, _} =
+        ask_as(Target, V1, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"pinned">>, <<"boot-2">>, P2, _} =
+        ask_as(Target, V2, {<<"pin">>, pid_text(Target, Work)}),
+    check("two viewers pinning one process hold two pins", P1 =/= P2),
+    {<<"pong">>, _, _, _, _, 1, _} = ask_as(Target, V1, {<<"ping">>}),
+    {<<"pong">>, _, _, _, _, 1, _} = ask_as(Target, V2, {<<"ping">>}),
+    check("a ping counts only the pins of its viewer", true),
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask_as(Target, V2, {<<"process_detail">>, {<<"boot-1">>, P1}}),
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask_as(Target, V2, {<<"process_detail">>, {<<"boot-2">>, P1}}),
+    {<<"error">>, <<"stale_pin">>, _} = ask_as(Target, V2, {<<"unpin">>, {<<"boot-1">>, P1}}),
+    {<<"error">>, <<"stale_pin">>, _} = ask_as(Target, V2, {<<"unpin">>, {<<"boot-2">>, P1}}),
+    check("a viewer can neither use nor release another viewer's pin", true),
+    {<<"process_detail">>, _, _, _, _, _, _, _} =
+        ask_as(Target, V1, {<<"process_detail">>, {<<"boot-1">>, P1}}),
+    check("the pin the other viewer tried to release is still usable", true),
+    %% Probes belong to the viewer that started them. The two-probe limit is
+    %% counted over the node, so the third probe of any viewer is refused.
+    {<<"counters_started">>, C1, _, _} =
+        ask_as(Target, V1, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
+                            {<<"pins">>, [{<<"boot-1">>, P1}]}, 60000}),
+    {<<"stacks_started">>, S1, 1, _, _, _} =
+        ask_as(Target, V1, {<<"start_stacks">>, [{<<"boot-1">>, P1}], 200, 60000, 100000}),
+    {<<"error">>, <<"probe_limit">>, _} =
+        ask_as(Target, V2, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
+                            {<<"pins">>, [{<<"boot-2">>, P2}]}, 1000}),
+    check("the probe limit is counted over the node, not per viewer", true),
+    {<<"pong">>, _, _, _, _, _, 2} = ask_as(Target, V1, {<<"ping">>}),
+    {<<"pong">>, _, _, _, _, _, 0} = ask_as(Target, V2, {<<"ping">>}),
+    check("a ping counts only the probes of its viewer", true),
+    Others = [{<<"read_counters">>, C1}, {<<"read_counter_memory">>, C1},
+              {<<"stop_counters">>, C1}, {<<"read_stacks">>, S1},
+              {<<"stop_stacks">>, S1}, {<<"read_calltrace">>, S1},
+              {<<"stop_calltrace">>, S1}, {<<"read_events">>, S1},
+              {<<"stop_events">>, S1}],
+    check("another viewer can read or stop none of a viewer's probes",
+          lists:all(fun(Req) ->
+                        case ask_as(Target, V2, Req) of
+                            {<<"error">>, <<"no_such_probe">>, _} -> true;
+                            _ -> false
+                        end
+                    end, Others)),
+    timer:sleep(300),
+    {<<"counters">>, C1, <<"running">>, _, _, _, CRows} =
+        ask_as(Target, V1, {<<"read_counters">>, C1}),
+    check("the owner still reads its counters after the attempts",
+          lists:any(fun({_, _, _, Calls, _}) -> Calls > 0 end, CRows)),
+    {<<"stacks">>, S1, <<"running">>, _, {_, _, _, _, Samples, _, _, _, _, _, _, _}, _, _} =
+        ask_as(Target, V1, {<<"read_stacks">>, S1}),
+    check("the owner still reads its stack probe", Samples > 0),
+    {<<"counters">>, C1, _, _, _, _, _} = ask_as(Target, V1, {<<"stop_counters">>, C1}),
+    {<<"stacks">>, S1, _, _, _, _, _} = ask_as(Target, V1, {<<"stop_stacks">>, S1}),
+    %% The accounting flag is shared and counted: it stays on until the last
+    %% viewer that asked for it lets go.
+    {<<"scheduler">>, <<"collecting">>, Rows1} = ask_as(Target, V1, {<<"scheduler">>, <<"on">>}),
+    {<<"scheduler">>, <<"collecting">>, _} = ask_as(Target, V2, {<<"scheduler">>, <<"on">>}),
+    check("the first viewer to ask gets readings", length(Rows1) >= 1),
+    {<<"scheduler">>, <<"not_collecting">>, []} = ask_as(Target, V1, {<<"scheduler">>, <<"off">>}),
+    check("the flag stays on while another viewer holds it",
+          is_list(statistics_on(Target))),
+    {<<"scheduler">>, <<"not_collecting">>, []} = ask_as(Target, V1, {<<"scheduler">>, <<"read">>}),
+    {<<"scheduler">>, <<"collecting">>, Rows2} = ask_as(Target, V2, {<<"scheduler">>, <<"read">>}),
+    check("a viewer is told its own request, not the flag", length(Rows2) >= 1),
+    {<<"scheduler">>, <<"not_collecting">>, _} = ask_as(Target, V2, {<<"scheduler">>, <<"off">>}),
+    check("the flag goes off when the last viewer releases it",
+          wait_until(fun() -> statistics_on(Target) =:= undefined end, 2000)),
+    exit(V3, kill),
+    exit(V2, kill),
+    exit(V1, kill),
+    torn_down(Target, Agent, Work, "after both viewers' links died").
+
+%% The cap on viewers is enforced and a viewer that dies frees its place.
+scenario_shared_cap(Target, Work) ->
+    heading("the number of viewers is capped"),
+    First = local_viewer(),
+    Agent = start_agent(Target, First),
+    Rest = [local_viewer() || _ <- lists:seq(2, 8)],
+    Joined = [join_as(Target, V, <<"boot-n">>) || V <- Rest],
+    check("seven more viewers join, eight in all",
+          Joined =:= [{<<"joined">>, N} || N <- lists:seq(2, 8)]),
+    Ninth = local_viewer(),
+    {<<"error">>, <<"too_many_viewers">>, _} = join_as(Target, Ninth, <<"boot-9">>),
+    check("a ninth viewer is refused with a clear code", true),
+    exit(hd(Rest), kill),
+    check("a viewer whose link died frees its place",
+          wait_until(fun() ->
+                         case join_as(Target, Ninth, <<"boot-9">>) of
+                             {<<"joined">>, _} -> true;
+                             _ -> false
+                         end
+                     end, 3000)),
+    [exit(V, kill) || V <- [First, Ninth | tl(Rest)]],
+    torn_down(Target, Agent, Work, "after every viewer's link died").
+
+%% One viewer detaches while another keeps working: only the detaching
+%% viewer's probes and pins go, and the agent and its modules stay.
+scenario_shared_detach(Target, Work) ->
+    heading("one viewer detaches, the other keeps working"),
+    V1 = local_viewer(),
+    V2 = local_viewer(),
+    Agent = start_agent(Target, V1),
+    {<<"joined">>, 2} = join_as(Target, V2, <<"boot-2">>),
+    {<<"pinned">>, <<"boot-1">>, P1, _} =
+        ask_as(Target, V1, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"pinned">>, <<"boot-2">>, P2, _} =
+        ask_as(Target, V2, {<<"pin">>, pid_text(Target, Work)}),
+    Before = length(agent_processes(Target)),
+    {<<"counters_started">>, _, _, _} =
+        ask_as(Target, V1, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
+                            {<<"pins">>, [{<<"boot-1">>, P1}]}, 60000}),
+    {<<"stacks_started">>, _, 1, _, _, _} =
+        ask_as(Target, V1, {<<"start_stacks">>, [{<<"boot-1">>, P1}], 100, 60000, 100000}),
+    {<<"scheduler">>, <<"collecting">>, _} = ask_as(Target, V1, {<<"scheduler">>, <<"on">>}),
+    check("the first viewer holds a trace session, a sampler and the flag",
+          length(sessions(Target)) =:= 2
+          andalso length(agent_processes(Target)) =:= Before + 1
+          andalso is_list(statistics_on(Target))),
+    {<<"left">>, 1} = ask_as(Target, V1, {<<"detach">>}),
+    check("a detach that leaves another viewer is answered with the count left", true),
+    check("the detaching viewer's trace session is already gone",
+          length(sessions(Target)) =:= 1),
+    check("the detaching viewer's sampler is gone",
+          wait_until(fun() -> length(agent_processes(Target)) =:= Before end, 2000)),
+    check("the detaching viewer's hold on the flag is released",
+          statistics_on(Target) =:= undefined),
+    check("the agent and its modules stay for the remaining viewer",
+          erpc:call(Target, erlang, is_process_alive, [Agent])
+          andalso agent_modules_loaded(Target)),
+    {<<"error">>, <<"not_attached">>, _} = ask_as(Target, V1, {<<"ping">>}),
+    check("the viewer that detached is no longer attached", true),
+    {<<"process_detail">>, _, _, _, _, _, _, _} =
+        ask_as(Target, V2, {<<"process_detail">>, {<<"boot-2">>, P2}}),
+    {<<"counters_started">>, Id2, _, _} =
+        ask_as(Target, V2, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
+                            {<<"pins">>, [{<<"boot-2">>, P2}]}, 60000}),
+    timer:sleep(200),
+    {<<"counters">>, Id2, <<"running">>, _, _, _, _} =
+        ask_as(Target, V2, {<<"read_counters">>, Id2}),
+    check("the remaining viewer pins, probes and reads as before", true),
+    {<<"detached">>, <<"requested">>} = ask_as(Target, V2, {<<"detach">>}),
+    check("the last viewer's detach is answered detached", true),
+    torn_down(Target, Agent, Work, "after the last viewer detached"),
+    exit(V1, kill),
+    exit(V2, kill).
+
+%% A viewer's OS process is killed with SIGKILL while it holds a probe and
+%% another viewer holds one too: the dead viewer's is released through the
+%% monitor and the survivor's keeps running.
+scenario_shared_viewer_killed(Target, Work) ->
+    heading("one of two viewers killed with SIGKILL mid probe"),
+    {ok, _VPeer, V} = peer:start(#{name => node_name("pg_e2e_viewer"),
+                                  args => ["-hidden", "-setcookie", "pg_e2e_cookie"]}),
+    Survivor = local_viewer(),
+    Agent = start_agent(Target, Survivor),
+    VLink = remote_viewer(V),
+    {<<"joined">>, 2} = join_as(Target, VLink, <<"boot-2">>),
+    {<<"pinned">>, <<"boot-1">>, SPin, _} =
+        ask_as(Target, Survivor, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"pinned">>, <<"boot-2">>, VPin, _} =
+        ask_as(Target, VLink, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"stacks_started">>, SId, 1, _, _, _} =
+        ask_as(Target, Survivor, {<<"start_stacks">>, [{<<"boot-1">>, SPin}], 100, 60000, 1000000}),
+    {<<"counters_started">>, _, _, _} =
+        ask_as(Target, VLink, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
+                               {<<"pins">>, [{<<"boot-2">>, VPin}]}, 60000}),
+    {<<"scheduler">>, <<"collecting">>, _} = ask_as(Target, VLink, {<<"scheduler">>, <<"on">>}),
+    timer:sleep(300),
+    {<<"stacks">>, SId, <<"running">>, _, {_, _, _, _, Mid, _, _, _, _, _, _, _}, _, _} =
+        ask_as(Target, Survivor, {<<"read_stacks">>, SId}),
+    check("both viewers have a probe running", Mid > 0 andalso length(sessions(Target)) =:= 2),
+    OsPid = erpc:call(V, os, getpid, []),
+    _ = os:cmd("kill -9 " ++ OsPid),
+    check("the killed viewer's trace session is destroyed",
+          wait_until(fun() -> length(sessions(Target)) =:= 1 end, 5000)),
+    check("the killed viewer's hold on the flag is released",
+          wait_until(fun() -> statistics_on(Target) =:= undefined end, 5000)),
+    {<<"pong">>, _, _, _, _, 1, 1} = ask_as(Target, Survivor, {<<"ping">>}),
+    timer:sleep(300),
+    {<<"stacks">>, SId, <<"running">>, _, {_, _, _, _, Later, _, _, _, _, _, _, _}, _, _} =
+        ask_as(Target, Survivor, {<<"read_stacks">>, SId}),
+    check("the surviving viewer's probe is still running and sampling", Later > Mid),
+    check("the agent and its modules stay for the surviving viewer",
+          erpc:call(Target, erlang, is_process_alive, [Agent]) andalso agent_modules_loaded(Target)),
+    exit(Survivor, kill),
+    torn_down(Target, Agent, Work, "after the last viewer died").
+
+%% A viewer that stops pinging loses its lease and is released alone.
+scenario_shared_lease(Target, Work) ->
+    heading("a lapsed lease releases only that viewer"),
+    V1 = local_viewer(),
+    V2 = local_viewer(),
+    Agent = start_agent(Target, V1),
+    {<<"joined">>, 2} = ask_as(Target, V2, {<<"join">>, <<"boot-2">>, 1000, ?BUILD}),
+    {<<"pinned">>, <<"boot-2">>, P2, _} =
+        ask_as(Target, V2, {<<"pin">>, pid_text(Target, Work)}),
+    {<<"counters_started">>, _, _, _} =
+        ask_as(Target, V2, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
+                            {<<"pins">>, [{<<"boot-2">>, P2}]}, 60000}),
+    check("the second viewer holds a trace session", length(sessions(Target)) =:= 2),
+    %% The first viewer keeps pinging, so only the second's lease runs out.
+    check("the viewer that stopped pinging is released with its session",
+          wait_until(fun() ->
+                         {<<"pong">>, _, _, _, _, _, _} = ask_as(Target, V1, {<<"ping">>}),
+                         length(sessions(Target)) =:= 1
+                     end, 4000)),
+    {<<"error">>, <<"not_attached">>, _} = ask_as(Target, V2, {<<"ping">>}),
+    check("the lapsed viewer is no longer attached", true),
+    check("the agent stays for the viewer that kept pinging",
+          erpc:call(Target, erlang, is_process_alive, [Agent])),
+    {<<"detached">>, <<"requested">>} = ask_as(Target, V1, {<<"detach">>}),
+    torn_down(Target, Agent, Work, "after the remaining viewer detached"),
+    exit(V1, kill),
+    exit(V2, kill).
+
+%% A join and a detach that reach the agent back to back are decided in the
+%% agent's mailbox order, and one controller sending both gives that order. A
+%% join queued before the last detach keeps the agent and its modules; one
+%% queued after it finds an agent that is already stopping and gets no answer,
+%% which is what sends a real viewer back to push a fresh agent.
+scenario_shared_join_race(Target, Work) ->
+    heading("a join and the last detach in either order"),
+    V1 = local_viewer(),
+    V2 = local_viewer(),
+    Agent = start_agent(Target, V1),
+    Join = send_as(Target, V2, {<<"join">>, <<"boot-2">>, 30000, ?BUILD}),
+    Detach = send_as(Target, V1, {<<"detach">>}),
+    {ok, {<<"joined">>, 2}} = recv(Join, 5000),
+    {ok, {<<"left">>, 1}} = recv(Detach, 5000),
+    timer:sleep(500),
+    check("a join handled before the last detach keeps the agent and its modules",
+          erpc:call(Target, erlang, is_process_alive, [Agent]) andalso agent_modules_loaded(Target)),
+    put(viewer, V2),
+    {<<"pong">>, <<"boot-2">>, _, _, _, _, _} = ask(Target, {<<"ping">>}),
+    check("the viewer that joined is served after the other left", true),
+    Detach2 = send_as(Target, V2, {<<"detach">>}),
+    Join2 = send_as(Target, V1, {<<"join">>, <<"boot-1b">>, 30000, ?BUILD}),
+    {ok, {<<"detached">>, <<"requested">>}} = recv(Detach2, 5000),
+    check("a join handled after the last detach gets no answer",
+          recv(Join2, 1500) =:= timeout),
+    torn_down(Target, Agent, Work, "after the last detach beat the join"),
+    exit(V1, kill),
+    exit(V2, kill).
+
 %% After a teardown the node must accept a fresh attach, including one that
 %% reloads the modules the previous agent removed.
 scenario_attach_again(Target) ->
     heading("re-attach after teardown"),
     %% `torn_down` already pushed a fresh copy of the beams.
-    Link = spawn(fun() -> receive stop -> ok end end),
+    Link = local_viewer(),
     _ = start_agent(Target, Link),
     {<<"pong">>, _, _, _, _, _, _} = ask(Target, {<<"ping">>}),
     check("the agent answers after a re-attach", true),
@@ -793,19 +1091,57 @@ push(Target, Beams) ->
         {module, Mod} = erpc:call(Target, code, load_binary, [Mod, File, Bin])
     end, Beams).
 
+%% Start the agent with `Link` as its first viewer, and make that viewer the
+%% one `ask` speaks as.
 start_agent(Target, Link) ->
+    put(viewer, Link),
     {ok, Agent} = erpc:call(Target, pickglass_agent@server, start,
-                            [{Link, <<"boot-1">>, 30000}]),
+                            [{Link, <<"boot-1">>, 30000, ?BUILD}]),
     Agent.
 
-%% Send a request and wait for its reply.
+%% A viewer's link process. The agent knows a viewer by the process its
+%% requests name as the reply address, so every viewer in a scenario has one,
+%% and it forwards each reply to the controller, where the checks run.
+local_viewer() ->
+    Controller = self(),
+    spawn(fun() -> relay(Controller) end).
+
+relay(To) ->
+    receive Msg -> To ! Msg, relay(To) end.
+
+%% The same on another node, so that killing that node's OS process kills the
+%% link the agent monitors.
+remote_viewer(Node) ->
+    _ = load_source(Node, "pg_e2e_relay",
+        "-module(pg_e2e_relay). -export([run/1]). "
+        "run(To) -> receive Msg -> To ! Msg, run(To) end. "),
+    erpc:call(Node, erlang, spawn, [pg_e2e_relay, run, [self()]]).
+
+%% Send a request as the current viewer and wait for its reply.
 ask(Target, Request) ->
-    Ref = make_ref(),
-    {pickglass_agent, Target} ! {<<"pg">>, 1, self(), Ref, Request},
-    receive
-        {<<"pg">>, 1, Ref, Body} -> Body
-    after 10000 -> error({no_reply, Request})
+    ask_as(Target, get(viewer), Request).
+
+ask_as(Target, Viewer, Request) ->
+    Ref = send_as(Target, Viewer, Request),
+    case recv(Ref, 10000) of
+        {ok, Body} -> Body;
+        timeout -> error({no_reply, Request})
     end.
+
+%% Send without waiting, so that two requests can be queued back to back.
+send_as(Target, Viewer, Request) ->
+    Ref = make_ref(),
+    {pickglass_agent, Target} ! {<<"pg">>, 1, Viewer, Ref, Request},
+    Ref.
+
+recv(Ref, Timeout) ->
+    receive
+        {<<"pg">>, 1, Ref, Body} -> {ok, Body}
+    after Timeout -> timeout
+    end.
+
+join_as(Target, Viewer, Boot) ->
+    ask_as(Target, Viewer, {<<"join">>, Boot, 30000, ?BUILD}).
 
 %% The agent reads pids as text local to its own node, which is how the
 %% census writes them; a remote pid's own text carries a node index.
