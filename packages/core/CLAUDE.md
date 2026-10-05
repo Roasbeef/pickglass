@@ -158,4 +158,4 @@ None. This package defines wire and capture vocabulary but sends nothing.
 - `docs/design/concept-opus.md` sections 4 and 5 describe the data model
   and the analyses in detail.
 
-`wire.Request` has an `Extended(ExtendedRequest)` variant so the viewer's single `ask` carries the requests added after the first wire release. `policy.Checkpoint` records a viewer-side checkpoint (Observe) and `SelfMeasure` is plan-first.
+`wire.Request` has an `Extended(ExtendedRequest)` variant so the viewer's single `ask` carries the requests added after the first wire release. `ExtendedRequest.AskJoin` and the replies `Joined` and `Left` belong to the shared attach: a viewer joins an agent that is already running instead of pushing one, and a detach that leaves other viewers on the agent is answered `Left` and not `Detached`. `policy.Checkpoint` records a viewer-side checkpoint (Observe) and `SelfMeasure` is plan-first.

@@ -107,6 +107,15 @@ pub type Reply {
   )
   EventsReport(EventsSnapshot)
   Detached(reason: String)
+
+  /// The answer to a `join`: the viewer is attached to the agent that was
+  /// already running, and `viewers` counts the viewers it serves now.
+  Joined(viewers: Int)
+
+  /// The answer to a `detach` that left other viewers attached. The agent
+  /// and its modules stay; `remaining` is how many viewers are still on it.
+  /// The detach that leaves none is answered `Detached`.
+  Left(remaining: Int)
   Refused(code: String, detail: String)
 }
 
@@ -943,6 +952,14 @@ fn reply_decoder() -> Decoder(Reply) {
     "detached" -> {
       use reason <- decode.field(1, decode.string)
       decode.success(Detached(reason))
+    }
+    "joined" -> {
+      use viewers <- decode.field(1, decode.int)
+      decode.success(Joined(viewers))
+    }
+    "left" -> {
+      use remaining <- decode.field(1, decode.int)
+      decode.success(Left(remaining))
     }
     "error" -> {
       use code <- decode.field(1, decode.string)
@@ -2336,6 +2353,14 @@ pub type ExtendedRequest {
 
   /// Stop an events probe and return its result.
   AskStopEvents(probe_id: Int)
+
+  /// Attach as one more viewer of the agent already running on the node. The
+  /// agent accepts only a viewer that carries the same `build` it runs, so the
+  /// code every viewer relies on is never replaced under another. `boot_id`
+  /// is the identifier this viewer's pin tokens will carry and `lease_ms` how
+  /// long the agent may go without hearing from it. The viewer sends this
+  /// instead of pushing and starting an agent when one is registered.
+  AskJoin(boot_id: String, lease_ms: Int, build: String)
 }
 
 /// Write an extended request as the envelope the agent reads, exactly as
@@ -2423,6 +2448,12 @@ fn extended_body(request: ExtendedRequest) -> Dynamic {
       ])
     AskReadEvents(id) -> tagged("read_events", [dynamic.int(id)])
     AskStopEvents(id) -> tagged("stop_events", [dynamic.int(id)])
+    AskJoin(boot_id, lease_ms, build) ->
+      tagged("join", [
+        dynamic.string(boot_id),
+        dynamic.int(lease_ms),
+        dynamic.string(build),
+      ])
   }
 }
 
