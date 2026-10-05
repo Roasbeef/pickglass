@@ -100,6 +100,17 @@ release-smoke: ## Boot build/release/pickglass with no erl on PATH and check its
 dist: release release-smoke ## Package the release as a tarball under dist/
 	@scripts/dist.sh
 
+# Everything a person needs to type `pickglass` in a directory: a fresh copy
+# of the release under $(PREFIX)/lib/pickglass, a `current` link to it and a
+# launcher in $(PREFIX)/bin. A reinstall adds a directory and repoints the
+# link, so it never rewrites files under a viewer that is already running.
+# scripts/install.sh says why, and why old copies are kept.
+PREFIX ?= $(HOME)/.local
+
+.PHONY: install
+install: release release-smoke ## Install pickglass under PREFIX (default ~/.local)
+	@PREFIX="$(PREFIX)" scripts/install.sh
+
 # -------------------------------------------------------------------- misc
 
 .PHONY: deps
