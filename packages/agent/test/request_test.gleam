@@ -22,6 +22,7 @@ fn decoded_request(message: Term) -> Result(request.Request, String) {
   case request.decode(message) {
     Valid(envelope) -> Ok(envelope.request)
     Malformed(_, _, detail) -> Error(detail)
+    request.Joining(_, _, _, _, _) -> Error("a join")
     NotARequest -> Error("not a request")
   }
 }
@@ -398,4 +399,41 @@ pub fn owners_detail_decodes_test() {
   assert decoded_request(envelope(#("owners_detail", 999_999_999, 0)))
     == Ok(request.OwnersDetail(request.max_scan, 1))
   assert decoded_request(envelope(#("owners_detail", 5))) |> is_error
+}
+
+// A join carries the viewer's boot id, its lease and the build it expects, and
+// the lease is clamped to the agent's bounds like every other number.
+pub fn join_decodes_and_clamps_its_lease_test() {
+  assert decoded_join(envelope(#("join", "pg1", 30_000, "abc")))
+    == Ok(#("pg1", 30_000, "abc"))
+  assert decoded_join(envelope(#("join", "pg1", 1, "abc")))
+    == Ok(#("pg1", request.min_lease_ms, "abc"))
+  assert decoded_join(envelope(#("join", "pg1", 999_999_999, "abc")))
+    == Ok(#("pg1", request.max_lease_ms, "abc"))
+}
+
+pub fn a_malformed_join_is_refused_test() {
+  assert decoded_join(envelope(#("join", "pg1", "soon", "abc")))
+    == Error("lease is not an integer")
+  assert decoded_join(envelope(#("join", "pg1", 30_000)))
+    == Error("a join takes a boot id, a lease and a build")
+  assert decoded_join(envelope(#("join", 7, 30_000, "abc")))
+    == Error("boot id is not a short binary")
+}
+
+// A join is classified apart from the ordinary requests, so `dispatch` never
+// has to decide whether a pid that is not attached may send one.
+pub fn a_join_is_not_an_ordinary_request_test() {
+  assert decoded_request(envelope(#("join", "pg1", 30_000, "abc")))
+    == Error("a join")
+}
+
+fn decoded_join(message: Term) -> Result(#(String, Int, String), String) {
+  case request.decode(message) {
+    request.Joining(_, _, boot_id, lease_ms, build) ->
+      Ok(#(boot_id, lease_ms, build))
+    request.Malformed(_, _, detail) -> Error(detail)
+    Valid(_) -> Error("an ordinary request")
+    NotARequest -> Error("not a request")
+  }
 }
