@@ -72,8 +72,16 @@ writes a `pickglass` launcher into `$PREFIX/bin`. `PREFIX` defaults to
 `~/.local`; add its `bin` directory to `PATH` to type `pickglass`. Each install
 makes a new directory and never rewrites an old one, so installing again while a
 viewer is running does not touch that viewer's files; the new copy is used the
-next time it starts. Old directories are kept, because the install cannot tell
-whether a viewer still runs from one. Delete them by hand when none does.
+next time it starts. After it repoints `current`, the install removes the old
+directories it no longer needs. It keeps the one `current` now points at, the
+one it pointed at before, and any directory a live process uses: a process whose
+command line contains the directory's path, or (when `lsof` is installed) one
+with a file open or its working directory inside it. It prints a line for each
+directory it removes, a total, and a line for each one it kept because it is in
+use. If `ps` or `lsof` fails it removes nothing. Only directories named
+`pickglass.` plus eight letters or digits are touched, and symlinks and
+everything else under `lib/pickglass` are left alone. Do not run two installs
+into one prefix at the same time.
 
 `open` joins the target, prints a single-use URL on `127.0.0.1`, and serves the
 pages until you press Ctrl-C or use the Detach button. `--save-dir`, `--port`

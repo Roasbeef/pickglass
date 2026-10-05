@@ -16,9 +16,12 @@
 # where it was started from, so it must be reached by its real path, and the
 # shim resolves the `current` link with `pwd -P` on every start to get one.
 #
-# Old release directories are kept on purpose: this script cannot tell
-# whether a viewer is still running from one, and removing it would crash
-# that viewer. They can be deleted by hand once nothing uses them.
+# Once the new tree is in place the script removes the old ones it no longer
+# needs, through scripts/prune_installs.sh. It keeps the tree `current` now
+# points at, the tree it pointed at before this install, and any tree a live
+# process still uses, found from the process command lines and, when lsof is
+# installed, from open files and working directories. If that check cannot be
+# made, nothing is removed. The prune script's header has the exact rules.
 #
 # This is the same shape as Loom's scripts/install.sh, scaled down to one
 # release with no client variants.
@@ -78,6 +81,10 @@ chmod 755 "$SHIM_STAGE"
 # needs -h to replace a symlink to a directory and not move the new link into
 # the directory it points at. Either way a reader sees the old or the new
 # tree, never a gap.
+PREV=
+if [ -L "$LIB/current" ]; then
+  PREV=$(basename -- "$(readlink "$LIB/current")")
+fi
 ln -s "$TREE" "$STAGE/current"
 if ! mv -T -f "$STAGE/current" "$LIB/current" 2>/dev/null; then
   mv -h -f "$STAGE/current" "$LIB/current"
@@ -89,7 +96,12 @@ mv -f "$SHIM_STAGE" "$BIN/pickglass"
 
 printf 'installed:\n  %s\n' "$BIN/pickglass"
 printf 'release tree:\n  %s\n' "$TREE"
-echo "Old release trees are kept; delete them by hand once no viewer runs from one."
+
+# A failed prune leaves extra trees on disk, which is not worth failing an
+# install that has already succeeded.
+"$ROOT/scripts/prune_installs.sh" "$LIB" "$(basename -- "$TREE")" "$PREV" ||
+  echo "install.sh: pruning old release trees failed; they were left in place" >&2
+
 case ":$PATH:" in
   *":$BIN:"*) ;;
   *) printf 'Add %s to PATH, or run the launcher there directly.\n' "$BIN" ;;
