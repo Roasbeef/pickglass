@@ -34,7 +34,8 @@ Loom originals, so a rule change is made in Loom first.
 - `tools/lint` — Loom's house lint, vendored. Keep local changes to it at
   the minimum; a rule that needs changing is changed in Loom first and
   re-vendored.
-- `scripts/` — the gates (`lint.sh`, `doc_check.sh`) and the release build.
+- `scripts/` — the gates (`lint.sh`, `doc_check.sh`), the release build and
+  the installer (`install.sh`).
 - `docs/` — the style guides.
 
 ## Literate code
@@ -107,6 +108,13 @@ runs. `make fmt` before committing. `make release` builds a self-contained
 release into `build/release/pickglass` with the runtime bundled, `make
 release-smoke` boots it with no `erl` on `PATH`, and `make dist` packages it
 into `dist/`.
+
+`make install` runs both, then copies the release into a fresh directory
+under `$(PREFIX)/lib/pickglass`, repoints the `current` link there and writes
+the `$(PREFIX)/bin/pickglass` shim (`PREFIX` defaults to `~/.local`). It never
+rewrites or prunes an earlier copy, because a running VM loads modules from its
+release directory for as long as it lives. Keep that property if you change
+`scripts/install.sh`.
 
 **Verify a gate by its own exit code.** Backgrounding
 `make check > log; echo $?; tail log` reports `tail`'s status, not `make`'s,
