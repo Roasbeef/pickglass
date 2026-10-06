@@ -367,14 +367,20 @@ fn safe_name(name: String) -> String {
 
 // ------------------------------------------------------------------ socket
 
+// A socket is `Starting` from the moment mist hands it over until its
+// component is up. The component is started by a message the socket sends
+// itself, never in `on_init`, because mist gives `on_init` a fixed half
+// second and then refuses the upgrade. Mounting starts a feeder that
+// subscribes to the hub and a Lustre runtime, which is real work, and on a
+// loaded machine it overran that limit.
 type Phase {
+  Starting(frames: Subject(json.Json))
   Serving(running: seam.Running, principal: String)
-  Failed
 }
 
 type Signal {
+  Mount
   Frame(json.Json)
-  Fail
 }
 
 fn socket(
@@ -439,19 +445,32 @@ fn upgrade(
         |> process.select_map(frames, Frame)
         |> process.select(signals)
 
-      case
-        config.mount(page, slug, fn(encoded) { process.send(frames, encoded) })
-      {
-        Ok(running) -> #(Serving(running, principal), Some(selector))
-        Error(_) -> {
-          process.send(signals, Fail)
+      // The first message the socket handles is the one that mounts. The
+      // browser sends nothing until it has the component's first frame, so
+      // no frame can be waiting ahead of it.
+      process.send(signals, Mount)
 
-          #(Failed, Some(selector))
-        }
-      }
+      #(Starting(frames), Some(selector))
     },
     handler: fn(phase, message, connection) {
       case phase, message {
+        // Start the component, outside `on_init`'s deadline. The callback
+        // delivers frames to the socket's own subject, and whatever it sends
+        // while the component starts is handled once the mount returns.
+        Starting(frames), mist.Custom(Mount) ->
+          case
+            config.mount(page, slug, fn(encoded) {
+              process.send(frames, encoded)
+            })
+          {
+            Ok(running) -> mist.continue(Serving(running, principal))
+            Error(_) -> mist.stop()
+          }
+
+        // A frame from the browser before the component exists names
+        // nothing to forward to, so it is dropped.
+        Starting(..), mist.Text(_) -> mist.continue(phase)
+
         // A frame from the browser is forwarded only if it is one the
         // client runtime could have sent for this page.
         Serving(running, principal), mist.Text(text) -> {
@@ -477,22 +496,21 @@ fn upgrade(
             Error(_) -> mist.stop()
           }
 
-        Serving(..), mist.Binary(_)
+        Starting(..), mist.Binary(_)
+        | Starting(..), mist.Closed
+        | Starting(..), mist.Shutdown
+        | Starting(..), mist.Custom(Frame(_))
+        | Serving(..), mist.Binary(_)
         | Serving(..), mist.Closed
         | Serving(..), mist.Shutdown
-        | Serving(..), mist.Custom(Fail)
-        | Failed, mist.Text(_)
-        | Failed, mist.Binary(_)
-        | Failed, mist.Closed
-        | Failed, mist.Shutdown
-        | Failed, mist.Custom(_)
+        | Serving(..), mist.Custom(Mount)
         -> mist.stop()
       }
     },
     on_close: fn(phase) {
       case phase {
         Serving(running, _) -> running.shutdown()
-        Failed -> Nil
+        Starting(_) -> Nil
       }
     },
   )
