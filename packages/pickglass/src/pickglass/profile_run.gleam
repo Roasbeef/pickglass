@@ -716,7 +716,7 @@ fn allocation_of(
 ) -> Result(Report, Failure) {
   case probe.state {
     probe_book.Finished(
-      cost: capture.ProbeCost(counters: Some(facts), ..),
+      cost: capture.ProbeCost(counters: Some(facts), wall_ms:, ..),
       outcome:,
       ..,
     ) ->
@@ -726,10 +726,7 @@ fn allocation_of(
         modules:,
         matched: Some(probe.matched),
         facts:,
-        observed_ms: case probe.state {
-          probe_book.Finished(cost:, ..) -> cost.wall_ms
-          probe_book.Running -> measure.NotApplicable
-        },
+        observed_ms: wall_ms,
         outcome:,
         word_size: word_size_of(observations),
         rows: allocation_report.rows(found),

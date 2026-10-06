@@ -673,11 +673,14 @@ pub fn destroy(probe: Probe) -> Nil {
 pub fn finish(probe: Probe) -> Probe {
   case probe.phase {
     Running(session) -> {
+      // The window ends when counting does, before the read that can take a
+      // while over thousands of functions.
+      let ended_ms = ffi_proc.now_ms()
       let snapshot = collect(session, probe.patterns, probe.mode)
 
       destroy(probe)
 
-      Probe(..probe, phase: Finished(snapshot, ended_ms: ffi_proc.now_ms()))
+      Probe(..probe, phase: Finished(snapshot, ended_ms:))
     }
     Finished(..) -> probe
   }

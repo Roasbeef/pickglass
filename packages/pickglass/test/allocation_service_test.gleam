@@ -366,8 +366,11 @@ pub fn a_cut_list_closes_the_probe_partial_by_top_k_test() {
       ),
       7000,
     )
-  let assert probe_book.Finished(outcome:, notes:, ..) = closed.state
+  let assert probe_book.Finished(outcome:, notes:, cost:, ..) = closed.state
+  let assert Some(facts) = cost.counters
 
+  // Every called function is read or unread, whatever the counters said.
+  assert facts.called == 302
   assert outcome == measure.Partial(measure.Truncated(measure.TopKLimit))
   assert list.any(notes, string.contains(
     _,

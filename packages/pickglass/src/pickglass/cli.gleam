@@ -611,7 +611,7 @@ fn profile_flags(
       case int.parse(value) {
         Ok(count) if count >= 1 && count <= 60 ->
           profile_flags(rest, options, Flags(..flags, seconds: Some(count)))
-        _ -> Error("--seconds must be between 1 and 60 for a stack probe")
+        _ -> Error("--seconds must be between 1 and 60")
       }
     ["--rate", value, ..rest] ->
       case int.parse(value) {

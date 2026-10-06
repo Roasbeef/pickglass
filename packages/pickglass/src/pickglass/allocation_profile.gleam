@@ -119,7 +119,10 @@ pub fn facts(
   capture.CounterFacts(
     requested_ms:,
     processes:,
-    called: counters.with_calls,
+    // Every called function lands in exactly one of read and unread at the
+    // allocation read, so the sum is exact even if the counters were read at
+    // another moment, as an operator's stop does.
+    called: totals.read + totals.unread,
     read: totals.read,
     unread: totals.unread,
     invalidated: counters.invalidated,

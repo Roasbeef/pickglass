@@ -390,12 +390,9 @@ pub fn probe_specs_are_bounded_test() {
     )
     == Error(policy.TooManyTargets(8))
   assert policy.validate_spec(
-      policy.ProbeSpec(
-        ..ok,
-        modules: list.repeat("m", policy.max_probe_modules + 1),
-      ),
+      policy.ProbeSpec(..ok, modules: list.repeat("m", 9)),
     )
-    == Error(policy.TooManyModules(policy.max_probe_modules))
+    == Error(policy.TooManyModules(8))
 }
 
 // Sampling needs no modules and allows more targets than a trace.

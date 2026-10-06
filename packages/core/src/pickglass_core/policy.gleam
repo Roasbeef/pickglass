@@ -570,7 +570,7 @@ pub fn sampling_rate_hz(requested: Int, targets: Int) -> Int {
 }
 
 /// The most modules a probe of this kind may name. The agent takes eight
-/// patterns for a call tree probe, the same set a counters probe takes.
+/// patterns for a call tree probe and for a counters probe.
 ///
 /// ## Examples
 ///
@@ -580,8 +580,8 @@ pub fn sampling_rate_hz(requested: Int, targets: Int) -> Int {
 /// ```
 pub fn module_limit(kind: ProbeKind) -> Int {
   case kind {
-    CallTree | CallMemory -> 8
-    Counters | Sampling | SchedulingGc -> max_probe_modules
+    CallTree | CallMemory | Counters -> 8
+    Sampling | SchedulingGc -> max_probe_modules
   }
 }
 
