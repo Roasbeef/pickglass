@@ -405,16 +405,33 @@ pub type BinariesSnapshot {
 }
 
 /// The words one traced function allocated while it ran, summed over the
-/// traced processes.
+/// traced processes, with the calls and call time (microseconds) the agent
+/// read for the same function in the same pass.
 pub type FunctionMemory {
-  FunctionMemory(module: String, function: String, arity: Int, words: Int)
+  FunctionMemory(
+    module: String,
+    function: String,
+    arity: Int,
+    words: Int,
+    calls: Int,
+    time_us: Int,
+  )
+}
+
+/// What the allocation reads of a snapshot add up to over every called
+/// function, not only the rows listed. `read` called functions had an
+/// allocation reading and `unread` did not, because the VM no longer answered
+/// for them (a module reload does this). `words` is the sum of the readings.
+pub type MemoryTotals {
+  MemoryTotals(read: Int, unread: Int, words: Int)
 }
 
 /// What a counters probe counted for allocation. A probe that did not ask
-/// has no reading, which is not a list of zeros.
+/// has no reading, which is not a list of zeros. The rows are the functions
+/// that allocated the most, at most 200; `totals` covers all that were read.
 pub type CounterMemory {
   NoMemoryCounted
-  MemoryCounted(rows: List(FunctionMemory))
+  MemoryCounted(rows: List(FunctionMemory), totals: MemoryTotals)
 }
 
 /// The answer to `read_counter_memory`.
@@ -1387,7 +1404,8 @@ fn binary_ref_decoder() -> Decoder(BinaryRef) {
 // ---------------------------------------------------------- counter memory
 
 // `{<<"counter_memory">>, ProbeId, State, Memory}` where `Memory` is
-// `{<<"none">>}` or `{<<"words">>, [{Module, Function, Arity, Words}]}`.
+// `{<<"none">>}` or `{<<"words">>, Rows, Read, Unread, Words}` with each row
+// `{Module, Function, Arity, Words, Calls, TimeUs}`.
 fn counter_memory_decoder() -> Decoder(Reply) {
   use probe_id <- decode.field(1, decode.int)
   use state <- decode.field(2, probe_state_decoder())
@@ -1405,7 +1423,14 @@ fn counter_memory_value_decoder() -> Decoder(CounterMemory) {
     "none" -> decode.success(NoMemoryCounted)
     "words" -> {
       use rows <- decode.field(1, decode.list(function_memory_decoder()))
-      decode.success(MemoryCounted(rows:))
+      use read <- decode.field(2, decode.int)
+      use unread <- decode.field(3, decode.int)
+      use words <- decode.field(4, decode.int)
+
+      decode.success(MemoryCounted(
+        rows:,
+        totals: MemoryTotals(read:, unread:, words:),
+      ))
     }
     _ -> decode.failure(NoMemoryCounted, "a counter memory reading")
   }
@@ -1416,8 +1441,17 @@ fn function_memory_decoder() -> Decoder(FunctionMemory) {
   use function <- decode.field(1, decode.string)
   use arity <- decode.field(2, decode.int)
   use words <- decode.field(3, decode.int)
+  use calls <- decode.field(4, decode.int)
+  use time_us <- decode.field(5, decode.int)
 
-  decode.success(FunctionMemory(module:, function:, arity:, words:))
+  decode.success(FunctionMemory(
+    module:,
+    function:,
+    arity:,
+    words:,
+    calls:,
+    time_us:,
+  ))
 }
 
 // ------------------------------------------------------- process detail

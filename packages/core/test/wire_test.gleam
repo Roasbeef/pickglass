@@ -1,6 +1,7 @@
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/list
+import gleam/result
 import pg_data_gen as gen
 import pickglass_core/identity
 import pickglass_core/owner
@@ -535,11 +536,27 @@ fn encode_owners(report: wire.OwnersSnapshot) -> Dynamic {
 fn function_memory() -> Generator(wire.FunctionMemory) {
   qcheck.map3(
     gen.tuple2(gen.ident(), gen.ident()),
-    gen.non_negative(),
-    gen.non_negative(),
-    fn(names, arity, words) {
-      wire.FunctionMemory(names.0, names.1, arity, words)
+    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    gen.tuple2(gen.non_negative(), gen.non_negative()),
+    fn(names, shape, counted) {
+      wire.FunctionMemory(
+        names.0,
+        names.1,
+        shape.0,
+        shape.1,
+        counted.0,
+        counted.1,
+      )
     },
+  )
+}
+
+fn memory_totals() -> Generator(wire.MemoryTotals) {
+  qcheck.map3(
+    gen.non_negative(),
+    gen.non_negative(),
+    gen.non_negative(),
+    fn(read, unread, words) { wire.MemoryTotals(read, unread, words) },
   )
 }
 
@@ -548,7 +565,11 @@ fn counter_memory() -> Generator(wire.CounterMemorySnapshot) {
     gen.non_negative(),
     gen.one_of(wire.ProbeRunning, [wire.ProbeFinished, wire.ProbeStopped]),
     qcheck.from_generators(qcheck.constant(wire.NoMemoryCounted), [
-      qcheck.map(gen.small_list(function_memory()), wire.MemoryCounted),
+      qcheck.map2(
+        gen.small_list(function_memory()),
+        memory_totals(),
+        fn(rows, totals) { wire.MemoryCounted(rows, totals) },
+      ),
     ]),
     fn(id, state, memory) { wire.CounterMemorySnapshot(id, state, memory) },
   )
@@ -569,7 +590,7 @@ fn encode_counter_memory(report: wire.CounterMemorySnapshot) -> Dynamic {
     text(probe_state_text(report.state)),
     case report.memory {
       wire.NoMemoryCounted -> tuple([text("none")])
-      wire.MemoryCounted(rows) ->
+      wire.MemoryCounted(rows, totals) ->
         tuple([
           text("words"),
           dynamic.list(
@@ -579,9 +600,14 @@ fn encode_counter_memory(report: wire.CounterMemorySnapshot) -> Dynamic {
                 text(row.function),
                 num(row.arity),
                 num(row.words),
+                num(row.calls),
+                num(row.time_us),
               ])
             }),
           ),
+          num(totals.read),
+          num(totals.unread),
+          num(totals.words),
         ])
     },
   ])
@@ -592,6 +618,43 @@ pub fn property_owners_round_trip_test() {
 
   assert wire.decode_envelope(envelope(encode_owners(report)))
     == Ok(wire.Envelope(dynamic.string("ref"), wire.OwnersReport(report)))
+}
+
+// The allocation rows carry the calls and call time of the same read. A row
+// that stops at the words is the shape an earlier agent sent, and a reply that
+// leaves out the totals is refused: neither is read with the missing numbers
+// made up.
+pub fn a_counter_memory_reply_missing_a_field_is_refused_test() {
+  let row = fn(fields) { tuple(fields) }
+  let reply = fn(rows, totals) {
+    tuple([
+      text("counter_memory"),
+      num(1),
+      text("running"),
+      tuple([text("words"), dynamic.list(rows), ..totals]),
+    ])
+  }
+  let whole = row([text("m"), text("f"), num(1), num(5), num(2), num(9)])
+  let short = row([text("m"), text("f"), num(1), num(5)])
+
+  assert wire.decode_envelope(
+      envelope(reply([whole], [num(1), num(0), num(5)])),
+    )
+    == Ok(wire.Envelope(
+      dynamic.string("ref"),
+      wire.CounterMemoryReport(wire.CounterMemorySnapshot(
+        1,
+        wire.ProbeRunning,
+        wire.MemoryCounted(
+          [wire.FunctionMemory("m", "f", 1, 5, 2, 9)],
+          wire.MemoryTotals(read: 1, unread: 0, words: 5),
+        ),
+      )),
+    ))
+  assert result.is_error(
+    wire.decode_envelope(envelope(reply([short], [num(1), num(0), num(5)]))),
+  )
+  assert result.is_error(wire.decode_envelope(envelope(reply([whole], []))))
 }
 
 pub fn property_counter_memory_round_trips_test() {
