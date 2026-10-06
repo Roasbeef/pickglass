@@ -37,7 +37,10 @@ set -eu
   echo "usage: prune_installs.sh LIB KEEP..." >&2
   exit 2
 }
-LIB=$1
+# lsof reports physical paths, so a LIB reached through a symlink (macOS's
+# /var is a link to /private/var) would never match a tree in use. Resolve it
+# once so every candidate path below is physical.
+LIB=$(CDPATH= cd -- "$1" && pwd -P)
 shift
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/pickglass-prune.XXXXXXXX")
