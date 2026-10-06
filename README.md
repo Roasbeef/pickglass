@@ -229,6 +229,41 @@ On the live Loom run, a 5 s trace of one strand driver caught 8,096 events and
 page said "no call to any of the 751 traced functions in 5.00 s" instead of
 drawing an empty graph.
 
+## Allocation counters
+
+A call trace says what was called and for how long. To ask which functions
+allocated the most words during one bounded workload, count allocation instead,
+the way OTP's `tprof` does with `call_memory`:
+
+```sh
+$P profile --node app@127.0.0.1 --top 3 --allocation --module 'my_app*' --seconds 5
+```
+
+The same plan, confirm and audit path, pinned targets, module rules and
+agent-enforced deadline apply, with at most 8 processes and 60 seconds. For
+each function of the named modules that was called, the report gives the calls,
+the call time and the words allocated on the process heap while it ran, then the
+allocated words beside the target's word size and the bytes they make, the
+processes traced, the window asked for and the window observed, and any
+function the VM could not read. A function with no allocation reading is said in
+a sentence and has no row, so a missing counter is never shown as zero.
+
+The words are cumulative allocation. They are not retained heap, resident
+memory, binaries held outside the heap, ETS or native memory, and the result is
+one total per function with no call stacks, so there is no flame graph for it.
+A function's words exclude those of the traced functions it calls and include
+those of the untraced functions it calls. The agent lists the 200 functions that
+allocated the most and reports the sum over all it read.
+
+`--format pgcap` is the default and writes a capture. `pickglass view` opens it
+as a Top table by allocated words. `pickglass compare BASELINE CANDIDATE` prints
+the functions of two such captures side by side with the direction of the words
+and of the words per call, shows a function that only one capture lists as not
+listed (not as zero), and states no direction across two word sizes. `--format
+text` prints the table. A probe that counts allocation takes one of the two
+probe slots on a node, like any counters probe, and is refused with
+`probe_limit` while both are taken.
+
 ## Timeline
 
 The Timeline page draws the viewer's own history of readings (memory by
@@ -253,7 +288,9 @@ figure with a verdict.
 
 A verdict of "within variation (band 14.7 MiB wide)" means the difference is
 smaller than the spread of readings inside the captures themselves. A field a
-capture does not state is not assumed to match.
+capture does not state is not assumed to match. When either capture holds an
+allocation count, `pickglass compare` adds a section that compares the function
+totals of the two (see Allocation counters).
 
 ## Supervision
 

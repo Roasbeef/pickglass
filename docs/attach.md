@@ -83,11 +83,74 @@ server has loaded and makes no new atom from it. A bare `*`, a prefix that
 reaches a module every process calls, and one that matches more than 1,000
 modules are refused, and a prefix no loaded module starts with is refused as an
 unknown module. The plan says that a star was given and that the number of
-modules it matches is known when the probe starts. On the pages the same probes are planned from Probes, the Process
+modules it matches is known when the probe starts.
+
+On the pages the same probes are planned from Probes, the Process
 page ("Trace calls…", "Record scheduling…"), a profile plan card ("Trace calls
 instead") and owner rows ("Record"). A recording draws each traced process's
 runs and garbage collections on the Timeline page with per-process totals;
 both probes export as Chrome traces.
+
+To count allocation, name the modules and ask for `--allocation`:
+`pickglass profile --node app@127.0.0.1 --top 3 --allocation --module my_app
+--seconds 5`. For the functions of those modules, in at most 8 processes for at
+most 60 seconds (default 5), the VM counts the calls, the call time and the
+words allocated on the process heap while each function ran. This is what OTP's
+`tprof` reports with `call_memory`, run through the same plan, confirm and audit
+path as the other methods, with the same pinned targets, the same module rules
+as a call trace (at most 8 names or prefixes, the hot-module refusals, a cap of
+5,000 matched functions) and a deadline the agent enforces whether or not the
+command is still waiting. The agent keeps the counters in the VM and sends no
+trace message, so the probe costs the traced functions their counting overhead
+for the window and nothing else.
+
+The report gives, for the probe: the processes traced, the window asked for and
+the window the agent observed (the agent looks at its deadlines every 250 ms, so
+the observed window can run a little past the one asked for), how many functions
+matched, were called, had an allocation reading and are listed, and the
+functions the VM could not read. Then the allocated words, the word size of the
+target and the bytes those words make (words times the word size, shown only
+when the word size was read), and a table of the functions that allocated the
+most with their calls, call time, words and words per call. A function appears
+only if it was called and its allocation counter was read. A called function
+whose counter could not be read, for example because its module was reloaded, is
+counted in a sentence of its own and has no row, so a missing counter is never
+shown as zero.
+
+What the words are, and are not. They are cumulative allocation: words
+allocated on the process heap while the function ran, summed over the traced
+processes. They are not retained heap, which garbage collection lowers, and not
+resident memory (RSS), binaries held outside the heap, ETS or native and NIF
+memory. A function's words exclude those of the traced functions it calls and
+include those of the untraced functions it calls. The result is one total per
+function with no call stacks, so there is no flame graph or call graph and the
+command refuses `--format speedscope`, `collapsed` and `chrome` for it, and no
+attribution of work in untraced code. The agent lists at most the 200 functions
+that allocated the most; the report says how many readings were left out and
+gives the sum over every function read.
+
+The result is kept in the format the pages already read. `--format pgcap` (the
+default for an allocation count, written to `pickglass-profile.pgcap` or
+`--out`) writes a capture whose probe record holds the profile (calls, call
+time in nanoseconds and allocated words per function), the observed window, and
+the counter facts: the window asked for, the processes traced, and how many
+called functions were read, unread and invalidated. The capture's runtime facts
+hold the word size. `pickglass view FILE` opens it on the Profile page as a Top
+table by allocated words, and `pickglass compare BASELINE CANDIDATE` prints, after
+its figures, the functions of the two captures side by side with the direction
+of the words and of the words per call. The totals are cumulative over each
+probe's own window, so when two windows differ compare the words per call. A
+function one capture lists and the other does not is shown as not listed, not as
+zero, and a comparison across two word sizes states no direction. `--format text`
+prints the whole table, or writes it to `--out`.
+
+Counters count toward the limits described under More than one viewer: a probe that counts
+allocation is a counters probe, so it takes one of the two probe slots on the
+node and is refused with `probe_limit` when both are taken. There is no separate
+slot per kind for counters, as there is for a stack, call tree and events probe,
+because a counters probe sends no messages and keeps nothing in the agent; what
+bounds it is the two-probe limit, the 5,000-function cap and the viewer's
+60-second limit.
 
 ## ETS tables and binaries
 
@@ -299,8 +362,10 @@ agent unloads itself when the last viewer leaves. An agent serves at most 8
 viewers at once.
 
 Some limits protect the target and so are shared, not per viewer: at most two
-probes run on a node at once, one of them a stack probe, and at most four
-reads such as a census run at once. A viewer that starts a probe while another
+probes run on a node at once, at most one of them a stack probe, one a call
+tree probe and one an events probe (a counters probe, with or without
+allocation, takes one of the two slots and has no slot of its own), and at most
+four reads such as a census run at once. A viewer that starts a probe while another
 viewer holds the slot is refused with `probe_limit` and can try again when
 that probe ends.
 
