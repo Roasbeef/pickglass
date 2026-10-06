@@ -136,6 +136,11 @@ pub const profile_limit = 16
 /// call tree probe.
 pub const trace_limit = 4
 
+/// The most processes a one-click allocation profile may name. The agent
+/// takes sixteen pinned targets for a counters probe and the viewer holds it
+/// to eight, which is `policy.target_limit`.
+pub const allocation_limit = 8
+
 /// How long a one-click profile samples unless the plan card says otherwise.
 pub const profile_duration_ms = 10_000
 
@@ -167,6 +172,12 @@ pub type ProfileMethod {
   /// Record when the processes run on a scheduler and when they collect
   /// garbage, as slices on a timeline.
   ByEvents
+
+  /// Count the calls, call time and allocated words of these modules'
+  /// functions in the processes. The modules are named by the operator for
+  /// the reason a call trace's are: the agent will not trace every function of
+  /// a node.
+  ByAllocation(modules: List(String))
 }
 
 /// A one-click profile. Unlike a `Request` it is not one command: pinning the
@@ -190,6 +201,17 @@ pub type ProfileRequest {
   /// same rules as `PlanProfile`, with the call trace's limit of
   /// `trace_limit` processes.
   PlanCallTrace(
+    pids: List(String),
+    chosen: String,
+    duration_ms: Int,
+    modules: List(String),
+  )
+
+  /// Pin the processes and plan a probe that counts the calls, call time and
+  /// allocated words of these modules over them. The same rules as
+  /// `PlanProfile`, with the allocation probe's limit of `allocation_limit`
+  /// processes.
+  PlanAllocation(
     pids: List(String),
     chosen: String,
     duration_ms: Int,

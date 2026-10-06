@@ -209,6 +209,7 @@ pub fn known(value: Int, in u: Unit) -> String {
     unit.Bytes -> bytes(value)
     unit.Count -> count(value)
     unit.Reductions -> count(value)
+    unit.Words -> count(value) <> " words"
     unit.Nanoseconds -> nanoseconds(value)
     unit.Ratio(per:) -> ratio(value, per)
   }

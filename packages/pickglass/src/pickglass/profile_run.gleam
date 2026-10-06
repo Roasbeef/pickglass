@@ -1,4 +1,4 @@
-//// `pickglass profile`: one stack probe from the command line.
+//// `pickglass profile`: one probe from the command line.
 ////
 //// The command is the same request the profile buttons make, made as the
 //// local owner. It starts the parts a page would use (the audit log, the
@@ -28,7 +28,15 @@
 //// With `--trace-calls` the command traces the calls of the named modules
 //// instead and builds a call tree with exact counts and times, over the same
 //// plan, confirm and release path. The summary then says how the probe ended
-//// and what it dropped, and that untraced time counts as the caller's. A
+//// and what it dropped, and that untraced time counts as the caller's.
+////
+//// With `--allocation` the command counts, for the functions of the named
+//// modules, the calls, the call time and the words allocated on the process
+//// heap, over the same path. The result is one total per function and has no
+//// call stacks, so it is written as a capture or as text and never as a flame
+//// graph. `allocation_report` words it: allocated words beside the target's
+//// word size, the processes and window, the functions the VM could not read,
+//// and that the words are cumulative allocation and not retained heap. A
 //// failure is one typed line, `profile failed (code): reason`, and a non-zero
 //// exit status.
 ////
@@ -37,7 +45,8 @@
 //// - `run` attaches, calls `execute` and detaches.
 //// - `execute` is the sequence above, `observe` and `choose` its first two
 ////   steps, `sample` the plan, confirm and wait.
-//// - `finish` writes the file and builds the summary (`summary`).
+//// - `finish` writes the file and builds the summary (`summary`); an
+////   allocation count's text is built by the allocation_report module.
 
 import gleam/erlang/process
 import gleam/int
@@ -47,6 +56,8 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 import gleam/string
+import pickglass/allocation_profile
+import pickglass/allocation_report.{type Report}
 import pickglass/attach
 import pickglass/audit
 import pickglass/calltrace_profile
@@ -66,6 +77,7 @@ import pickglass/remote.{type Remote}
 import pickglass/seam
 import pickglass/secret
 import pickglass/service
+import pickglass_core/capture
 import pickglass_core/export/text
 import pickglass_core/identity
 import pickglass_core/measure
@@ -208,6 +220,26 @@ pub fn execute(
   os_pid: Int,
   remote: Remote,
 ) -> Result(String, Failure) {
+  execute_within(options, version, node, os_pid, remote, grace_s)
+}
+
+/// `execute` with the grace, in seconds, the command waits past the probe's
+/// own duration to be told how it ended. A test of the timeout shortens it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// profile_run.execute_within(options, "0.1.0", "app@127.0.0.1", 4242, remote, 0)
+/// // -> Error(ProbeTimedOut(..)) when the probe has not ended
+/// ```
+pub fn execute_within(
+  options: cli.ProfileOptions,
+  version: String,
+  node: String,
+  os_pid: Int,
+  remote: Remote,
+  grace_s: Int,
+) -> Result(String, Failure) {
   use log <- result.try(audit.start() |> result.map_error(AttachFailed))
 
   let clock = ffi_dist.system_time_ms
@@ -251,7 +283,7 @@ pub fn execute(
 
   use observations <- result.try(observe(page, options.target))
   use chosen <- result.try(choose(options.target, options.method, observations))
-  use probe <- result.try(sample(page, options, chosen))
+  use probe <- result.try(sample(page, options, chosen, grace_s))
 
   let released = wait_for_release(page)
 
@@ -332,6 +364,7 @@ fn choose(
   let owner_limit = case method {
     cli.SampleStacks(..) -> seam.profile_limit
     cli.TraceCalls(..) -> seam.trace_limit
+    cli.CountAllocation(..) -> seam.allocation_limit
   }
 
   let chosen = case target {
@@ -385,9 +418,11 @@ fn owned_by(text: String) -> fn(model.ProcRow) -> Bool {
 
 // ----------------------------------------------------------------- sample
 
-// How long past the probe's own duration to wait for the viewer to take its
-// result, in seconds. The service polls once a second.
-const grace_s = 30
+/// How long past the probe's own duration to wait for the viewer to take its
+/// result, in seconds. The service polls once a second. The agent ends the
+/// probe at its deadline whether or not anyone waits, so the grace only bounds
+/// how long this command waits to be told.
+pub const grace_s = 30
 
 // Plan, confirm and wait. A refusal at either step is a failure with the
 // gate's own reason.
@@ -395,6 +430,7 @@ fn sample(
   page: seam.Page,
   options: cli.ProfileOptions,
   chosen: profile_scope.Chosen,
+  grace_s: Int,
 ) -> Result(ProbeRecord, Failure) {
   case page.profile(plan_request(options, chosen)) {
     seam.PlanReady(id, plan) -> {
@@ -432,6 +468,13 @@ fn plan_request(
         duration_ms: options.seconds * 1000,
         modules:,
       )
+    cli.CountAllocation(modules:) ->
+      seam.PlanAllocation(
+        pids: chosen.pids,
+        chosen: chosen.sentence,
+        duration_ms: options.seconds * 1000,
+        modules:,
+      )
   }
 }
 
@@ -455,6 +498,16 @@ fn plan_line(
       <> " s"
     cli.TraceCalls(modules:) ->
       "tracing calls of "
+      <> string.join(modules, ", ")
+      <> " in "
+      <> chosen.sentence
+      <> ": "
+      <> int.to_string(count)
+      <> " processes pinned, "
+      <> int.to_string(options.seconds)
+      <> " s"
+    cli.CountAllocation(modules:) ->
+      "counting calls, call time and allocated words of "
       <> string.join(modules, ", ")
       <> " in "
       <> chosen.sentence
@@ -531,6 +584,9 @@ type Measured {
     /// The samples the files and the summary count.
     shown: Profile,
     samples: model.ActivityView,
+    /// An allocation count's report, which is its summary and its text file.
+    /// The other methods have none.
+    allocation: Option(Report),
   )
 }
 
@@ -550,7 +606,13 @@ fn finish(
     probe_book.Finished(profile: None, outcome:, ..) ->
       Error(ProbeFailed(ui.truncation_text(outcome)))
     probe_book.Finished(profile: Some(found), outcome:, notes:, ..) -> {
-      use measured <- result.try(measure_of(options, probe, found))
+      use measured <- result.try(measure_of(
+        options,
+        probe,
+        found,
+        chosen,
+        observations,
+      ))
       use written <- result.try(write(
         options,
         version,
@@ -575,6 +637,8 @@ fn measure_of(
   options: cli.ProfileOptions,
   probe: ProbeRecord,
   found: Profile,
+  chosen: profile_scope.Chosen,
+  observations: List(Observation),
 ) -> Result(Measured, Failure) {
   case options.method {
     cli.SampleStacks(samples: inclusion, ..) -> {
@@ -596,6 +660,7 @@ fn measure_of(
             )
           False -> model.NoStatuses
         },
+        allocation: None,
       )
     }
     cli.TraceCalls(..) -> {
@@ -604,9 +669,82 @@ fn measure_of(
         |> result.replace_error(ProbeFailed("the profile has no exclusive time")),
       )
 
-      Measured(whole: found, column:, shown: found, samples: model.NoStatuses)
+      Measured(
+        whole: found,
+        column:,
+        shown: found,
+        samples: model.NoStatuses,
+        allocation: None,
+      )
+    }
+    cli.CountAllocation(modules:) -> {
+      use column <- result.try(
+        profile.column_named(found, allocation_profile.words_column)
+        |> result.replace_error(ProbeFailed(
+          "the profile has no allocated words",
+        )),
+      )
+      use report <- result.map(allocation_of(
+        probe,
+        found,
+        chosen,
+        modules,
+        observations,
+      ))
+
+      Measured(
+        whole: found,
+        column:,
+        shown: found,
+        samples: model.NoStatuses,
+        allocation: Some(report),
+      )
     }
   }
+}
+
+// The allocation report of a finished probe. The facts are what the probe
+// kept of what it could and could not read; a probe that finished without
+// them is not one this command started, and its numbers would have nothing to
+// be read against, so it is a failure and not a report that guesses.
+fn allocation_of(
+  probe: ProbeRecord,
+  found: Profile,
+  chosen: profile_scope.Chosen,
+  modules: List(String),
+  observations: List(Observation),
+) -> Result(Report, Failure) {
+  case probe.state {
+    probe_book.Finished(
+      cost: capture.ProbeCost(counters: Some(facts), wall_ms:, ..),
+      outcome:,
+      ..,
+    ) ->
+      Ok(allocation_report.Report(
+        scope: chosen.sentence,
+        probe: probe.id,
+        modules:,
+        matched: Some(probe.matched),
+        facts:,
+        observed_ms: wall_ms,
+        outcome:,
+        word_size: word_size_of(observations),
+        rows: allocation_report.rows(found),
+      ))
+    probe_book.Finished(..) | probe_book.Running ->
+      Error(ProbeFailed("the probe kept no allocation facts"))
+  }
+}
+
+// The size of a word on the target, from the newest census pass that read
+// memory. Without one the report shows words and derives no bytes.
+fn word_size_of(observations: List(Observation)) -> Option(Int) {
+  observations
+  |> list.reverse
+  |> list.find_map(fn(observation) {
+    result.map(observation.memory, fn(memory) { memory.word_size })
+  })
+  |> option.from_result
 }
 
 // Whether the command counted only running and runnable samples and the
@@ -680,9 +818,13 @@ fn write(
       Some(path)
     }
     cli.TextFormat ->
-      case options.out, all_waiting(measured) {
-        None, _ | _, True -> Ok(None)
-        Some(path), False ->
+      case measured.allocation, options.out, all_waiting(measured) {
+        Some(report), Some(path), _ ->
+          to_file(path, allocation_report.render(report, text_rows) <> "\n")
+          |> result.map(Some)
+        Some(_), None, _ -> Ok(None)
+        None, None, _ | None, _, True -> Ok(None)
+        None, Some(path), False ->
           text.export(measured.shown, measured.column, text.default_config)
           |> result.replace_error(WriteFailed("the profile has no call stacks"))
           |> result.try(fn(made) { to_file(path, made.body) })
@@ -757,11 +899,59 @@ fn summary(
   measured: Measured,
   written: Option(String),
 ) -> String {
+  case measured.allocation {
+    Some(report) -> allocation_summary(report, options.format, written)
+    None ->
+      sampled_summary(chosen, options, probe, outcome, notes, measured, written)
+  }
+}
+
+// How many functions the text format lists: every one the agent kept. The
+// summary of the other formats lists the fifteen largest.
+const text_rows = 200
+
+// An allocation count's summary is its report, and says where the capture
+// went and what reads it.
+fn allocation_summary(
+  report: Report,
+  format: cli.ProfileFormat,
+  written: Option(String),
+) -> String {
+  let shown = case format {
+    cli.TextFormat -> text_rows
+    cli.PgcapFormat
+    | cli.SpeedscopeFormat
+    | cli.CollapsedFormat
+    | cli.ChromeFormat -> 15
+  }
+
+  let destination = case written, format {
+    Some(path), cli.PgcapFormat ->
+      "wrote "
+      <> path
+      <> " (a capture: pickglass view opens it, and pickglass compare reads it against another)"
+    Some(path), _ -> "wrote " <> path
+    None, _ -> ""
+  }
+
+  string.join([allocation_report.render(report, shown), "", destination], "\n")
+}
+
+fn sampled_summary(
+  chosen: profile_scope.Chosen,
+  options: cli.ProfileOptions,
+  probe: ProbeRecord,
+  outcome: measure.Outcome,
+  notes: List(String),
+  measured: Measured,
+  written: Option(String),
+) -> String {
   let lines = case options.method {
     cli.SampleStacks(..) ->
       stack_lines(chosen, options, probe, outcome, notes, measured)
     cli.TraceCalls(modules:) ->
       call_lines(chosen, options, probe, outcome, notes, measured, modules)
+    cli.CountAllocation(..) -> []
   }
 
   let body = case all_waiting(measured), options.format {

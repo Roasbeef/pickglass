@@ -12,11 +12,18 @@
 //// triggers a collection. An export is a write of the viewer's own data and
 //// belongs to the service. Both come back as `NotAnAgentCommand`.
 ////
-//// Probes come in four kinds the agent runs: counters (one module with
+//// Probes come in five kinds the agent runs: counters (one module with
 //// the first wire release's request, several with the counter-set request),
-//// stack sampling, a call tree over named modules and scheduling and
-//// collection events. A stop or a poll must go to the right kind of probe,
-//// so the caller says which kind a probe id belongs to.
+//// counters that also count allocation, stack sampling, a call tree over
+//// named modules and scheduling and collection events. A stop or a poll must
+//// go to the right kind of probe, so the caller says which kind a probe id
+//// belongs to.
+////
+//// An allocation probe is a counter set in the `time_and_memory` mode, and its
+//// result is two replies: the counters and, read apart, the allocation. The
+//// agent removes a probe when it is stopped, so the allocation is read first,
+//// and the stop is made whether or not that read answered, because the stop is
+//// what leaves nothing in the agent.
 ////
 //// The tracing probes send the agent the viewer's own budgets (the number of
 //// events and slices to keep), which the plan states, and the events probe
@@ -55,6 +62,13 @@ pub type Outcome {
 
   /// A counters probe stopped, with its last reading.
   ProbeStopped(snapshot: wire.CountersSnapshot)
+
+  /// A probe that counts allocation stopped, with its last reading of the
+  /// counters and of the allocation.
+  AllocationStopped(
+    counters: wire.CountersSnapshot,
+    memory: wire.CounterMemorySnapshot,
+  )
 
   /// A stack probe stopped, with what it sampled.
   StacksStopped(snapshot: wire.StacksSnapshot)
@@ -172,6 +186,16 @@ fn start_probe(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
           wire.PinnedProcesses(spec.targets),
           spec.duration_ms,
           wire.CountTime,
+        )),
+      )
+    policy.CallMemory, modules ->
+      counters_started(
+        remote,
+        wire.Extended(wire.AskStartCounterSet(
+          list.map(modules, fn(module) { wire.CounterPattern(module, "_") }),
+          wire.PinnedProcesses(spec.targets),
+          spec.duration_ms,
+          wire.CountTimeAndMemory,
         )),
       )
     policy.Sampling, _ -> stacks_started(remote, spec)
@@ -312,6 +336,27 @@ fn stop_probe(
         Ok(other) -> Unexpected(string.inspect(other))
         Error(failure) -> Failed(failure)
       }
+    Ok(id), Some(policy.CallMemory) -> stop_allocation(remote, id)
+  }
+}
+
+// The allocation is read before the stop, which removes the probe, and the
+// stop is asked whether or not the read answered: a probe the viewer could not
+// read must still not be left counting. A read that failed is the outcome only
+// when the stop succeeded, so a refusal of the read is never hidden behind a
+// stop that worked, and a stop that failed is reported as the failure it is.
+fn stop_allocation(remote: Remote, id: Int) -> Outcome {
+  let memory =
+    remote.ask(wire.Extended(wire.AskReadCounterMemory(id)), ask_deadline_ms)
+  let stopped = remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
+
+  case stopped, memory {
+    Ok(wire.CountersReport(counters)), Ok(wire.CounterMemoryReport(snapshot)) ->
+      AllocationStopped(counters, snapshot)
+    Ok(wire.CountersReport(_)), Ok(other) -> Unexpected(string.inspect(other))
+    Ok(wire.CountersReport(_)), Error(failure) -> Failed(failure)
+    Ok(other), _ -> Unexpected(string.inspect(other))
+    Error(failure), _ -> Failed(failure)
   }
 }
 
@@ -404,6 +449,13 @@ pub type Poll {
   /// The agent's call tree snapshot.
   PolledCalltrace(snapshot: wire.CalltraceSnapshot)
 
+  /// A probe that counts allocation has ended, with the counters and the
+  /// allocation the agent holds for it. While it runs the answer is `Polled`.
+  PolledAllocation(
+    counters: wire.CountersSnapshot,
+    memory: wire.CounterMemorySnapshot,
+  )
+
   /// The agent's scheduling and collection snapshot.
   PolledEvents(snapshot: wire.EventsSnapshot)
 
@@ -475,7 +527,46 @@ pub fn poll_probe(
               }
             },
           )
+        policy.CallMemory -> poll_allocation(remote, id)
       }
+  }
+}
+
+// A running allocation probe is read for its counters alone. Once it has
+// ended the allocation is read too, in the same poll, because the agent keeps
+// an ended probe only until it is released and the two replies must describe
+// the same moment.
+fn poll_allocation(remote: Remote, id: Int) -> Poll {
+  let counters =
+    polled(remote.ask(wire.AskReadCounters(id), ask_deadline_ms), fn(reply) {
+      case reply {
+        wire.CountersReport(snapshot) -> Ok(Polled(snapshot))
+        _ -> Error(Nil)
+      }
+    })
+
+  case counters {
+    Polled(wire.CountersSnapshot(state: wire.ProbeRunning, ..)) -> counters
+    Polled(snapshot) ->
+      polled(
+        remote.ask(
+          wire.Extended(wire.AskReadCounterMemory(id)),
+          ask_deadline_ms,
+        ),
+        fn(reply) {
+          case reply {
+            wire.CounterMemoryReport(memory) ->
+              Ok(PolledAllocation(snapshot, memory))
+            _ -> Error(Nil)
+          }
+        },
+      )
+    PolledStacks(_)
+    | PolledCalltrace(_)
+    | PolledEvents(_)
+    | PolledAllocation(..)
+    | PollRefused(_)
+    | PollPending -> counters
   }
 }
 
@@ -518,7 +609,8 @@ pub fn release_probe(
           remote.ask(wire.Extended(wire.AskStopCalltrace(id)), ask_deadline_ms)
         policy.SchedulingGc ->
           remote.ask(wire.Extended(wire.AskStopEvents(id)), ask_deadline_ms)
-        policy.Counters -> remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
+        policy.Counters | policy.CallMemory ->
+          remote.ask(wire.AskStopCounters(id), ask_deadline_ms)
       }
 
       Nil

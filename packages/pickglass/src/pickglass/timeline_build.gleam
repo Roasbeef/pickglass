@@ -294,6 +294,7 @@ fn probe_track(
 fn kind_text(kind: policy.ProbeKind) -> String {
   case kind {
     policy.Counters -> "counters probe"
+    policy.CallMemory -> "allocation counters probe"
     policy.Sampling -> "stack probe"
     policy.CallTree -> "call tree probe"
     policy.SchedulingGc -> "scheduling probe"

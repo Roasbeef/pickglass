@@ -390,12 +390,9 @@ pub fn probe_specs_are_bounded_test() {
     )
     == Error(policy.TooManyTargets(8))
   assert policy.validate_spec(
-      policy.ProbeSpec(
-        ..ok,
-        modules: list.repeat("m", policy.max_probe_modules + 1),
-      ),
+      policy.ProbeSpec(..ok, modules: list.repeat("m", 9)),
     )
-    == Error(policy.TooManyModules(policy.max_probe_modules))
+    == Error(policy.TooManyModules(8))
 }
 
 // Sampling needs no modules and allows more targets than a trace.
@@ -508,6 +505,39 @@ pub fn trace_probes_are_limited_to_what_the_agent_runs_test() {
       policy.ProbeSpec(..events, duration_ms: 60_001, modules: []),
     )
     == Error(policy.BadDuration(60_000))
+}
+
+// A probe that counts allocation is a counters probe the agent runs over at
+// most eight patterns and, here, a minute and eight pinned processes, because
+// the VM keeps two counters for every function it traces. It needs modules for
+// the reason a call tree does, and it counts as counting, not tracing.
+pub fn an_allocation_probe_is_limited_to_what_the_viewer_holds_it_to_test() {
+  let counting = spec(policy.CallMemory)
+
+  assert policy.validate_spec(counting) == Ok(Nil)
+  assert policy.probe_code(policy.CallMemory) == "call_memory"
+  assert policy.max_duration_ms(policy.CallMemory) == 60_000
+  assert policy.validate_spec(policy.ProbeSpec(..counting, duration_ms: 60_000))
+    == Ok(Nil)
+  assert policy.validate_spec(policy.ProbeSpec(..counting, duration_ms: 60_001))
+    == Error(policy.BadDuration(60_000))
+  assert policy.validate_spec(policy.ProbeSpec(..counting, modules: []))
+    == Error(policy.NoModules)
+  assert policy.validate_spec(
+      policy.ProbeSpec(..counting, modules: list.repeat("m", 9)),
+    )
+    == Error(policy.TooManyModules(8))
+  assert policy.validate_spec(
+      policy.ProbeSpec(..counting, targets: list.repeat(token(1), 9)),
+    )
+    == Error(policy.TooManyTargets(8))
+  assert policy.validate_spec(
+      policy.ProbeSpec(..counting, targets: list.repeat(token(1), 8)),
+    )
+    == Ok(Nil)
+  assert policy.perturbation_of(policy.StartProbe(counting)) == policy.Counting
+  assert policy.required_capabilities(policy.StartProbe(counting))
+    == [policy.Profile]
 }
 
 // A sampling probe carries the rate it asked for, and the agent's ceiling is

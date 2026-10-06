@@ -44,6 +44,8 @@ main([Ebin]) ->
     scenario_detach(Target, Work),
     scenario_viewer_killed(Target, Work),
     scenario_viewer_killed_tracing(Target, Work),
+    scenario_allocation(Target, Work),
+    scenario_allocation_viewer_killed(Target, Work),
     scenario_shared_attach(Target, Work),
     scenario_shared_cap(Target, Work),
     scenario_shared_detach(Target, Work),
@@ -161,18 +163,23 @@ scenario_counter_set(Target, PinId) ->
     timer:sleep(500),
     {<<"counters">>, SetId, <<"running">>, _, _, {_, _, 0}, Rows} =
         ask(Target, {<<"read_counters">>, SetId}),
-    {<<"counter_memory">>, SetId, <<"running">>, {<<"words">>, MemRows}} =
+    {<<"counter_memory">>, SetId, <<"running">>, {<<"words">>, MemRows, MemRead, MemUnread, MemWords}} =
         ask(Target, {<<"read_counter_memory">>, SetId}),
     Has = fun(Mod, Which) ->
               lists:any(fun({M, _, _, Calls, _}) -> M =:= Mod andalso Calls > 0 end, Which)
           end,
     HasWords = fun(Mod) ->
-                   lists:any(fun({M, _, _, W}) -> M =:= Mod andalso W >= 0 end, MemRows)
+                   lists:any(fun({M, _, _, W, _, _}) -> M =:= Mod andalso W >= 0 end, MemRows)
                end,
     check("the time rows cover the first module", Has(<<"pg_e2e_work">>, Rows)),
     check("the time rows cover the second module", Has(<<"pg_e2e_more">>, Rows)),
     check("the allocation rows cover the first module", HasWords(<<"pg_e2e_work">>)),
     check("the allocation rows cover the second module", HasWords(<<"pg_e2e_more">>)),
+    check("an allocation row carries the calls and call time of the same read",
+          lists:all(fun({_, _, _, _, Calls, TimeUs}) -> Calls > 0 andalso TimeUs >= 0 end, MemRows)),
+    check("the allocation totals count the rows and sum their words",
+          MemRead =:= length(MemRows) andalso MemUnread =:= 0
+              andalso MemWords =:= lists:sum([W || {_, _, _, W, _, _} <- MemRows])),
     {<<"counters">>, SetId, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, SetId}),
     {<<"counter_memory">>, _, _, {<<"none">>}} = ask_time_only_memory(Target, Pins),
     check("a time-only probe answers none for allocation, not zeros", true),
@@ -732,6 +739,150 @@ scenario_viewer_killed_tracing(Target, Work) ->
     torn_down(Target, Agent, Work, "after kill -9 of the viewer mid trace"),
     ok.
 
+
+%% ------------------------------------------------------------- allocation
+
+%% A probe that counts allocation as well as time, over an allocation-heavy
+%% fixture. The agent reports what it measured with the calls and call time of
+%% the same read, the totals over every function read, and a window that stops
+%% growing when the probe ends. Every way the probe ends leaves no trace
+%% session behind: the deadline, a stop, a refusal and the viewer going away.
+scenario_allocation(Target, Work) ->
+    heading("allocation counters"),
+    Link = local_viewer(),
+    Agent = start_agent(Target, Link),
+    Alloc = erpc:call(Target, erlang, spawn, [pg_e2e_alloc, loop, []]),
+    {<<"pinned">>, <<"boot-1">>, PinId, _} = ask(Target, {<<"pin">>, pid_text(Target, Alloc)}),
+    Pins = {<<"pins">>, [{<<"boot-1">>, PinId}]},
+    Patterns = [{<<"pg_e2e_alloc">>, <<"_">>}],
+
+    %% Normal completion: the deadline ends the probe with nobody asking.
+    {<<"counters_started">>, Id, Matched, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, Pins, 1000, <<"time_and_memory">>}),
+    check("the probe matched the functions of the fixture", Matched >= 4),
+    check("a counting probe holds a trace session", length(sessions(Target)) >= 2),
+    timer:sleep(1600),
+    check("the deadline destroyed the session with no request made",
+          wait_until(fun() -> length(sessions(Target)) =:= 1 end, 3000)),
+    {<<"counters">>, Id, <<"finished">>, _, Elapsed, {_, WithCalls, Invalidated}, _} =
+        ask(Target, {<<"read_counters">>, Id}),
+    check("the probe finished and counted four called functions", WithCalls =:= 3 orelse WithCalls =:= 4),
+    check("no function was invalidated", Invalidated =:= 0),
+    {<<"counter_memory">>, Id, <<"finished">>, {<<"words">>, Rows, Read, Unread, TotalWords}} =
+        ask(Target, {<<"read_counter_memory">>, Id}),
+    check("every allocation row is {Module, Function, Arity, Words, Calls, TimeUs}",
+          lists:all(fun({M, F, A, W, C, T}) ->
+                            is_binary(M) andalso is_binary(F) andalso is_integer(A)
+                                andalso is_integer(W) andalso is_integer(C) andalso is_integer(T);
+                       (_) -> false end, Rows)),
+    Heavy = [{W, C} || {<<"pg_e2e_alloc">>, <<"heavy">>, 1, W, C, _} <- Rows],
+    Light = [{W, C} || {<<"pg_e2e_alloc">>, <<"light">>, 1, W, C, _} <- Rows],
+    Relay = [{W, C} || {<<"pg_e2e_alloc">>, <<"relay">>, 1, W, C, _} <- Rows],
+    [{HeavyWords, HeavyCalls}] = Heavy,
+    [{LightWords, LightCalls}] = Light,
+    [{RelayWords, RelayCalls}] = Relay,
+    check("heavy/1 allocated 400 words a call (the list's 200 cells, two words each)",
+          HeavyCalls > 0 andalso abs(HeavyWords - HeavyCalls * 400) =< 400 * (HeavyCalls div 10 + 3)),
+    check("light/1 allocated 3 words a call, the tuple's two elements and its size",
+          LightCalls > 0 andalso abs(LightWords - LightCalls * 3) =< 3 * (LightCalls div 10 + 3)),
+    check("relay/1 does not carry heavy/1's words, which a traced callee keeps for itself",
+          RelayCalls > 0 andalso RelayWords < RelayCalls * 10),
+    check("the rows are largest allocator first",
+          [W || {_, _, _, W, _, _} <- Rows] =:= lists:reverse(lists:sort([W || {_, _, _, W, _, _} <- Rows]))),
+    check("the reading counts every called function as read and none unread",
+          Read =:= length(Rows) andalso Unread =:= 0),
+    check("the total is the sum of the words read",
+          TotalWords =:= lists:sum([W || {_, _, _, W, _, _} <- Rows])),
+    {<<"counters">>, Id, <<"finished">>, _, Elapsed2, _, _} =
+        begin timer:sleep(400), ask(Target, {<<"read_counters">>, Id}) end,
+    check("the window does not grow after the probe ends, whenever it is read",
+          Elapsed2 =:= Elapsed),
+    %% The agent looks at its deadlines every 250 ms, so the window runs a
+    %% little past the deadline, and a loaded machine can make it a little more.
+    check("the window is the time counted, a little over the deadline at most",
+          Elapsed >= 1000 andalso Elapsed =< 3000),
+    {<<"counters">>, Id, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, Id}),
+    {<<"error">>, <<"no_such_probe">>, _} = ask(Target, {<<"read_counter_memory">>, Id}),
+    check("stopping a finished probe releases it", true),
+
+    %% An operator's stop: the allocation is read first, since a stop removes it.
+    {<<"counters_started">>, Id2, _, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, Pins, 60000, <<"time_and_memory">>}),
+    timer:sleep(300),
+    {<<"counter_memory">>, Id2, <<"running">>, {<<"words">>, [_ | _], _, _, _}} =
+        ask(Target, {<<"read_counter_memory">>, Id2}),
+    {<<"counters">>, Id2, _, _, StopElapsed, _, _} = ask(Target, {<<"stop_counters">>, Id2}),
+    check("a stopped probe's window is the time it ran, well under its deadline",
+          StopElapsed >= 250 andalso StopElapsed < 5000),
+    check("the stop destroyed the session", length(sessions(Target)) =:= 1),
+
+    %% Refusals leave no session behind, and the allocation mode is no way
+    %% round the limits of a counter set.
+    {<<"error">>, <<"unknown_module">>, _} =
+        ask(Target, {<<"start_counter_set">>, [{<<"zz_no_alloc_module_ever">>, <<"_">>}], Pins,
+                     1000, <<"time_and_memory">>}),
+    {<<"error">>, <<"pattern_too_broad">>, _} =
+        ask(Target, {<<"start_counter_set">>, [{<<"lists">>, <<"_">>}], Pins, 1000,
+                     <<"time_and_memory">>}),
+    {<<"error">>, <<"no_match">>, _} =
+        ask(Target, {<<"start_counter_set">>, [{<<"pg_e2e_alloc">>, <<"work">>}], Pins, 1000,
+                     <<"time_and_memory">>}),
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, {<<"pins">>, [{<<"boot-1">>, PinId + 99}]},
+                     1000, <<"time_and_memory">>}),
+    {<<"error">>, <<"bad_request">>, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, Pins, 1000, <<"memory">>}),
+    check("refused allocation probes name their reason", true),
+    check("no refusal left a session behind", length(sessions(Target)) =:= 1),
+    {<<"counters_started">>, A, _, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, Pins, 60000, <<"time_and_memory">>}),
+    {<<"counters_started">>, B, _, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, Pins, 60000, <<"time">>}),
+    {<<"error">>, <<"probe_limit">>, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, Pins, 60000, <<"time_and_memory">>}),
+    check("an allocation probe counts toward the two probes a node allows", true),
+    {<<"counters">>, A, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, A}),
+    {<<"counters">>, B, _, _, _, _, _} = ask(Target, {<<"stop_counters">>, B}),
+    check("the two probes' sessions are gone after their stops", length(sessions(Target)) =:= 1),
+
+    %% The viewer goes away while the probe is counting.
+    {<<"counters_started">>, _, _, _} =
+        ask(Target, {<<"start_counter_set">>, Patterns, Pins, 60000, <<"time_and_memory">>}),
+    check("an allocation probe is running when the link process is killed",
+          length(sessions(Target)) >= 2),
+    exit(Link, kill),
+    torn_down(Target, Agent, Work, "after the viewer of an allocation probe died"),
+    exit(Alloc, kill).
+
+%% The viewer's OS process is killed with SIGKILL while an allocation probe is
+%% counting. The agent learns only from the lost link, and the VM must be left
+%% with no session and no trace flag on the counted process.
+scenario_allocation_viewer_killed(Target, Work) ->
+    heading("viewer killed with SIGKILL while counting allocation"),
+    {ok, _VPeer, V} = peer:start(#{name => node_name("pg_e2e_viewer"),
+                                  args => ["-hidden", "-setcookie", "pg_e2e_cookie"]}),
+    VLink = remote_viewer(V),
+    put(viewer, VLink),
+    {ok, Agent} = erpc:call(V, erpc, call,
+                            [Target, pickglass_agent@server, start,
+                             [{VLink, <<"boot-4">>, 30000, ?BUILD}]]),
+    Alloc = erpc:call(Target, erlang, spawn, [pg_e2e_alloc, loop, []]),
+    {<<"pinned">>, <<"boot-4">>, Pin, _} = ask(Target, {<<"pin">>, pid_text(Target, Alloc)}),
+    {<<"counters_started">>, _, _, _} =
+        ask(Target, {<<"start_counter_set">>, [{<<"pg_e2e_alloc">>, <<"_">>}],
+                     {<<"pins">>, [{<<"boot-4">>, Pin}]}, 60000, <<"time_and_memory">>}),
+    timer:sleep(200),
+    check("the counted process carries a session's trace flags",
+          lists:any(fun(S) -> {flags, F} = erpc:call(Target, trace, info, [S, Alloc, flags]), F =/= [] end,
+                    [S || S <- sessions(Target), S =/= {legacy, default}])),
+    OsPid = erpc:call(V, os, getpid, []),
+    _ = os:cmd("kill -9 " ++ OsPid),
+    torn_down(Target, Agent, Work, "after kill -9 of the viewer mid allocation count"),
+    check("the counted process is alive and carries no session's trace flags",
+          erpc:call(Target, erlang, is_process_alive, [Alloc])
+              andalso erpc:call(Target, erlang, trace_info, [Alloc, flags]) =:= {flags, []}),
+    exit(Alloc, kill).
+
 %% ----------------------------------------------------------- shared attach
 
 %% Two viewers on one agent. Both read, each holds its own pins and probes,
@@ -1162,6 +1313,16 @@ push_workload(Target) ->
         "-module(pg_e2e_work). -export([loop/0, work/1]). "
         "loop() -> work(100), pg_e2e_more:more(3), receive after 1 -> ok end, loop(). "
         "work(0) -> ok; work(N) -> lists:sort([3,2,1]), work(N-1). "),
+    %% An allocation-heavy fixture. heavy/1 builds an N cell list, two words a
+    %% cell, relay/1 calls it and builds a three word tuple of its own, and
+    %% light/1 builds a two element tuple, so each function's words are known
+    %% from its calls.
+    _ = load_source(Target, "pg_e2e_alloc",
+        "-module(pg_e2e_alloc). -export([loop/0, relay/1, heavy/1, light/1]). "
+        "loop() -> relay(200), light(5), receive after 1 -> ok end, loop(). "
+        "relay(N) -> X = heavy(N), {X, light(N)}. "
+        "heavy(N) -> lists:seq(1, N). "
+        "light(N) -> {N, N}. "),
     _ = load_source(Target, "pg_e2e_gc",
         "-module(pg_e2e_gc). -export([burn/0]). "
         "burn() -> L = lists:seq(1, 3000000), erlang:garbage_collect(), length(L). "),

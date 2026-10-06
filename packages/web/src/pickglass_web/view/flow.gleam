@@ -136,6 +136,7 @@ fn running_text(kind: policy.ProbeKind) -> String {
     policy.CallTree -> "Tracing calls"
     policy.SchedulingGc -> "Recording scheduling and collections"
     policy.Counters -> "Counting calls"
+    policy.CallMemory -> "Counting calls and allocation"
   }
 }
 

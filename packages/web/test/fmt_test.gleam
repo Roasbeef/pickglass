@@ -20,6 +20,15 @@ pub fn counts_get_separators_test() {
   fmt.count(-12_345) |> should.equal("−12,345")
 }
 
+// A count of words keeps its unit in the text, so it is never read as bytes or
+// as a plain count.
+pub fn words_are_written_as_words_test() {
+  fmt.known(1_234_567, unit.Words) |> should.equal("1,234,567 words")
+  fmt.cell(Known(0), unit.Words) |> should.equal("0 words")
+  fmt.cell(Missing(measure.UnsupportedOnRuntime), unit.Words)
+  |> should.not_equal("0 words")
+}
+
 pub fn bytes_use_binary_prefixes_and_magnitude_dependent_decimals_test() {
   fmt.bytes(512) |> should.equal("512 B")
   fmt.bytes(2048) |> should.equal("2.00 KiB")

@@ -36,6 +36,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import pickglass/allocation_profile
 import pickglass/audit
 import pickglass/calltrace_profile
 import pickglass/deltas
@@ -1539,8 +1540,9 @@ fn plan_cards(
               processes:,
               ..,
             )) -> model.AdjustCalls(duration_ms:, processes:)
-            Ok(seam.ProfileNote(method: seam.ByEvents, ..)) | Error(Nil) ->
-              model.NotAdjustable
+            Ok(seam.ProfileNote(method: seam.ByEvents, ..))
+            | Ok(seam.ProfileNote(method: seam.ByAllocation(_), ..))
+            | Error(Nil) -> model.NotAdjustable
           },
         ),
       )
@@ -1937,22 +1939,23 @@ pub fn profile_model(
 fn processes_of(probe: ProbeRecord) -> Option(Int) {
   case probe.kind {
     policy.Sampling -> Some(probe.matched)
+    policy.CallMemory -> probe.processes
     policy.Counters | policy.CallTree | policy.SchedulingGc -> None
   }
 }
 
-// A counters profile is read by call time and a call tree by exclusive time,
-// the column whose sums are the widths of a flame's boxes; any other by its
-// first column, which for sampled stacks is the sample count. Core guarantees
-// a profile has a value type, so the error is not reachable; it is handled as
-// "nothing to draw" and not as a crash.
+// An allocation profile is read by allocated words, a counters profile by call
+// time and a call tree by exclusive time, the column whose sums are the widths
+// of a flame's boxes; any other by its first column, which for sampled stacks
+// is the sample count. Core guarantees a profile has a value type, so the error
+// is not reachable; it is handled as "nothing to draw" and not as a crash.
 fn column_of(found: profile.Profile) -> Result(profile.Column, Nil) {
-  result.lazy_or(profile.column_named(found, "call time"), fn() {
-    result.lazy_or(
-      profile.column_named(found, calltrace_profile.exclusive_column),
-      fn() { profile.column(found, 0) },
-    )
+  profile.column_named(found, allocation_profile.words_column)
+  |> result.lazy_or(fn() { profile.column_named(found, "call time") })
+  |> result.lazy_or(fn() {
+    profile.column_named(found, calltrace_profile.exclusive_column)
   })
+  |> result.lazy_or(fn() { profile.column(found, 0) })
 }
 
 fn profile_header(
@@ -1976,7 +1979,10 @@ fn profile_header(
       "call trace probe",
       "call and return_to events, folded in the agent",
     )
-    profile.AllocationCounts -> #("allocation counts", "allocator statistics")
+    profile.AllocationCounts -> #(
+      "allocation counters probe",
+      "call_time and call_memory trace session, silent, read at the deadline",
+    )
   }
 
   // The kind of probe decides what the coverage counts, never the source
@@ -2020,6 +2026,14 @@ fn profile_header(
     )
     policy.Counters | policy.SchedulingGc -> #(
       "functions with calls",
+      probe.matched,
+      list.length(profile.samples(found)),
+    )
+
+    // An allocation probe lists the functions that were called and read, at
+    // most the largest 200, so the figure is the functions listed.
+    policy.CallMemory -> #(
+      "functions with an allocation reading",
       probe.matched,
       list.length(profile.samples(found)),
     )

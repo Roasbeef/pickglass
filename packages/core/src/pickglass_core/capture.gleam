@@ -334,6 +334,37 @@ pub type ProbeCost {
     outcome: Outcome,
     /// How many functions or processes the agent matched, when it said.
     matched: Option(Int),
+    /// What a counters probe that counted allocation asked for and could
+    /// read, for a reader that must tell a complete set of totals from a
+    /// partial one. `None` for every other probe.
+    counters: Option(CounterFacts),
+  )
+}
+
+/// What a counters probe that counted allocation asked for and could read.
+/// The profile beside it holds the readings, and a capture's runtime facts
+/// hold the word size; this holds what neither can say, so that a function
+/// missing from the profile is not read as a function that allocated nothing.
+pub type CounterFacts {
+  CounterFacts(
+    /// The window the probe was asked for. The observed window is the cost's
+    /// `wall_ms`.
+    requested_ms: Int,
+    /// How many processes were traced, when the viewer knew.
+    processes: Option(Int),
+    /// How many traced functions were called in the window.
+    called: Int,
+    /// How many called functions had an allocation reading.
+    read: Int,
+    /// How many called functions had none, because the VM no longer answered
+    /// for them.
+    unread: Int,
+    /// How many traced functions the VM stopped tracing because their module
+    /// was reloaded. A probe with any is suspect throughout.
+    invalidated: Int,
+    /// The words allocated, summed over every function that was read, which
+    /// the profile's rows (at most the 200 largest) can be put against.
+    total_words: Int,
   )
 }
 
@@ -592,6 +623,7 @@ fn fields_of(
       #("bytes", codec.measurement_json(cost.bytes)),
       #("wall_ms", codec.measurement_json(cost.wall_ms)),
       #("matched", json.nullable(cost.matched, json.int)),
+      #("counters", json.nullable(cost.counters, counter_facts_json)),
       ..codec.outcome_fields(cost.outcome)
     ]
     AuditRecord(entry) -> codec.audit_fields(entry)
@@ -999,6 +1031,11 @@ fn cost_decoder() -> Decoder(ProbeCost) {
   use bytes <- decode.field("bytes", codec.measurement_decoder())
   use wall_ms <- decode.field("wall_ms", codec.measurement_decoder())
   use matched <- codec.optional_int("matched")
+  use counters <- decode.optional_field(
+    "counters",
+    None,
+    decode.optional(counter_facts_decoder()),
+  )
   use outcome <- decode.then(codec.recorded_outcome_decoder())
 
   decode.success(ProbeCost(
@@ -1010,6 +1047,39 @@ fn cost_decoder() -> Decoder(ProbeCost) {
     wall_ms:,
     outcome:,
     matched:,
+    counters:,
+  ))
+}
+
+fn counter_facts_json(facts: CounterFacts) -> Json {
+  json.object([
+    #("requested_ms", json.int(facts.requested_ms)),
+    #("processes", json.nullable(facts.processes, json.int)),
+    #("called", json.int(facts.called)),
+    #("read", json.int(facts.read)),
+    #("unread", json.int(facts.unread)),
+    #("invalidated", json.int(facts.invalidated)),
+    #("total_words", json.int(facts.total_words)),
+  ])
+}
+
+fn counter_facts_decoder() -> Decoder(CounterFacts) {
+  use requested_ms <- decode.field("requested_ms", decode.int)
+  use processes <- codec.optional_int("processes")
+  use called <- decode.field("called", decode.int)
+  use read <- decode.field("read", decode.int)
+  use unread <- decode.field("unread", decode.int)
+  use invalidated <- decode.field("invalidated", decode.int)
+  use total_words <- decode.field("total_words", decode.int)
+
+  decode.success(CounterFacts(
+    requested_ms:,
+    processes:,
+    called:,
+    read:,
+    unread:,
+    invalidated:,
+    total_words:,
   ))
 }
 

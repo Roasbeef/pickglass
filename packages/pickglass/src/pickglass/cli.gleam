@@ -111,6 +111,13 @@ pub type ProfileMethod {
   /// tree with exact call counts and times. The modules are required: the
   /// agent refuses to trace every function of a node.
   TraceCalls(modules: List(String))
+
+  /// Count the calls, the call time and the words allocated on the process
+  /// heap by the functions of the named modules in the processes, which is
+  /// what OTP's `tprof` calls `call_memory`. The result is one total per
+  /// function, with no call stacks. The modules are required for the reason a
+  /// call trace's are.
+  CountAllocation(modules: List(String))
 }
 
 /// Options of `pickglass profile`.
@@ -134,6 +141,21 @@ pub const trace_seconds_max = 10
 
 /// How long a call trace runs when `--seconds` is not given.
 pub const trace_seconds_default = 5
+
+/// The longest an allocation count may run, in seconds: the viewer's limit
+/// for a probe that counts allocation (`policy.max_duration_ms`).
+pub const allocation_seconds_max = 60
+
+/// How long an allocation count runs when `--seconds` is not given.
+pub const allocation_seconds_default = 5
+
+/// The most module names or prefixes an allocation count may name: the agent's
+/// limit of patterns for one counters probe.
+pub const allocation_modules_max = 8
+
+/// The most processes an allocation count may name: the viewer's limit for a
+/// counters probe (`policy.target_limit`).
+pub const allocation_processes_max = 8
 
 /// The most processes a call trace may name: the agent's limit.
 pub const trace_processes_max = 4
@@ -213,6 +235,9 @@ pub const usage =
                          --trace-calls --module MODULE [--module MODULE ...]
                          [--seconds S] [--out FILE]
                          [--format speedscope|collapsed|chrome|pgcap|text]
+       pickglass profile TARGET (--owner KIND:ID | --top N | --pid-text PID)
+                         --allocation --module MODULE [--module MODULE ...]
+                         [--seconds S] [--out FILE] [--format pgcap|text]
 
 TARGET is one of
   [--state-dir DIR] [--pid PID]
@@ -249,6 +274,20 @@ processes for at most 10 seconds (default 5) and builds a call tree from the
 exact calls and their times. At least one module is required, because the
 agent refuses to trace every function of a node. --rate and --include-waiting
 apply to sampling only.
+
+--allocation counts, for the functions of the modules named with --module
+(at most 8 names or prefixes, written as for --trace-calls) in at most 8
+processes for at most 60 seconds (default 5), the calls, the call time and the
+words allocated on the process heap while each function ran, the way OTP's
+tprof does with call_memory. It reports allocated words with the target's word
+size and the bytes that gives, the calls, the processes traced, the window
+asked for and the window observed, and any function the VM could not read. The
+words are cumulative allocation, not retained heap, resident memory or native
+memory, and they are function totals: there are no call stacks. The result is
+written as a capture (--format pgcap, the default, to pickglass-profile.pgcap
+or --out) that pickglass view opens and pickglass compare reads, or printed as
+text (--format text). --top is at most 8 here. --rate and --include-waiting
+do not apply.
 
 open attaches, serves the pages on 127.0.0.1 and prints a single-use URL.
 view serves the pages over a capture file with no target. compare prints two
@@ -506,7 +545,9 @@ type Flags {
     rate_hz: Option(Int),
     waiting: Option(Nil),
     tracing: Option(Nil),
+    allocating: Option(Nil),
     modules: List(String),
+    format: Option(ProfileFormat),
   )
 }
 
@@ -517,7 +558,9 @@ const no_flags =
     rate_hz: None,
     waiting: None,
     tracing: None,
+    allocating: None,
     modules: [],
+    format: None,
   )
 
 fn profile_flags(
@@ -568,7 +611,7 @@ fn profile_flags(
       case int.parse(value) {
         Ok(count) if count >= 1 && count <= 60 ->
           profile_flags(rest, options, Flags(..flags, seconds: Some(count)))
-        _ -> Error("--seconds must be between 1 and 60 for a stack probe")
+        _ -> Error("--seconds must be between 1 and 60")
       }
     ["--rate", value, ..rest] ->
       case int.parse(value) {
@@ -580,6 +623,8 @@ fn profile_flags(
       profile_flags(rest, options, Flags(..flags, waiting: Some(Nil)))
     ["--trace-calls", ..rest] ->
       profile_flags(rest, options, Flags(..flags, tracing: Some(Nil)))
+    ["--allocation", ..rest] ->
+      profile_flags(rest, options, Flags(..flags, allocating: Some(Nil)))
     ["--module", value, ..rest] -> {
       use named <- result.try(module_arguments(value))
 
@@ -592,7 +637,11 @@ fn profile_flags(
     ["--format", value, ..rest] ->
       case profile_format(value) {
         Ok(format) ->
-          profile_flags(rest, ProfileOptions(..options, format:), flags)
+          profile_flags(
+            rest,
+            ProfileOptions(..options, format:),
+            Flags(..flags, format: Some(format)),
+          )
         Error(Nil) ->
           Error(
             "--format must be one of speedscope, collapsed, chrome, pgcap, text",
@@ -615,9 +664,14 @@ fn finish_profile(
     _ -> Error("profile takes only one of --owner, --top and --pid-text")
   })
 
-  case flags.tracing {
-    None -> finish_sampling(options, flags, target)
-    Some(Nil) -> finish_tracing(options, flags, target)
+  case flags.tracing, flags.allocating {
+    None, None -> finish_sampling(options, flags, target)
+    Some(Nil), None -> finish_tracing(options, flags, target)
+    None, Some(Nil) -> finish_allocation(options, flags, target)
+    Some(Nil), Some(Nil) ->
+      Error(
+        "--trace-calls and --allocation are two methods: a call trace builds a call tree, an allocation count builds function totals",
+      )
   }
 }
 
@@ -628,7 +682,9 @@ fn finish_sampling(
 ) -> Result(Command, String) {
   case flags.modules {
     [_, ..] ->
-      Error("--module applies to --trace-calls, which names what to trace")
+      Error(
+        "--module applies to --trace-calls and --allocation, which name what to trace",
+      )
     [] ->
       Ok(Profile(
         ProfileOptions(
@@ -686,6 +742,74 @@ fn finish_tracing(
               target:,
               seconds:,
               method: TraceCalls(modules: flags.modules),
+            ),
+          ))
+      }
+  }
+}
+
+// An allocation count shares a call trace's rules about modules, and has the
+// viewer's limits for a counters probe. It writes function totals, which have
+// no call stacks, so only the capture and the text can hold them, and the
+// capture is the default because the window cannot be taken again.
+fn finish_allocation(
+  options: ProfileOptions,
+  flags: Flags,
+  target: ProfileTarget,
+) -> Result(Command, String) {
+  let seconds = option.unwrap(flags.seconds, allocation_seconds_default)
+  let format = option.unwrap(flags.format, PgcapFormat)
+
+  use _ <- result.try(case list.length(flags.modules) {
+    count if count > allocation_modules_max ->
+      Error(
+        "--module names at most "
+        <> int.to_string(allocation_modules_max)
+        <> " modules or prefixes for --allocation, the agent's limit",
+      )
+    _ -> Ok(Nil)
+  })
+
+  case flags.modules, flags.rate_hz, flags.waiting, target, format {
+    [], _, _, _, _ ->
+      Error(
+        "--allocation needs at least one --module: the agent refuses to count every function of a node",
+      )
+    _, Some(_), _, _, _ ->
+      Error("--rate applies to stack sampling, not to --allocation")
+    _, _, Some(_), _, _ ->
+      Error(
+        "--include-waiting applies to stack sampling: an allocation count records no process status",
+      )
+    _, _, _, TopTarget(count), _ if count > allocation_processes_max ->
+      Error(
+        "--top must be between 1 and "
+        <> int.to_string(allocation_processes_max)
+        <> " for --allocation, the viewer's limit",
+      )
+    _, _, _, _, SpeedscopeFormat
+    | _, _, _, _, CollapsedFormat
+    | _, _, _, _, ChromeFormat
+    ->
+      Error(
+        "--allocation writes function totals, which have no call stacks: --format must be pgcap or text",
+      )
+    _, _, _, _, PgcapFormat | _, _, _, _, TextFormat ->
+      case seconds <= allocation_seconds_max {
+        False ->
+          Error(
+            "--seconds must be between 1 and "
+            <> int.to_string(allocation_seconds_max)
+            <> " for --allocation, the viewer's limit",
+          )
+        True ->
+          Ok(Profile(
+            ProfileOptions(
+              ..options,
+              target:,
+              seconds:,
+              format:,
+              method: CountAllocation(modules: flags.modules),
             ),
           ))
       }

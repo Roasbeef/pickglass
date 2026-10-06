@@ -186,7 +186,7 @@ pub fn decoder_refuses_a_bad_field_test() {
   let replace = fn(from: String, to: String) {
     json.parse(string.replace(valid, from, to), codec.decoder())
   }
-  assert replace("nanoseconds", "words") |> is_error
+  assert replace("nanoseconds", "furlongs") |> is_error
   assert replace("traced_calls", "psychic") |> is_error
   assert replace("\"precision\":\"none\"", "\"precision\":\"vague\"")
     |> is_error

@@ -815,6 +815,26 @@ pub fn calltrace_snapshot() -> Generator(wire.CalltraceSnapshot) {
   )
 }
 
+fn counter_facts() -> Generator(capture.CounterFacts) {
+  use requested_ms <- qcheck.bind(non_negative())
+  use processes <- qcheck.bind(maybe(non_negative()))
+  use called <- qcheck.bind(non_negative())
+  use read <- qcheck.bind(non_negative())
+  use unread <- qcheck.bind(non_negative())
+  use invalidated <- qcheck.bind(non_negative())
+  use total_words <- qcheck.map(non_negative())
+
+  capture.CounterFacts(
+    requested_ms:,
+    processes:,
+    called:,
+    read:,
+    unread:,
+    invalidated:,
+    total_words:,
+  )
+}
+
 fn cost_record() -> Generator(Record(String)) {
   use probe <- qcheck.bind(text())
   use enabled <- qcheck.bind(small_list(text()))
@@ -823,7 +843,8 @@ fn cost_record() -> Generator(Record(String)) {
   use bytes <- qcheck.bind(measurement())
   use wall_ms <- qcheck.bind(measurement())
   use outcome <- qcheck.bind(outcome())
-  use matched <- qcheck.map(maybe(non_negative()))
+  use matched <- qcheck.bind(maybe(non_negative()))
+  use counters <- qcheck.map(maybe(counter_facts()))
 
   capture.ProbeCostRecord(capture.ProbeCost(
     probe:,
@@ -834,6 +855,7 @@ fn cost_record() -> Generator(Record(String)) {
     wall_ms:,
     outcome:,
     matched:,
+    counters:,
   ))
 }
 

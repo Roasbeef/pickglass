@@ -348,10 +348,21 @@ the first release and merged over all the patterns. Allocation is read apart:
 `{<<"read_counter_memory">>, ProbeId}` gives `{<<"counter_memory">>, ProbeId,
 State, Memory}`, where `Memory` is `{<<"none">>}` for a probe that did not ask
 for `time_and_memory` (not a list of zeros) and otherwise `{<<"words">>,
-[{Module, Function, Arity, Words}]}`, the words allocated while each called
-function ran in the traced processes, largest first, at most 200. Read memory
-before stopping the probe, since a stop removes it. The 5,000-function cap and
-the deny list of hot modules apply to the whole set. A module name ending in `*` is a prefix: the agent lists the loaded modules whose
+Rows, Read, Unread, Words}`. Each row is `{Module, Function, Arity, Words,
+Calls, TimeUs}`: the words allocated on the process heap while each called
+function ran in the traced processes, with the calls and call time the same
+read found (so a viewer need not find the function in the time rows, which are
+the 200 largest by time), largest allocator first, at most 200. A traced
+function's words exclude those of the traced functions it calls. `Read` and
+`Unread` count the called functions that did and did not have a `call_memory`
+reading (one the VM no longer answers for, after a module reload, is unread and
+not a row), and `Words` sums the readings of every function read, so the rows
+can be put against the whole. Read memory before stopping the probe, since a
+stop removes it. `ElapsedMs` of `counters` is the time the probe has counted so
+far while it runs, and the whole window once it has ended, however long after
+it is read. A counters probe takes one of the two probe slots and has no slot of
+its own. The 5,000-function cap and the deny list of hot modules apply to the
+whole set. A module name ending in `*` is a prefix: the agent lists the loaded modules whose
 names start with it (`code:all_loaded()`, compared as bytes, no atom made) and
 arms each with `Function` `_`; any other function is `unknown_function`, a bare `*`
 and a prefix over 1,000 modules are `pattern_too_broad`, and a prefix no loaded

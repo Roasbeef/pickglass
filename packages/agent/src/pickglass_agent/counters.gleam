@@ -13,7 +13,9 @@
 //// eight, so that the code a question is about, which rarely sits in one
 //// module, is measured in one session and one interval. The function cap
 //// and the hot-module deny list apply to the whole set. With `call_memory`
-//// on, each row also carries the words allocated while the function ran.
+//// on, the VM also counts the words allocated while each function ran, and
+//// the snapshot lists the functions that allocated the most with their calls
+//// and call time, beside the sum over every function it could read.
 ////
 //// A probe ends in one of four ways, and in each the session is destroyed
 //// explicitly: its deadline passes, the viewer stops it, the agent shuts
@@ -45,16 +47,35 @@ pub type Row {
 }
 
 /// The words one function allocated while it ran, summed over the traced
-/// processes.
+/// processes, with the calls and call time the same read found. They travel
+/// together so that a viewer ranking functions by allocation does not have to
+/// find the same function in the time rows, which are ranked by time and cut
+/// at a different place.
 pub type MemoryRow {
-  MemoryRow(module: String, function: String, arity: Int, words: Int)
+  MemoryRow(
+    module: String,
+    function: String,
+    arity: Int,
+    words: Int,
+    calls: Int,
+    time_us: Int,
+  )
+}
+
+/// What the allocation reads of one snapshot add up to, over every called
+/// function and not only the rows kept. `read` functions had a `call_memory`
+/// reading and `unread` called functions did not, because the VM no longer
+/// answered for them. `words` sums the readings, so the rows kept can be put
+/// against the whole.
+pub type MemoryTotals {
+  MemoryTotals(read: Int, unread: Int, words: Int)
 }
 
 /// What a probe counted for allocation. A probe without `call_memory` has no
 /// reading, which is not the same as zero words.
 pub type Memory {
   NotCounted
-  Counted(rows: List(MemoryRow))
+  Counted(rows: List(MemoryRow), totals: MemoryTotals)
 }
 
 /// One `{Module, Function}` pattern. A function of `_` covers every
@@ -82,9 +103,11 @@ pub type Phase {
   /// Counting. The session handle is held here, and only here.
   Running(session: Session)
 
-  /// The deadline passed and the session is destroyed. The snapshot waits
-  /// to be read.
-  Finished(snapshot: Snapshot)
+  /// The deadline passed or the viewer stopped the probe, and the session is
+  /// destroyed. The snapshot waits to be read. `ended_ms` is when the session
+  /// was destroyed, which is the end of the window the counters cover: a
+  /// reading taken later does not make the window longer.
+  Finished(snapshot: Snapshot, ended_ms: Int)
 }
 
 /// One probe. `owner` is the link process of the viewer that started it; the
@@ -395,7 +418,14 @@ pub fn collect(
   let totals =
     seq.fold(
       patterns,
-      Totals(topk.new(max_rows), topk.new(max_rows), 0, 0, 0),
+      Totals(
+        topk.new(max_rows),
+        topk.new(max_rows),
+        MemoryTotals(read: 0, unread: 0, words: 0),
+        0,
+        0,
+        0,
+      ),
       fn(totals, pattern) { collect_pattern(totals, session, pattern, mode) },
     )
 
@@ -404,7 +434,10 @@ pub fn collect(
     memory: case mode {
       ffi_trace.TimeOnly -> NotCounted
       ffi_trace.TimeAndMemory ->
-        Counted(seq.map(topk.descending(totals.memory), fn(entry) { entry.1 }))
+        Counted(
+          rows: seq.map(topk.descending(totals.memory), fn(entry) { entry.1 }),
+          totals: totals.memory_totals,
+        )
     },
     functions: totals.functions,
     with_calls: totals.with_calls,
@@ -441,6 +474,7 @@ type Totals {
   Totals(
     top: topk.Top(Row),
     memory: topk.Top(MemoryRow),
+    memory_totals: MemoryTotals,
     functions: Int,
     with_calls: Int,
     invalidated: Int,
@@ -491,7 +525,20 @@ fn read_answer(
         0 -> totals
         _ ->
           Totals(
-            ..totals,
+            ..offer_memory(
+              totals,
+              session,
+              #(module, function),
+              MemoryRow(
+                ffi_term.atom_name(module),
+                ffi_term.atom_name(function),
+                arity,
+                0,
+                calls,
+                time_us,
+              ),
+              mode,
+            ),
             top: topk.offer(
               totals.top,
               time_us,
@@ -503,14 +550,6 @@ fn read_answer(
                 time_us,
               ),
             ),
-            memory: offer_memory(
-              totals.memory,
-              session,
-              module,
-              function,
-              arity,
-              mode,
-            ),
             with_calls: totals.with_calls + 1,
           )
       }
@@ -519,39 +558,52 @@ fn read_answer(
 }
 
 // The words a function allocated, summed over the traced processes, offered
-// to the bounded memory list. A probe that did not ask for memory offers
-// nothing, and a function whose reading cannot be taken is left out, so
-// neither shows as zero words.
+// to the bounded memory list. `row` carries everything but the words, which
+// are read here. A probe that did not ask for memory offers nothing, and a
+// function whose reading cannot be taken is counted as unread and left out,
+// so neither shows as zero words.
 fn offer_memory(
-  top: topk.Top(MemoryRow),
+  totals: Totals,
   session: Session,
-  module: Atom,
-  function: Atom,
-  arity: Int,
+  names: #(Atom, Atom),
+  row: MemoryRow,
   mode: CounterMode,
-) -> topk.Top(MemoryRow) {
+) -> Totals {
   case mode {
-    ffi_trace.TimeOnly -> top
+    ffi_trace.TimeOnly -> totals
     ffi_trace.TimeAndMemory ->
-      case ffi_trace.call_memory(session, module, function, arity) {
-        Error(Nil) -> top
+      case ffi_trace.call_memory(session, names.0, names.1, row.arity) {
+        Error(Nil) -> unread(totals)
         Ok(answer) ->
           case memory_words(answer) {
-            Error(Nil) -> top
+            Error(Nil) -> unread(totals)
             Ok(words) ->
-              topk.offer(
-                top,
-                words,
-                MemoryRow(
-                  ffi_term.atom_name(module),
-                  ffi_term.atom_name(function),
-                  arity,
+              Totals(
+                ..totals,
+                memory: topk.offer(
+                  totals.memory,
                   words,
+                  MemoryRow(..row, words:),
+                ),
+                memory_totals: MemoryTotals(
+                  ..totals.memory_totals,
+                  read: totals.memory_totals.read + 1,
+                  words: totals.memory_totals.words + words,
                 ),
               )
           }
       }
   }
+}
+
+fn unread(totals: Totals) -> Totals {
+  Totals(
+    ..totals,
+    memory_totals: MemoryTotals(
+      ..totals.memory_totals,
+      unread: totals.memory_totals.unread + 1,
+    ),
+  )
 }
 
 fn memory_words(answer: Term) -> Result(Int, Nil) {
@@ -604,7 +656,7 @@ pub fn destroy(probe: Probe) -> Nil {
 
       Nil
     }
-    Finished(_) -> Nil
+    Finished(..) -> Nil
   }
 }
 
@@ -621,12 +673,15 @@ pub fn destroy(probe: Probe) -> Nil {
 pub fn finish(probe: Probe) -> Probe {
   case probe.phase {
     Running(session) -> {
+      // The window ends when counting does, before the read that can take a
+      // while over thousands of functions.
+      let ended_ms = ffi_proc.now_ms()
       let snapshot = collect(session, probe.patterns, probe.mode)
 
       destroy(probe)
 
-      Probe(..probe, phase: Finished(snapshot))
+      Probe(..probe, phase: Finished(snapshot, ended_ms:))
     }
-    Finished(_) -> probe
+    Finished(..) -> probe
   }
 }

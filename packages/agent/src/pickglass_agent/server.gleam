@@ -1537,14 +1537,14 @@ fn snapshot_of(probe: Probe) -> counters.Snapshot {
   case probe.phase {
     counters.Running(session) ->
       counters.collect(session, probe.patterns, probe.mode)
-    counters.Finished(snapshot) -> snapshot
+    counters.Finished(snapshot:, ..) -> snapshot
   }
 }
 
 fn probe_state(probe: Probe) -> String {
   case probe.phase {
     counters.Running(_) -> "running"
-    counters.Finished(_) -> "finished"
+    counters.Finished(..) -> "finished"
   }
 }
 
@@ -1553,9 +1553,18 @@ fn probe_reply(probe: Probe, snapshot: counters.Snapshot) -> Term {
     probe.id,
     probe_state(probe),
     probe.matched,
-    ffi_proc.now_ms() - probe.started_ms,
+    window_ms(probe),
     snapshot,
   )
+}
+
+// How long a counters probe has counted: so far for a running probe, and the
+// whole window for one that ended, whenever it is read.
+fn window_ms(probe: Probe) -> Int {
+  case probe.phase {
+    counters.Running(_) -> ffi_proc.now_ms() - probe.started_ms
+    counters.Finished(ended_ms:, ..) -> ended_ms - probe.started_ms
+  }
 }
 
 fn running_count(probes: List(Probe)) -> Int {
@@ -1565,7 +1574,7 @@ fn running_count(probes: List(Probe)) -> Int {
 fn is_running(probe: Probe) -> Bool {
   case probe.phase {
     counters.Running(_) -> True
-    counters.Finished(_) -> False
+    counters.Finished(..) -> False
   }
 }
 

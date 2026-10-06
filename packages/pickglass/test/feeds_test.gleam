@@ -367,7 +367,7 @@ pub fn there_are_no_movers_before_a_checkpoint_test() {
 
 fn finished_counters() -> probe_book.ProbeRecord {
   probe_book.finish_counters(
-    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2),
+    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2, 1),
     wire.CountersSnapshot(
       probe_id: 7,
       state: wire.ProbeFinished,
@@ -410,9 +410,56 @@ pub fn the_profile_page_is_fed_from_the_finished_counters_probe_test() {
   assert data.header.info.coverage.achieved == 2
 }
 
+// An allocation profile is ranked by the words it counted, not by the call
+// time a counters profile is ranked by, and its page says what produced it.
+pub fn the_profile_page_ranks_an_allocation_probe_by_words_test() {
+  let probe =
+    probe_book.finish_allocation(
+      probe_book.started(9, policy.CallMemory, ["m"], 1000, 5000, 3, 2),
+      wire.CountersSnapshot(
+        probe_id: 9,
+        state: wire.ProbeFinished,
+        matched_functions: 3,
+        elapsed_ms: 5004,
+        functions: 3,
+        with_calls: 2,
+        invalidated: 0,
+        rows: [],
+      ),
+      wire.CounterMemorySnapshot(
+        9,
+        wire.ProbeFinished,
+        wire.MemoryCounted(
+          [
+            wire.FunctionMemory("m", "heavy", 1, 9000, 10, 100),
+            wire.FunctionMemory("m", "slow", 1, 40, 10, 90_000),
+          ],
+          wire.MemoryTotals(read: 2, unread: 0, words: 9040),
+        ),
+      ),
+      6000,
+    )
+  let found =
+    feeds.feeds_for(feeds.Profile, feeds.Inputs(..inputs([]), probes: [probe]))
+  let assert Ok(data) = profile_of(found)
+
+  assert data.header.source == profile.AllocationCounts
+  assert data.stacks == model.NoStacks(source: profile.AllocationCounts)
+  assert data.header.title == "probe 9 · m"
+  assert data.header.info.coverage.requested == 3
+  assert data.header.info.coverage.achieved == 2
+
+  // The table is by words: the function that allocated most is first, though
+  // the other took far longer.
+  let assert [first, ..] = data.top.rows
+
+  assert first.name == "m:heavy/1"
+  assert list.length(data.top.rows) == 2
+}
+
 pub fn the_profile_page_waits_when_no_probe_has_measured_anything_test() {
   let running =
-    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2)
+    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2, 1)
 
   assert profile_of(feeds.feeds_for(
       feeds.Profile,
@@ -453,7 +500,7 @@ pub fn a_chain_core_refuses_falls_back_to_the_unfiltered_profile_test() {
 
 pub fn the_probes_page_lists_active_probes_and_history_with_keys_test() {
   let running =
-    probe_book.started(8, policy.Counters, ["lists"], 5000, 30_000, 2)
+    probe_book.started(8, policy.Counters, ["lists"], 5000, 30_000, 2, 1)
   let found =
     feeds.feeds_for(
       feeds.Probes,
@@ -808,7 +855,7 @@ fn stacks_snapshot(samples: Int) -> wire.StacksSnapshot {
 pub fn a_stacks_profile_covers_samples_against_the_requested_rate_test() {
   let probe =
     probe_book.finish_stacks(
-      probe_book.started(3, policy.Sampling, ["*"], 1000, 10_000, 1),
+      probe_book.started(3, policy.Sampling, ["*"], 1000, 10_000, 1, 1),
       stacks_snapshot(500),
       12_000,
     )
@@ -829,7 +876,7 @@ pub fn a_stacks_profile_covers_samples_against_the_requested_rate_test() {
 
 fn silent_counters(matched: Int) -> probe_book.ProbeRecord {
   probe_book.finish_counters(
-    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, matched),
+    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, matched, 1),
     wire.CountersSnapshot(
       probe_id: 9,
       state: wire.ProbeFinished,

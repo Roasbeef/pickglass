@@ -20,7 +20,7 @@ fn snapshot(state: wire.ProbeState, invalidated: Int) -> wire.CountersSnapshot {
 }
 
 fn running() -> probe_book.ProbeRecord {
-  probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2)
+  probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2, 1)
 }
 
 pub fn a_started_probe_runs_and_counts_down_test() {
@@ -76,7 +76,7 @@ pub fn a_lost_probe_has_a_reason_and_no_profile_test() {
 pub fn the_latest_profiled_probe_skips_lost_and_running_ones_test() {
   let good =
     probe_book.finish_counters(
-      probe_book.started(5, policy.Counters, [], 0, 1, 1),
+      probe_book.started(5, policy.Counters, [], 0, 1, 1, 1),
       snapshot(wire.ProbeFinished, 0),
       10,
     )
@@ -121,17 +121,17 @@ pub fn the_bound_drops_the_oldest_finished_probes_and_never_a_running_one_test()
   // finished one last, and an old probe that is still running.
   let finished = fn(id) {
     probe_book.finish_lost(
-      probe_book.started(id, policy.Counters, ["lists"], 1000, 30_000, 2),
+      probe_book.started(id, policy.Counters, ["lists"], 1000, 30_000, 2, 1),
       "gone",
       2000,
     )
   }
   let probes = [
-    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, 2),
+    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, 2, 1),
     finished(8),
     finished(7),
     finished(6),
-    probe_book.started(5, policy.Counters, ["lists"], 1000, 30_000, 2),
+    probe_book.started(5, policy.Counters, ["lists"], 1000, 30_000, 2, 1),
   ]
   let #(kept, dropped) = probe_book.bound(probes, 2)
 

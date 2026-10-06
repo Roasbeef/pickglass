@@ -479,7 +479,8 @@ pub fn parse_duration(code: String) -> Result(DurationChoice, Nil) {
 
 /// The durations the plan form offers for a kind of probe, shortest first.
 /// They are what the agent runs: a call tree for at most ten seconds, a stack
-/// or events probe for at most a minute, a counters probe for any.
+/// or events probe for at most a minute, a counters probe for any, and a
+/// counters probe that also counts allocation for at most a minute.
 ///
 /// ## Examples
 ///
@@ -490,7 +491,11 @@ pub fn parse_duration(code: String) -> Result(DurationChoice, Nil) {
 pub fn durations_for(kind: policy.ProbeKind) -> List(DurationChoice) {
   case kind {
     policy.CallTree -> [Seconds5, Seconds10]
-    policy.Sampling | policy.SchedulingGc -> [Seconds10, Seconds30, Seconds60]
+    policy.Sampling | policy.SchedulingGc | policy.CallMemory -> [
+      Seconds10,
+      Seconds30,
+      Seconds60,
+    ]
     policy.Counters -> [Seconds10, Seconds30, Seconds60, Seconds300]
   }
 }
@@ -499,6 +504,7 @@ pub fn durations_for(kind: policy.ProbeKind) -> List(DurationChoice) {
 pub fn probe_code(kind: policy.ProbeKind) -> String {
   case kind {
     policy.Counters -> "counters"
+    policy.CallMemory -> "call_memory"
     policy.Sampling -> "sampling"
     policy.CallTree -> "call_tree"
     policy.SchedulingGc -> "scheduling_gc"
@@ -509,6 +515,7 @@ pub fn probe_code(kind: policy.ProbeKind) -> String {
 pub fn parse_probe(code: String) -> Result(policy.ProbeKind, Nil) {
   case code {
     "counters" -> Ok(policy.Counters)
+    "call_memory" -> Ok(policy.CallMemory)
     "sampling" -> Ok(policy.Sampling)
     "call_tree" -> Ok(policy.CallTree)
     "scheduling_gc" -> Ok(policy.SchedulingGc)

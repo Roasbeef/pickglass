@@ -127,7 +127,7 @@ fn speedscope_unit(value_type: ValueType) -> String {
   case value_type.unit {
     unit.Bytes -> "bytes"
     unit.Nanoseconds -> "nanoseconds"
-    unit.Count | unit.Reductions | unit.Ratio(_) -> "none"
+    unit.Count | unit.Reductions | unit.Words | unit.Ratio(_) -> "none"
   }
 }
 

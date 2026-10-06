@@ -26,8 +26,9 @@
 //// ## Flow
 ////
 //// - `started` records a probe the agent accepted.
-//// - `finish_counters`, `finish_stacks`, `finish_calltrace` and
-////   `finish_events` close it with the agent's last snapshot of its kind.
+//// - `finish_counters`, `finish_allocation`, `finish_stacks`,
+////   `finish_calltrace` and `finish_events` close it with the agent's last
+////   snapshot of its kind.
 //// - `to_records` and `of_records` map finished probes to and from a
 ////   capture's records.
 
@@ -36,6 +37,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import pickglass/allocation_profile
 import pickglass/calltrace_profile
 import pickglass/counters_profile
 import pickglass/profile_from_stacks
@@ -99,6 +101,9 @@ pub type ProbeRecord {
     duration_ms: Int,
     /// How many functions matched.
     matched: Int,
+    /// How many processes the probe traced or sampled, when it is known. A
+    /// probe read back from a capture knows it only if the capture kept it.
+    processes: Option(Int),
     state: ProbeState,
     /// What the probe measured besides its profile. Empty until the probe
     /// finishes.
@@ -111,7 +116,7 @@ pub type ProbeRecord {
 /// ## Examples
 ///
 /// ```gleam
-/// probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 12)
+/// probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 12, 2)
 /// ```
 pub fn started(
   probe_id: Int,
@@ -120,6 +125,7 @@ pub fn started(
   now_ms: Int,
   duration_ms: Int,
   matched: Int,
+  processes: Int,
 ) -> ProbeRecord {
   ProbeRecord(
     id: int.to_string(probe_id),
@@ -128,6 +134,7 @@ pub fn started(
     started_ms: now_ms,
     duration_ms:,
     matched:,
+    processes: Some(processes),
     state: Running,
     detail: NoDetail,
   )
@@ -188,6 +195,7 @@ fn closed_finish_counters(
       wall_ms: Known(snapshot.elapsed_ms),
       outcome: measure.Unrecorded,
       matched: None,
+      counters: None,
     )
 
   ProbeRecord(..probe, state: case counters_profile.build(snapshot) {
@@ -208,6 +216,106 @@ fn closed_finish_counters(
         notes: [],
       )
   })
+}
+
+/// Close a probe that counts allocation with the agent's last readings of its
+/// counters and of its allocation. The functions the agent listed become an
+/// `AllocationCounts` profile and what the profile cannot say (the window
+/// asked for, the processes traced, the functions read and not read) is kept
+/// as the cost record's facts. A probe the agent says counted no allocation is
+/// `Errored`, since there is nothing to profile, and a function the agent could
+/// not read is in the facts and the notes and never a row of zero words.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probe_book.finish_allocation(probe, counters, memory, 31_000)
+/// ```
+pub fn finish_allocation(
+  probe: ProbeRecord,
+  counters: wire.CountersSnapshot,
+  memory: wire.CounterMemorySnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
+  recorded(closed_finish_allocation(probe, counters, memory, now_ms))
+}
+
+fn closed_finish_allocation(
+  probe: ProbeRecord,
+  counters: wire.CountersSnapshot,
+  memory: wire.CounterMemorySnapshot,
+  now_ms: Int,
+) -> ProbeRecord {
+  let cost =
+    capture.ProbeCost(
+      probe: probe.id,
+      enabled: ["call_time", "call_memory"],
+      events: NotApplicable,
+      collector_reductions: NotApplicable,
+      bytes: NotApplicable,
+      wall_ms: Known(counters.elapsed_ms),
+      outcome: measure.Unrecorded,
+      matched: None,
+      counters: None,
+    )
+
+  ProbeRecord(..probe, state: case memory.memory {
+    wire.NoMemoryCounted ->
+      Finished(
+        ended_ms: now_ms,
+        outcome: measure.Errored("the agent counted no allocation"),
+        cost:,
+        profile: None,
+        notes: [],
+      )
+    wire.MemoryCounted(rows:, totals:) ->
+      case allocation_profile.build(rows) {
+        Error(_) ->
+          Finished(
+            ended_ms: now_ms,
+            outcome: measure.Errored(
+              "the allocation counters could not be read as a profile",
+            ),
+            cost:,
+            profile: None,
+            notes: [],
+          )
+        Ok(built) -> {
+          let facts =
+            allocation_profile.facts(
+              probe.duration_ms,
+              probe.processes,
+              counters,
+              totals,
+            )
+
+          Finished(
+            ended_ms: now_ms,
+            outcome: case totals.read > list.length(rows) {
+              True -> measure.Partial(measure.Truncated(measure.TopKLimit))
+              False -> measure.Complete
+            },
+            cost: capture.ProbeCost(..cost, counters: Some(facts)),
+            profile: Some(built),
+            notes: list.append(
+              allocation_notes(facts, list.length(rows)),
+              allocation_profile.caveats(facts, list.length(rows)),
+            ),
+          )
+        }
+      }
+  })
+}
+
+// What happened in the window, before the caveats about what the numbers mean.
+fn allocation_notes(facts: capture.CounterFacts, listed: Int) -> List(String) {
+  case facts.called, listed {
+    0, _ -> ["No traced function was called in the window."]
+    _, 0 -> [
+      "Functions were called, but none had an allocation reading, so the profile is empty.",
+    ]
+    _, _ -> []
+  }
 }
 
 /// Close a stack-sampling probe with the agent's aggregated stacks. The
@@ -246,6 +354,7 @@ fn closed_finish_stacks(
       wall_ms: Known(meter.elapsed_ms),
       outcome: measure.Unrecorded,
       matched: None,
+      counters: None,
     )
 
   case aggregated_of(snapshot) {
@@ -340,6 +449,7 @@ fn closed_finish_calltrace(
       wall_ms: Known(trace.elapsed_ms),
       outcome: measure.Unrecorded,
       matched: None,
+      counters: None,
     )
 
   case calltrace_profile.build(snapshot) {
@@ -427,6 +537,7 @@ fn closed_finish_events(
         wall_ms: Known(trace.elapsed_ms),
         outcome: measure.Unrecorded,
         matched: None,
+        counters: None,
       ),
       profile: None,
       notes: events_notes(snapshot),
@@ -632,6 +743,7 @@ fn closed_finish_lost(
         wall_ms: measure.Missing(measure.ProcessExited),
         outcome: measure.Unrecorded,
         matched: None,
+        counters: None,
       ),
       profile: None,
       notes: [],
@@ -843,31 +955,51 @@ fn probe_of(
       Some(capture.Profile(source: capture.SampledStacks, ..)) ->
         policy.Sampling
       Some(capture.Profile(source: capture.TracedCalls, ..)) -> policy.CallTree
-      Some(capture.Profile(source: capture.TracedCounters, ..))
-      | Some(capture.Profile(source: capture.AllocationCounts, ..)) ->
+      Some(capture.Profile(source: capture.TracedCounters, ..)) ->
         policy.Counters
+      Some(capture.Profile(source: capture.AllocationCounts, ..)) ->
+        policy.CallMemory
       None ->
         case detail {
           SchedulingDetail(..) -> policy.SchedulingGc
           CallSlices(..) -> policy.CallTree
-          NoDetail -> policy.Counters
+          NoDetail ->
+            case list.contains(cost.enabled, "call_memory") {
+              True -> policy.CallMemory
+              False -> policy.Counters
+            }
         }
     },
     modules: [],
     started_ms: 0,
-    duration_ms: 0,
+    duration_ms: option.map(cost.counters, fn(facts) { facts.requested_ms })
+      |> option.unwrap(0),
     // A capture that did not keep the match count has no request to put
     // the profile's size against, so the profile's own size stands in.
     matched: option.unwrap(cost.matched, case found {
       Some(item) -> list.length(profile.samples(item.payload))
       None -> 0
     }),
+    processes: option.then(cost.counters, fn(facts) { facts.processes }),
     state: Finished(
       ended_ms: 0,
       outcome: cost.outcome,
       cost:,
       profile: option.map(found, fn(item) { item.payload }),
-      notes: ["Read from a capture: when the probe ran is not recorded."],
+      notes: [
+        "Read from a capture: when the probe ran is not recorded.",
+        ..case cost.counters, found {
+          Some(facts), Some(item) -> {
+            let listed = list.length(profile.samples(item.payload))
+
+            list.append(
+              allocation_notes(facts, listed),
+              allocation_profile.caveats(facts, listed),
+            )
+          }
+          _, _ -> []
+        }
+      ],
     ),
     detail:,
   )

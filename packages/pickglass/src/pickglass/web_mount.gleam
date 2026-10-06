@@ -637,7 +637,10 @@ fn replan(
 fn form_rate(kind: policy.ProbeKind) -> Int {
   case kind {
     policy.Sampling -> gate.sampling_hz
-    policy.Counters | policy.CallTree | policy.SchedulingGc -> 0
+    policy.Counters
+    | policy.CallMemory
+    | policy.CallTree
+    | policy.SchedulingGc -> 0
   }
 }
 
