@@ -113,7 +113,22 @@ lapses, when the start fails, and when the probe ends; a pin the operator held
 first is never in `Held`. `seam.Page.profile` and `profile_notes` carry it to
 the pages, and `feeds.flow` is what every page but Probes draws above its body.
 
-the four probe kinds are run by `exec`. `calltrace_profile` turns a call tree
+the five probe kinds are run by `exec`. `policy.CallMemory` is a counter set in
+the `time_and_memory` mode: `exec` reads its allocation apart from its counters
+(`PolledAllocation` when a poll finds it ended, `AllocationStopped` on an
+operator's stop, which reads the allocation first and stops the probe whatever
+the read answered), and `allocation_profile` turns the rows into an
+`AllocationCounts` profile (calls, call time in ns, allocated words; one frame
+per function, so no stacks) and the `capture.CounterFacts` kept beside it.
+`probe_book.finish_allocation` closes the record; a called function with no
+allocation reading is in the facts and the notes and never a row. `pickglass
+profile --allocation --module` plans it through `seam.PlanAllocation`
+(`ByAllocation`, at most `seam.allocation_limit` processes), `allocation_report`
+words the result (words beside the word size, derived bytes only when the word
+size was read, the window asked for and observed, the unread and invalidated
+functions, and that the words are cumulative allocation and not retained heap)
+and `allocation_compare` adds the function-totals section to `pickglass compare`.
+The format is `pgcap` or `text`; speedscope, collapsed and Chrome need stacks. `calltrace_profile` turns a call tree
 into a `TracedCalls` profile (calls, inclusive and exclusive ns, drawn from
 exclusive) with the stop reason and drops as caveats; a scheduling probe has no
 profile and keeps its result as `probe_book.Detail`, which `to_records` writes as
@@ -227,6 +242,11 @@ messages to the feeder's subject.
   consumed by the attempt, and needs the session cookie.
 - `exec.poll_counters` is the one agent request made outside `exec.run`: it
   reads a probe an authorized command already started.
+- A missing allocation counter is never zero. A function appears in an
+  allocation profile only if it was called and its counter was read; the ones
+  that were not are counted in `CounterFacts` and said in the report and the
+  notes. A word count becomes bytes only with the word size the target reported.
+  Two captures with different word sizes are compared with no direction.
 - A capture's footer digest is the SHA-256 of every line before the footer,
   each with its newline; `capture_file.read` recomputes it from the file text.
 - `pickglass_agent@@main.beam` is never pushed.

@@ -18,6 +18,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
+import pickglass/allocation_compare
 import pickglass/capture_file.{type Loaded}
 import pickglass/compare_build
 import pickglass_core/measure.{type Measurement, Known}
@@ -47,7 +48,17 @@ pub fn run(baseline: String, candidate: String) -> Int {
       second,
     ))
 
-    render(page, digest_line(first), digest_line(second))
+    string.join(
+      [
+        render(page, digest_line(first), digest_line(second)),
+        ..allocation_compare.lines(
+          first,
+          second,
+          provenance.comparability(page.baseline, page.candidate),
+        )
+      ],
+      "\n",
+    )
   }
 
   case report {
