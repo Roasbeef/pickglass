@@ -9,6 +9,12 @@ set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/pickglass-test-install.XXXXXXXX")
+
+# The prune script works on physical paths, because that is what lsof
+# reports. Resolve the scratch directory the same way, so the paths the test
+# puts on command lines match: macOS's default TMPDIR sits under /var, which
+# is a link to /private/var.
+TMP=$(CDPATH= cd -- "$TMP" && pwd -P)
 PIDS=
 cleanup() {
   for pid in $PIDS; do kill "$pid" 2>/dev/null || true; done
