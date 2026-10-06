@@ -226,7 +226,7 @@ pub fn a_difference_inside_the_variation_seen_states_no_direction_test() {
 // A sampled-stacks probe that ran at `hz`, with the same two stacks and
 // `samples` samples spread over them.
 fn sampled(hz: Int, samples: Int) -> probe_book.ProbeRecord {
-  probe_book.started(11, policy.Sampling, [], 0, 10_000, 1)
+  probe_book.started(11, policy.Sampling, [], 0, 10_000, 1, 1)
   |> probe_book.finish_stacks(sampled_snapshot(hz, samples), 1000)
 }
 
@@ -303,7 +303,7 @@ fn replayed(probe: probe_book.ProbeRecord) -> probe_book.ProbeRecord {
 
 pub fn a_probe_read_from_a_capture_keeps_how_it_ended_test() {
   let cut =
-    probe_book.started(11, policy.Sampling, [], 0, 10_000, 4)
+    probe_book.started(11, policy.Sampling, [], 0, 10_000, 4, 1)
     |> probe_book.finish_stacks(
       wire.StacksSnapshot(
         ..sampled_snapshot(50, 500),
@@ -329,6 +329,7 @@ pub fn a_probe_from_a_capture_without_an_outcome_is_not_called_complete_test() {
           ..cost,
           outcome: measure.Unrecorded,
           matched: None,
+          counters: None,
         ),
       )
     })

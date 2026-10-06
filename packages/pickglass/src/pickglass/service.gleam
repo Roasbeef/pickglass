@@ -688,6 +688,16 @@ fn apply(
       seam.ProbeStopped(snapshot),
     )
 
+    // An operator's stop of an allocation probe answers as any counters
+    // probe does; the allocation travels in the record the stop closes.
+    exec.AllocationStopped(counters, memory) -> #(
+      State(
+        ..state,
+        probes: close_allocation(state.probes, counters, memory, now),
+      ),
+      seam.ProbeStopped(counters),
+    )
+
     exec.Collected(snapshot) -> #(
       remember(state, seam.GcRan(snapshot, now)),
       seam.Collected(snapshot),
@@ -958,6 +968,7 @@ fn record_started(
         now,
         deadline_ms,
         matched,
+        list.length(spec.targets),
       ),
       ..probes
     ]
@@ -1051,6 +1062,23 @@ fn close_events(
   })
 }
 
+fn close_allocation(
+  probes: List(ProbeRecord),
+  counters: wire.CountersSnapshot,
+  memory: wire.CounterMemorySnapshot,
+  now: Int,
+) -> List(ProbeRecord) {
+  list.map(probes, fn(probe) {
+    case
+      probe.id == int.to_string(counters.probe_id),
+      probe_book.is_running(probe)
+    {
+      True, True -> probe_book.finish_allocation(probe, counters, memory, now)
+      _, _ -> probe
+    }
+  })
+}
+
 fn close_probe(
   probes: List(ProbeRecord),
   snapshot: wire.CountersSnapshot,
@@ -1117,6 +1145,7 @@ fn poll_one(remote: Remote, probe: ProbeRecord) -> exec.Poll {
     exec.Polled(_)
     | exec.PolledStacks(_)
     | exec.PolledCalltrace(_)
+    | exec.PolledAllocation(..)
     | exec.PolledEvents(_) -> exec.release_probe(remote, probe.id, probe.kind)
   }
 
@@ -1160,6 +1189,12 @@ fn apply_poll(
               wire.ProbeRunning -> probe
               wire.ProbeFinished | wire.ProbeStopped ->
                 probe_book.finish_counters(probe, snapshot, now)
+            }
+          exec.PolledAllocation(counters, memory) ->
+            case counters.state {
+              wire.ProbeRunning -> probe
+              wire.ProbeFinished | wire.ProbeStopped ->
+                probe_book.finish_allocation(probe, counters, memory, now)
             }
           exec.PolledStacks(snapshot) ->
             case snapshot.state {
@@ -1429,6 +1464,16 @@ pub fn profile(
         seam.ByCalls(modules),
       )
 
+    seam.PlanAllocation(pids:, chosen:, duration_ms:, modules:) ->
+      plan_fresh(
+        service,
+        principal,
+        pids,
+        chosen,
+        duration_ms,
+        seam.ByAllocation(modules),
+      )
+
     seam.PlanRecording(pids:, chosen:, duration_ms:) ->
       plan_fresh(service, principal, pids, chosen, duration_ms, seam.ByEvents)
 
@@ -1498,6 +1543,13 @@ fn replannable(
         <> " processes and this profile chose "
         <> int.to_string(note.processes),
       )
+    Ok(note), seam.ByAllocation(_) if note.processes > seam.allocation_limit ->
+      Error(
+        "an allocation profile takes at most "
+        <> int.to_string(seam.allocation_limit)
+        <> " processes and this profile chose "
+        <> int.to_string(note.processes),
+      )
     Ok(_), _ -> Ok(Nil)
   }
 }
@@ -1523,6 +1575,7 @@ fn plan_profile(
   let limit = case method {
     seam.ByStacks(_) -> seam.profile_limit
     seam.ByCalls(_) -> seam.trace_limit
+    seam.ByAllocation(_) -> seam.allocation_limit
     seam.ByEvents -> seam.recording_limit
   }
 
@@ -1536,11 +1589,11 @@ fn plan_profile(
       release_now(service, principal, inherited)
 
       seam.Rejected(
-        "a "
-        <> case method {
-          seam.ByStacks(_) -> "profile"
-          seam.ByCalls(_) -> "call trace"
-          seam.ByEvents -> "recording"
+        case method {
+          seam.ByStacks(_) -> "a profile"
+          seam.ByCalls(_) -> "a call trace"
+          seam.ByAllocation(_) -> "an allocation profile"
+          seam.ByEvents -> "a recording"
         }
         <> " takes at most "
         <> int.to_string(limit)
@@ -1640,6 +1693,8 @@ fn plan_over(
         seam.PlanProbe(policy.Sampling, targets, [], duration_ms, rate_hz)
       seam.ByCalls(modules) ->
         seam.PlanProbe(policy.CallTree, targets, modules, duration_ms, 0)
+      seam.ByAllocation(modules) ->
+        seam.PlanProbe(policy.CallMemory, targets, modules, duration_ms, 0)
       seam.ByEvents ->
         seam.PlanProbe(policy.SchedulingGc, targets, [], duration_ms, 0)
     })

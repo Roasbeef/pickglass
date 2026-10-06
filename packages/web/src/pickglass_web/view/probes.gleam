@@ -105,6 +105,7 @@ pub fn cost_text(
 pub fn kind_title(kind: policy.ProbeKind) -> String {
   case kind {
     policy.Counters -> "Trace counters"
+    policy.CallMemory -> "Count allocation"
     policy.Sampling -> "Sample stacks"
     policy.CallTree -> "Trace call tree"
     policy.SchedulingGc -> "Scheduling and GC events"
@@ -117,6 +118,11 @@ fn kind_action(kind: policy.ProbeKind) -> String {
       "Counts calls and measures call time for the matched functions in the "
       <> "targets, in a trace session of its own. No trace message is sent; "
       <> "the VM keeps the counters and one snapshot is read at the end."
+    policy.CallMemory ->
+      "Counts calls, measures call time and counts the words allocated on the "
+      <> "process heap while each matched function runs, for the targets, in a "
+      <> "trace session of its own. No trace message is sent; the VM keeps the "
+      <> "counters and one snapshot is read at the end."
     policy.Sampling ->
       "Reads the current stack of each target at a fixed rate and merges "
       <> "the stacks into a profile."
@@ -182,6 +188,11 @@ fn does_not_prove(kind: policy.ProbeKind) -> String {
     policy.Counters ->
       "That callees that were not traced are cheap: their time is charged "
       <> "to the traced caller. That the workload is unaffected."
+    policy.CallMemory ->
+      "That the words are memory in use: they are cumulative allocation, not "
+      <> "retained heap, resident memory or native memory. That untraced "
+      <> "callees allocate little: their words are charged to the traced "
+      <> "caller. That the workload is unaffected."
     policy.Sampling ->
       "That time was spent where samples landed: long BIFs and NIFs are "
       <> "under-sampled. Width is a share of samples, not of time."

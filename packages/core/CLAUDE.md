@@ -13,8 +13,11 @@ for a future offline viewer. Lint R6 enforces that.
 ## Key Types
 
 `unit.Unit` is the closed list of units every measurement carries:
-`Bytes`, `Count`, `Reductions`, `Nanoseconds` and `Ratio(per:)`.
-`Reductions` is a work counter and never converts to time.
+`Bytes`, `Count`, `Reductions`, `Words`, `Nanoseconds` and `Ratio(per:)`.
+`Reductions` is a work counter and never converts to time. `Words` is the unit
+of an allocation profile's allocated-words column, kept as the VM counted it;
+words become bytes only by the word size a capture's runtime facts record, and
+a reader without it shows words.
 
 `measure.Measurement` is `Known(Int)`, `Missing(MissingReason)` or
 `NotApplicable`. There is no accessor that defaults an absent reading:
@@ -84,7 +87,16 @@ width into their parent, caps the box count, and reports omitted boxes
 `Export` with text and a loss list. `export/text` is the terminal summary: the
 top functions with flat and cumulative shares and an indented call tree.
 `policy.ProbeSpec` carries `rate_hz`; `sampling_rate_hz` is the rate the agent
-will run once its ceiling is shared between the targets.
+will run once its ceiling is shared between the targets. `policy.CallMemory` is
+a counters probe that also counts allocated words: it needs modules (at most
+8), at most 8 pinned targets and at most a minute, and is `Counting`.
+`wire.FunctionMemory` is an allocation row with the calls and call time of the
+same read, and `wire.CounterMemory` carries `wire.MemoryTotals` (functions
+read, functions unread, words summed over every one read) beside the rows.
+`capture.ProbeCost.counters` is `Some(capture.CounterFacts)` for an allocation
+probe: the window asked for, the processes traced, and the called, read, unread
+and invalidated functions, so a function missing from the profile is not read
+as one that allocated nothing.
 
 `profile/activity` splits stack samples by the process status the agent
 reports: `profile_from_stacks` keeps it as the `pickglass::status` label, an

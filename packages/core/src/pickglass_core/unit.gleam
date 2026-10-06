@@ -23,6 +23,11 @@ pub type Unit {
   /// to time.
   Reductions
 
+  /// Machine words of the target VM, as its allocation counters count them.
+  /// The size of a word is a fact about the target, not about this unit, so a
+  /// word count is never shown as bytes without that size.
+  Words
+
   /// Nanoseconds of wall-clock or measured duration.
   Nanoseconds
 
@@ -47,6 +52,7 @@ pub fn to_string(unit: Unit) -> String {
     Bytes -> "bytes"
     Count -> "count"
     Reductions -> "reductions"
+    Words -> "words"
     Nanoseconds -> "nanoseconds"
     Ratio(per:) -> "ratio/" <> int.to_string(per)
   }
@@ -65,7 +71,7 @@ pub fn to_string(unit: Unit) -> String {
 /// unit.parse("ratio/100")
 /// // -> Ok(Ratio(per: 100))
 ///
-/// unit.parse("words")
+/// unit.parse("furlongs")
 /// // -> Error(Nil)
 /// ```
 pub fn parse(text: String) -> Result(Unit, Nil) {
@@ -73,6 +79,7 @@ pub fn parse(text: String) -> Result(Unit, Nil) {
     "bytes" -> Ok(Bytes)
     "count" -> Ok(Count)
     "reductions" -> Ok(Reductions)
+    "words" -> Ok(Words)
     "nanoseconds" -> Ok(Nanoseconds)
     "ratio/" <> per -> parse_ratio(per)
     _ -> Error(Nil)

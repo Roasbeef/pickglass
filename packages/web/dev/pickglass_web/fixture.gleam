@@ -1305,6 +1305,7 @@ pub fn probes() -> model.ProbesModel {
           wall_ms: Known(30_004),
           outcome: measure.Complete,
           matched: Some(12),
+          counters: None,
         ),
       ),
       model.ProbeHistoryRow(
@@ -1324,6 +1325,7 @@ pub fn probes() -> model.ProbesModel {
             reason: measure.BudgetReached,
           )),
           matched: None,
+          counters: None,
         ),
       ),
     ],

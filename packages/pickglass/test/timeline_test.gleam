@@ -85,7 +85,8 @@ pub fn every_memory_category_has_a_track_in_bytes_test() {
 }
 
 pub fn checkpoints_and_probes_are_spans_on_the_same_axis_test() {
-  let probe = probe_book.started(7, policy.Counters, ["lists"], 2500, 30_000, 3)
+  let probe =
+    probe_book.started(7, policy.Counters, ["lists"], 2500, 30_000, 3, 1)
   let mark = marks.take(capture.Checkpoint("idle-0", 0, 4000), None)
   let assert Ok(page) =
     timeline_build.build(ring(), [mark], [probe], 2000, 4500)

@@ -293,12 +293,22 @@ fn words_of(profile: Profile, column: Column) -> Words {
 fn value_text(u: Unit, value: Int) -> String {
   case u {
     unit.Nanoseconds -> time_text(value)
-    unit.Count | unit.Bytes | unit.Reductions | unit.Ratio(_) ->
+    unit.Count | unit.Bytes | unit.Reductions | unit.Words | unit.Ratio(_) ->
       int.to_string(value)
   }
 }
 
-fn time_text(ns: Int) -> String {
+/// A duration in nanoseconds written in the largest unit that keeps a whole
+/// digit, with ASCII units, so a terminal that is not set to UTF-8 prints it
+/// as written.
+///
+/// ## Examples
+///
+/// ```gleam
+/// text.time_text(1_500_000)
+/// // -> "1.50 ms"
+/// ```
+pub fn time_text(ns: Int) -> String {
   case ns {
     _ if ns >= 1_000_000_000 -> scaled(ns, 1_000_000_000, " s")
     _ if ns >= 1_000_000 -> scaled(ns, 1_000_000, " ms")

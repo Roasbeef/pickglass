@@ -367,7 +367,7 @@ pub fn there_are_no_movers_before_a_checkpoint_test() {
 
 fn finished_counters() -> probe_book.ProbeRecord {
   probe_book.finish_counters(
-    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2),
+    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2, 1),
     wire.CountersSnapshot(
       probe_id: 7,
       state: wire.ProbeFinished,
@@ -412,7 +412,7 @@ pub fn the_profile_page_is_fed_from_the_finished_counters_probe_test() {
 
 pub fn the_profile_page_waits_when_no_probe_has_measured_anything_test() {
   let running =
-    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2)
+    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2, 1)
 
   assert profile_of(feeds.feeds_for(
       feeds.Profile,
@@ -453,7 +453,7 @@ pub fn a_chain_core_refuses_falls_back_to_the_unfiltered_profile_test() {
 
 pub fn the_probes_page_lists_active_probes_and_history_with_keys_test() {
   let running =
-    probe_book.started(8, policy.Counters, ["lists"], 5000, 30_000, 2)
+    probe_book.started(8, policy.Counters, ["lists"], 5000, 30_000, 2, 1)
   let found =
     feeds.feeds_for(
       feeds.Probes,
@@ -808,7 +808,7 @@ fn stacks_snapshot(samples: Int) -> wire.StacksSnapshot {
 pub fn a_stacks_profile_covers_samples_against_the_requested_rate_test() {
   let probe =
     probe_book.finish_stacks(
-      probe_book.started(3, policy.Sampling, ["*"], 1000, 10_000, 1),
+      probe_book.started(3, policy.Sampling, ["*"], 1000, 10_000, 1, 1),
       stacks_snapshot(500),
       12_000,
     )
@@ -829,7 +829,7 @@ pub fn a_stacks_profile_covers_samples_against_the_requested_rate_test() {
 
 fn silent_counters(matched: Int) -> probe_book.ProbeRecord {
   probe_book.finish_counters(
-    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, matched),
+    probe_book.started(9, policy.Counters, ["lists"], 1000, 30_000, matched, 1),
     wire.CountersSnapshot(
       probe_id: 9,
       state: wire.ProbeFinished,

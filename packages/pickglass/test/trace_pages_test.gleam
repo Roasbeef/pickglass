@@ -64,7 +64,7 @@ fn stacks(running: Int, waiting: Int) -> wire.StacksSnapshot {
 }
 
 fn sampled(running: Int, waiting: Int, processes: Int) -> ProbeRecord {
-  probe_book.started(11, policy.Sampling, [], 1000, 10_000, processes)
+  probe_book.started(11, policy.Sampling, [], 1000, 10_000, processes, 1)
   |> probe_book.finish_stacks(
     stacks(running, waiting),
     ffi_dist.system_time_ms(),
@@ -108,12 +108,12 @@ fn calls_snapshot() -> wire.CalltraceSnapshot {
 }
 
 fn traced() -> ProbeRecord {
-  probe_book.started(21, policy.CallTree, ["lists"], 1000, 5000, 4)
+  probe_book.started(21, policy.CallTree, ["lists"], 1000, 5000, 4, 1)
   |> probe_book.finish_calltrace(calls_snapshot(), ffi_dist.system_time_ms())
 }
 
 fn recording() -> ProbeRecord {
-  probe_book.started(31, policy.SchedulingGc, [], 1000, 10_000, 2)
+  probe_book.started(31, policy.SchedulingGc, [], 1000, 10_000, 2, 1)
   |> probe_book.finish_events(
     wire.EventsSnapshot(
       probe_id: 31,
@@ -272,7 +272,7 @@ pub fn a_profile_of_idle_processes_has_nothing_running_to_draw_test() {
 pub fn an_older_profile_with_no_statuses_is_neither_filtered_nor_split_test() {
   // A profile read from a capture written before statuses were kept.
   let stackless =
-    probe_book.started(11, policy.Sampling, [], 0, 10_000, 2)
+    probe_book.started(11, policy.Sampling, [], 0, 10_000, 2, 1)
     |> probe_book.finish_stacks(
       wire.StacksSnapshot(..stacks(10, 0), stacks: [
         wire.SampledStack(10, "", [0, 1]),
@@ -506,7 +506,7 @@ pub fn a_timeline_export_without_the_capability_is_refused_test() {
 // how long, and not "0 traced calls over 0 functions".
 pub fn an_empty_call_trace_says_what_it_was_armed_on_test() {
   let empty =
-    probe_book.started(21, policy.CallTree, ["lists"], 1000, 5000, 751)
+    probe_book.started(21, policy.CallTree, ["lists"], 1000, 5000, 751, 1)
     |> probe_book.finish_calltrace(
       wire.CalltraceSnapshot(..calls_snapshot(), paths: [], slices: []),
       ffi_dist.system_time_ms(),

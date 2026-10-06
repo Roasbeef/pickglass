@@ -418,6 +418,12 @@ pub fn the_form_offers_the_durations_each_kind_runs_for_test() {
   assert msg.durations_for(policy.Counters)
     == [msg.Seconds10, msg.Seconds30, msg.Seconds60, msg.Seconds300]
 
+  // A probe that also counts allocation is held to a minute.
+  assert msg.durations_for(policy.CallMemory)
+    == [msg.Seconds10, msg.Seconds30, msg.Seconds60]
+  assert msg.parse_probe(msg.probe_code(policy.CallMemory))
+    == Ok(policy.CallMemory)
+
   let call_tree = html(pick_kind(policy.CallTree))
 
   assert string.contains(call_tree, "value=\"5s\"")

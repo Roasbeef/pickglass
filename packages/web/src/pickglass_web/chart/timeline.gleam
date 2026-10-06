@@ -254,7 +254,7 @@ type Shape {
 fn shape_of(u: Unit) -> Shape {
   case u {
     unit.Bytes | unit.Count -> StepLine
-    unit.Reductions | unit.Nanoseconds | unit.Ratio(_) -> Bars
+    unit.Reductions | unit.Words | unit.Nanoseconds | unit.Ratio(_) -> Bars
   }
 }
 

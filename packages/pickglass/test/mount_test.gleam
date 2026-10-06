@@ -67,6 +67,7 @@ fn sampled() -> probe_book.ProbeRecord {
     started_ms: 1000,
     duration_ms: 10_000,
     matched: 0,
+    processes: Some(1),
     state: probe_book.Finished(
       ended_ms: 11_000,
       outcome: measure.Complete,
@@ -79,6 +80,7 @@ fn sampled() -> probe_book.ProbeRecord {
         wall_ms: measure.Known(10_000),
         outcome: measure.Complete,
         matched: Some(1),
+        counters: None,
       ),
       profile: Some(built),
       notes: [],
@@ -269,7 +271,7 @@ pub fn a_format_that_needs_stacks_is_refused_for_counters_with_a_reason_test() {
 
 fn counters_probe() -> probe_book.ProbeRecord {
   probe_book.finish_counters(
-    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2),
+    probe_book.started(7, policy.Counters, ["lists"], 1000, 30_000, 2, 1),
     wire.CountersSnapshot(
       probe_id: 7,
       state: wire.ProbeFinished,

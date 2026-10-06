@@ -106,8 +106,13 @@ pub type Principal {
 
 /// The kind of probe a command starts.
 pub type ProbeKind {
-  /// Per-function counts, time and allocation on pinned processes.
+  /// Per-function call counts and call time on pinned processes.
   Counters
+
+  /// Per-function call counts, call time and allocated words on pinned
+  /// processes, for named modules. The words are cumulative allocation while
+  /// the function ran, which is not retained heap.
+  CallMemory
 
   /// Polled stack samples of pinned processes.
   Sampling
@@ -240,7 +245,7 @@ pub fn required_capabilities(command: Command) -> List(Capability) {
 
 fn probe_capabilities(kind: ProbeKind) -> List(Capability) {
   case kind {
-    Counters | Sampling | CallTree | SchedulingGc -> [Profile]
+    Counters | CallMemory | Sampling | CallTree | SchedulingGc -> [Profile]
   }
 }
 
@@ -335,7 +340,7 @@ pub fn perturbation_of(command: Command) -> Perturbation {
 fn probe_perturbation(kind: ProbeKind) -> Perturbation {
   case kind {
     Sampling -> Polling
-    Counters -> Counting
+    Counters | CallMemory -> Counting
     CallTree | SchedulingGc -> Tracing
   }
 }
@@ -437,6 +442,7 @@ fn describe_spec(spec: ProbeSpec) -> List(String) {
 pub fn probe_code(kind: ProbeKind) -> String {
   case kind {
     Counters -> "counters"
+    CallMemory -> "call_memory"
     Sampling -> "sampling"
     CallTree -> "call_tree"
     SchedulingGc -> "scheduling_gc"
@@ -486,7 +492,10 @@ pub const max_probe_duration_ms = 300_000
 /// The longest a probe of this kind may run. The agent cuts a stack sampling
 /// or events probe to a minute and a call tree probe to ten seconds, so a plan
 /// for longer would describe a scope the agent does not run; the limit here is
-/// what the agent enforces.
+/// what the agent enforces. A counters probe is allowed the agent's five
+/// minutes, and a probe that also counts allocation is held to a minute by the
+/// viewer, because the VM keeps two counters for every function it traces and
+/// the window is the only bound on how long that cost is paid.
 ///
 /// ## Examples
 ///
@@ -498,6 +507,7 @@ pub fn max_duration_ms(kind: ProbeKind) -> Int {
   case kind {
     Sampling | SchedulingGc -> 60_000
     CallTree -> 10_000
+    CallMemory -> 60_000
     Counters -> max_probe_duration_ms
   }
 }
@@ -516,7 +526,7 @@ pub fn target_limit(kind: ProbeKind) -> Int {
   case kind {
     Sampling -> 16
     CallTree -> 4
-    Counters | SchedulingGc -> 8
+    Counters | CallMemory | SchedulingGc -> 8
   }
 }
 
@@ -570,7 +580,7 @@ pub fn sampling_rate_hz(requested: Int, targets: Int) -> Int {
 /// ```
 pub fn module_limit(kind: ProbeKind) -> Int {
   case kind {
-    CallTree -> 8
+    CallTree | CallMemory -> 8
     Counters | Sampling | SchedulingGc -> max_probe_modules
   }
 }
@@ -587,7 +597,7 @@ pub fn module_limit(kind: ProbeKind) -> Int {
 /// ```
 pub fn needs_modules(kind: ProbeKind) -> Bool {
   case kind {
-    Counters | CallTree -> True
+    Counters | CallMemory | CallTree -> True
     Sampling | SchedulingGc -> False
   }
 }
@@ -631,7 +641,7 @@ fn check_rate(spec: ProbeSpec) -> Result(Nil, SpecError) {
         True -> Ok(Nil)
         False -> Error(BadRate(max_hz: max_total_sampling_hz))
       }
-    Counters | CallTree | SchedulingGc -> Ok(Nil)
+    Counters | CallMemory | CallTree | SchedulingGc -> Ok(Nil)
   }
 }
 

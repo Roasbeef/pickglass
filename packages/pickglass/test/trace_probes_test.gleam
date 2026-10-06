@@ -99,7 +99,7 @@ fn events(stop: wire.TraceStop) -> wire.EventsSnapshot {
 }
 
 fn started(kind: policy.ProbeKind, id: Int) -> ProbeRecord {
-  probe_book.started(id, kind, ["lists"], 0, 5000, 2)
+  probe_book.started(id, kind, ["lists"], 0, 5000, 2, 1)
 }
 
 fn finished_calls() -> ProbeRecord {
