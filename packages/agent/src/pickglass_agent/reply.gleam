@@ -355,8 +355,13 @@ fn counter_row(row: counters.Row) -> Term {
 }
 
 /// The answer to `read_counter_memory`: the probe's state and, for a probe
-/// that counted allocation, the words each function allocated. A probe that
-/// did not is `{<<"none">>}`, which is not a list of zeros.
+/// that counted allocation, `{<<"words">>, Rows, Read, Unread, Words}`. Each
+/// row is `{Module, Function, Arity, Words, Calls, TimeUs}`, the functions that
+/// allocated the most, with the calls and call time the same read found.
+/// `Read` and `Unread` count the called functions that did and did not have an
+/// allocation reading, and `Words` is the sum over every one that did, so the
+/// rows can be put against the whole. A probe that did not count allocation is
+/// `{<<"none">>}`, which is not a list of zeros.
 pub fn counter_memory(
   probe_id: Int,
   state: String,
@@ -365,14 +370,27 @@ pub fn counter_memory(
   ffi_term.coerce(
     #("counter_memory", probe_id, state, case snapshot.memory {
       counters.NotCounted -> ffi_term.coerce(#("none"))
-      counters.Counted(rows) ->
-        ffi_term.coerce(#("words", seq.map(rows, memory_row)))
+      counters.Counted(rows:, totals:) ->
+        ffi_term.coerce(#(
+          "words",
+          seq.map(rows, memory_row),
+          totals.read,
+          totals.unread,
+          totals.words,
+        ))
     }),
   )
 }
 
 fn memory_row(row: counters.MemoryRow) -> Term {
-  ffi_term.coerce(#(row.module, row.function, row.arity, row.words))
+  ffi_term.coerce(#(
+    row.module,
+    row.function,
+    row.arity,
+    row.words,
+    row.calls,
+    row.time_us,
+  ))
 }
 
 /// The answer to `detach`, sent after every session is destroyed.
