@@ -258,6 +258,36 @@ pub fn a_cookie_argument_is_refused_test() {
   )
 }
 
+// The TLS options are consumed by the release launcher before the program
+// starts. One that reaches the parser was not, and the message says how to
+// supply it instead of reporting an unknown option.
+pub fn a_distribution_boot_option_that_reaches_the_parser_is_explained_test() {
+  list.each(
+    [
+      ["attach", "--node", "a@127.0.0.1", "--proto-dist", "inet_tls"],
+      ["open", "--ssl-dist-optfile", "/f", "--node", "a@127.0.0.1"],
+      ["attach", "--proto-dist=inet_tls", "--node", "a@127.0.0.1"],
+      ["attach", "--ssl-dist-optfile=/f", "--node", "a@127.0.0.1"],
+      ["attach", "--name", "me@127.0.0.1", "--node", "a@127.0.0.1"],
+      ["attach", "--name=me@127.0.0.1", "--node", "a@127.0.0.1"],
+    ],
+    fn(arguments) {
+      let assert Error(message) = cli.parse(arguments)
+        as "a boot option must not be treated as unknown"
+
+      assert string.contains(message, "ERL_FLAGS")
+    },
+  )
+}
+
+pub fn usage_names_the_standard_tls_options_and_no_loom_variable_test() {
+  assert string.contains(
+    cli.usage,
+    "--proto-dist inet_tls --ssl-dist-optfile PATH",
+  )
+  assert !string.contains(cli.usage, "LOOM_")
+}
+
 pub fn usage_says_where_the_cookie_comes_from_test() {
   assert string.contains(cli.usage, "never from an argument or the")
   assert string.contains(cli.usage, "~/.erlang.cookie")
