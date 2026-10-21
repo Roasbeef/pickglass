@@ -15,7 +15,7 @@ TOOLS := lint
 
 .PHONY: check
 check: ## Full gate: format, warning-free build, tests, lint, doc-check, agent checks
-	@$(MAKE) --no-print-directory fmt-check build test test-install lint doc-check agent-imports agent-e2e
+	@$(MAKE) --no-print-directory fmt-check build test test-install test-launcher lint doc-check agent-imports agent-e2e
 	@echo "check clean"
 
 .PHONY: build
@@ -36,6 +36,10 @@ test: ## Run tests only (skips format check)
 .PHONY: test-install
 test-install: ## Test scripts/install.sh and scripts/prune_installs.sh on scratch prefixes
 	@scripts/test_install.sh
+
+.PHONY: test-launcher
+test-launcher: ## Test how scripts/launcher.sh.in splits emulator flags from program arguments
+	@scripts/test_launcher.sh
 
 # --------------------------------------------------------------- formatting
 

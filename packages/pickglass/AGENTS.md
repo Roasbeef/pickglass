@@ -196,6 +196,13 @@ messages to the feeder's subject.
   hidden node uses the target's naming mode. OTP's `connect_node` answers
   `false` for a down node, a wrong cookie and a wrong mode alike, so
   `attach.diagnose` asks epmd and retries in the other mode to tell them apart.
+- The transport of distribution is fixed when the VM boots, so TLS is set by
+  the launcher (`scripts/launcher.sh.in`), not by Gleam code: it turns
+  `--proto-dist`, `--ssl-dist-optfile` and `--name` into emulator flags
+  (`-name` with `-hidden -dist_listen false`, so a named viewer is still hidden
+  and non-listening) before the program starts, and `cli.extract_selection`
+  refuses them, with the `ERL_FLAGS` equivalent, if one arrives anyway. Pickglass
+  reads nothing from the options file and has no Loom-specific setting.
 - The viewer's own VM has no distribution cookie: the release launcher
   passes `-nocookie`, and `ffi_dist.start_hidden_node` refuses to start
   distribution in a VM that has neither `-nocookie` nor `-setcookie`, because

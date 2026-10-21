@@ -248,6 +248,17 @@ TARGET is one of
       its node name (app@127.0.0.1 for -name, app@myhost for -sname)
 The two are mutually exclusive.
 
+To attach to a node that runs TLS distribution, start pickglass with the
+standard Erlang options for it, in front of or after the command:
+  --proto-dist inet_tls --ssl-dist-optfile PATH
+PATH is an ssl_dist_optfile that names this machine's certificate, key and
+the authority that signed the node's, and the node accepts only a certificate
+it has been told about. Pickglass reads nothing from the file. Setting
+ERL_FLAGS=\"-proto_dist inet_tls -ssl_dist_optfile PATH\" does the same.
+A node that lists the nodes it accepts by name needs pickglass to join under
+that name, which --name NAME@HOST sets (otherwise the name is random for each
+attach).
+
 The cookie is read from a file and never from an argument or the
 environment, because argument lists and environments are readable by other
 local users and end up in shell history. --cookie and --setcookie are
@@ -382,13 +393,27 @@ fn extract(
         _ -> Error("--pid must be a positive integer")
       }
     ["--cookie", ..] | ["--setcookie", ..] -> Error(cookie_argument_refused)
+    ["--proto-dist", ..] | ["--ssl-dist-optfile", ..] | ["--name", ..] ->
+      Error(boot_flag_refused)
     [flag, ..rest] ->
-      case string.starts_with(flag, "--cookie=") {
-        True -> Error(cookie_argument_refused)
-        False -> extract(rest, selection, [flag, ..kept])
+      case
+        string.starts_with(flag, "--cookie="),
+        string.starts_with(flag, "--proto-dist="),
+        string.starts_with(flag, "--ssl-dist-optfile=")
+        || string.starts_with(flag, "--name=")
+      {
+        True, _, _ -> Error(cookie_argument_refused)
+        _, True, _ | _, _, True -> Error(boot_flag_refused)
+        False, False, False -> extract(rest, selection, [flag, ..kept])
       }
   }
 }
+
+// The release launcher takes these two out of the arguments and gives them to
+// the emulator, because the transport of distribution is fixed when the VM
+// boots. Seeing one here means the VM was started some other way.
+const boot_flag_refused =
+  "--proto-dist, --ssl-dist-optfile and --name are VM boot options that the release launcher (bin/pickglass) hands to the emulator; started another way, set ERL_FLAGS=\"-proto_dist inet_tls -ssl_dist_optfile PATH -name NAME@HOST -hidden -dist_listen false\" instead"
 
 const cookie_argument_refused =
   "a cookie is never taken from the command line, where other local users can read it; put it in a file readable by you alone and pass --cookie-file PATH (the default is ~/.erlang.cookie)"
