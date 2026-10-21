@@ -252,6 +252,46 @@ message that points at `--cookie-file`.
 Pickglass never creates `~/.erlang.cookie`, and its own VM starts with no
 cookie of its own. The cookie it reads is set for your node only.
 
+## Nodes that run TLS distribution
+
+A node can run Erlang distribution over TLS (`-proto_dist inet_tls`), and
+then it accepts only a node whose certificate it trusts. Pickglass attaches to
+such a node with the two standard Erlang options that choose the transport. It
+has no other TLS settings and knows nothing about who started the target:
+
+```sh
+pickglass attach --node app@127.0.0.1 \
+  --proto-dist inet_tls --ssl-dist-optfile /path/to/ssl_dist.conf
+```
+
+`--ssl-dist-optfile` names an
+[`ssl_dist_optfile`](https://www.erlang.org/doc/apps/ssl/ssl_distribution.html)
+(OTP's "Using SSL for Erlang distribution"): a file of TLS options for the
+`client` side that names the certificate and key pickglass presents and the
+authority that signed the target's certificate. The same file works with
+`erl -proto_dist inet_tls -ssl_dist_optfile PATH -name me@127.0.0.1 -remsh
+app@127.0.0.1`, and with Observer started the same way. Where the
+certificate comes from is up to the target's operator.
+
+Pickglass joins under a random node name (`pickglass_viewer_...@127.0.0.1`)
+that changes with each attach. A target that accepts only listed nodes, by
+name, drops any other, so it needs a fixed one: `--name me@127.0.0.1` starts the
+viewer's VM under that name, still hidden and still with no listening port. Use
+the name the target's operator listed for you.
+
+The two options are consumed by the release launcher and handed to the
+emulator, because the transport is fixed when a VM boots. The environment does
+the same: `ERL_FLAGS="-proto_dist inet_tls -ssl_dist_optfile PATH"
+pickglass attach ...` is equivalent (add `-name NAME@HOST -hidden -dist_listen
+false` for a fixed name). The cookie is still the target's, read from
+a file as above. TLS replaces the transport and the certificate check; it does
+not replace the cookie.
+
+The option values are paths and a protocol name, never a secret. The key the
+file points at should be readable by you alone. The check on where a target may
+run is unchanged: the host must still be this machine (see Which targets are
+allowed).
+
 ## Which targets are allowed
 
 For now pickglass attaches to nodes on the same machine only. The host in
@@ -498,6 +538,7 @@ Each failure has one message.
 | `the target runs OTP N; pickglass needs OTP 28 or newer` | Upgrade the target. |
 | `refusing HOST: pickglass attaches to nodes on this machine only for now` | The host is not local. |
 | `--node cannot be combined with --state-dir or --pid` | Pick one way to find the target. |
+| `--proto-dist, --ssl-dist-optfile and --name are VM boot options ...` | The VM was not started by the release launcher. Set `ERL_FLAGS` instead. |
 | `a pickglass agent of another build is already attached to this node (it runs build A; this viewer carries build B)` | Another pickglass is attached, and it was built with different agent modules from this one. Detach it, or use the same pickglass build. Several viewers of the same build can attach at once. |
 | `the pickglass agent on this node already serves the most viewers it allows` | Eight viewers are attached. Detach one and try again. |
 | `another pickglass viewer has held this node's attach claim for too long` | Another viewer was loading the agent into the node and did not finish. The claim expires on its own after 15 seconds; try again. |

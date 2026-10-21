@@ -88,6 +88,9 @@ pages until you press Ctrl-C or use the Detach button. `--save-dir`, `--port`
 and `--cadence` set where captures go, which port to serve on and how often the
 viewer reads. `--node` cannot be combined with `--state-dir` or `--pid`, and
 `--cookie-file` names the cookie file when it is not `~/.erlang.cookie`.
+`--proto-dist inet_tls --ssl-dist-optfile PATH` attaches to a node that runs
+TLS distribution; they are Erlang's own options, passed to the viewer's VM, and
+`docs/attach.md` says what the file holds.
 `pickglass --help` has the full usage. To start your own node so it can be
 attached to, see [`docs/attach.md`](docs/attach.md).
 
