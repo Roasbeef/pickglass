@@ -287,6 +287,36 @@ false` for a fixed name). The cookie is still the target's, read from
 a file as above. TLS replaces the transport and the certificate check; it does
 not replace the cookie.
 
+### One flag: the attach directory
+
+Four options for one attach is a lot to type, so an operator can hand over a
+directory instead:
+
+```sh
+pickglass attach --node app@127.0.0.1 --attach-dir /path/to/dir
+```
+
+The directory holds three files, and pickglass knows nothing about who made
+them:
+
+- `ssl_dist.conf` is the stock `ssl_dist_optfile` described above.
+- `.erlang.cookie` is the target's cookie, in the usual cookie-file format.
+- `node` is one line: the viewer's own node name, such as
+  `inspector@127.0.0.1`.
+
+`--attach-dir DIR` expands to `--proto-dist inet_tls --ssl-dist-optfile
+DIR/ssl_dist.conf --name NAME` (NAME is the line in `node`, and the viewer is
+hidden and does not listen, as with `--name`) and, unless `--cookie-file` is
+given, to `--cookie-file DIR/.erlang.cookie`. `PICKGLASS_ATTACH_DIR` supplies
+the directory when the flag is absent; the flag wins over the variable, and an
+explicit `--proto-dist`, `--ssl-dist-optfile`, `--name` or `--cookie-file`
+wins over the directory. A bare `--` ends the scan, as for the other options.
+
+The launcher checks the directory before the VM starts. A missing directory,
+an absent or empty `ssl_dist.conf` or `node`, or a `node` of more than one
+line is a one-line error naming the path. The error never prints a file's
+contents, since the directory holds the cookie.
+
 The option values are paths and a protocol name, never a secret. The key the
 file points at should be readable by you alone. The check on where a target may
 run is unchanged: the host must still be this machine (see Which targets are

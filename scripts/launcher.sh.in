@@ -16,7 +16,17 @@ root=$(dirname "$here")
 # is still hidden and still opens no listening port. Nothing else changes: the
 # cookie is still read from a file and set per peer. An operator who prefers
 # the environment can set ERL_FLAGS, which the emulator reads itself.
-dist_flags=()
+#
+# `--attach-dir DIR` (or PICKGLASS_ATTACH_DIR, with the flag winning) names a
+# directory that holds everything a TLS attach needs: `ssl_dist.conf` (the
+# optfile), `.erlang.cookie` (the target's cookie) and `node` (one line, the
+# viewer's own node name). It supplies defaults for the three options above and
+# for `--cookie-file`, so any of them given explicitly wins over the directory.
+proto=""
+optfile=""
+name=""
+cookie_given=""
+attach_dir="${PICKGLASS_ATTACH_DIR:-}"
 passed=()
 while (( $# > 0 )); do
   case "$1" in
@@ -25,21 +35,30 @@ while (( $# > 0 )); do
       passed+=("$@")
       break
       ;;
-    --proto-dist | --ssl-dist-optfile | --name)
+    --proto-dist | --ssl-dist-optfile | --name | --attach-dir)
       (( $# >= 2 )) || { echo "pickglass: $1 needs a value" >&2; exit 2; }
       case "$1" in
-        --proto-dist) dist_flags+=(-proto_dist "$2") ;;
-        --name) dist_flags+=(-name "$2" -hidden -dist_listen false) ;;
-        *) dist_flags+=(-ssl_dist_optfile "$2") ;;
+        --proto-dist) proto=$2 ;;
+        --name) name=$2 ;;
+        --attach-dir) attach_dir=$2 ;;
+        *) optfile=$2 ;;
       esac
       shift 2
       ;;
-    --proto-dist=* | --ssl-dist-optfile=* | --name=*)
+    --proto-dist=* | --ssl-dist-optfile=* | --name=* | --attach-dir=*)
       case "$1" in
-        --proto-dist=*) dist_flags+=(-proto_dist "${1#*=}") ;;
-        --name=*) dist_flags+=(-name "${1#*=}" -hidden -dist_listen false) ;;
-        *) dist_flags+=(-ssl_dist_optfile "${1#*=}") ;;
+        --proto-dist=*) proto=${1#*=} ;;
+        --name=*) name=${1#*=} ;;
+        --attach-dir=*) attach_dir=${1#*=} ;;
+        *) optfile=${1#*=} ;;
       esac
+      shift
+      ;;
+    --cookie-file | --cookie-file=*)
+      # The program still parses this; the launcher only needs to know that
+      # the directory's cookie must not be offered as a default.
+      cookie_given=1
+      passed+=("$1")
       shift
       ;;
     *)
@@ -48,6 +67,40 @@ while (( $# > 0 )); do
       ;;
   esac
 done
+
+# The directory is checked before the emulator starts. An error names a path
+# and never prints a file's contents, because the directory also holds the
+# cookie; only the node name is ever read.
+if [[ -n "$attach_dir" ]]; then
+  [[ -d "$attach_dir" ]] \
+    || { echo "pickglass: attach directory $attach_dir does not exist" >&2; exit 2; }
+  if [[ -z "$optfile" ]]; then
+    [[ -s "$attach_dir/ssl_dist.conf" ]] \
+      || { echo "pickglass: $attach_dir/ssl_dist.conf is missing or empty" >&2; exit 2; }
+    optfile="$attach_dir/ssl_dist.conf"
+  fi
+  if [[ -z "$name" ]]; then
+    [[ -s "$attach_dir/node" ]] \
+      || { echo "pickglass: $attach_dir/node is missing or empty" >&2; exit 2; }
+    [[ $(grep -c '' "$attach_dir/node") -eq 1 ]] \
+      || { echo "pickglass: $attach_dir/node must hold exactly one line" >&2; exit 2; }
+    name=$(<"$attach_dir/node")
+    [[ -n "${name//[[:space:]]/}" ]] \
+      || { echo "pickglass: $attach_dir/node is empty" >&2; exit 2; }
+  fi
+  proto=${proto:-inet_tls}
+
+  # The cookie default goes in front of the program's arguments, where the
+  # Gleam parser reads `--cookie-file` like any other.
+  if [[ -z "$cookie_given" ]]; then
+    passed=(--cookie-file "$attach_dir/.erlang.cookie" ${passed[@]+"${passed[@]}"})
+  fi
+fi
+
+dist_flags=()
+[[ -z "$proto" ]] || dist_flags+=(-proto_dist "$proto")
+[[ -z "$optfile" ]] || dist_flags+=(-ssl_dist_optfile "$optfile")
+[[ -z "$name" ]] || dist_flags+=(-name "$name" -hidden -dist_listen false)
 
 # `-nocookie` gives the viewer's VM no distribution cookie of its own. Without
 # it, starting distribution makes OTP's `auth` create ~/.erlang.cookie in the

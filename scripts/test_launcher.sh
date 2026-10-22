@@ -81,4 +81,74 @@ grep -q "needs a value" "$TMP/err" || fail "no reason was printed"
 out=$(run --proto-dist inet_tls --ssl-dist-optfile /f)
 before_extra "$out" | grep -qx -- '-nocookie' || fail "-nocookie is gone"
 
+# An attach directory expands to the TLS flags and a cookie default.
+D="$TMP/dir"
+mkdir -p "$D"
+echo "conf" > "$D/ssl_dist.conf"
+echo "cookie" > "$D/.erlang.cookie"
+echo "inspector@127.0.0.1" > "$D/node"
+
+out=$(run attach --node app@127.0.0.1 --attach-dir "$D")
+b=$(before_extra "$out")
+printf '%s\n' "$b" | grep -A1 -x -- '-proto_dist' | grep -qx inet_tls \
+  || fail "attach dir: -proto_dist"
+printf '%s\n' "$b" | grep -A1 -x -- '-ssl_dist_optfile' | grep -qx "$D/ssl_dist.conf" \
+  || fail "attach dir: optfile"
+printf '%s\n' "$b" | grep -A1 -x -- '-name' | grep -qx inspector@127.0.0.1 \
+  || fail "attach dir: name"
+printf '%s\n' "$b" | grep -qx -- '-hidden' || fail "attach dir: not hidden"
+printf '%s\n' "$b" | grep -A1 -x -- '-dist_listen' | grep -qx false \
+  || fail "attach dir: listens"
+[ "$(after_extra "$out")" = "--cookie-file
+$D/.erlang.cookie
+attach
+--node
+app@127.0.0.1" ] || fail "attach dir: program arguments"
+
+# The = spelling and the environment variable work; the flag beats the env.
+out=$(run attach --attach-dir="$D")
+before_extra "$out" | grep -qx inspector@127.0.0.1 || fail "= spelling"
+out=$(PICKGLASS_ATTACH_DIR="$D" run attach)
+before_extra "$out" | grep -qx inspector@127.0.0.1 || fail "env var"
+mkdir -p "$TMP/other"
+out=$(PICKGLASS_ATTACH_DIR="$TMP/other" run attach --attach-dir "$D")
+before_extra "$out" | grep -qx inspector@127.0.0.1 || fail "flag lost to env"
+
+# Explicit options and an explicit cookie file win over the directory.
+out=$(run attach --attach-dir "$D" --name me@h --proto-dist inet_tcp \
+  --ssl-dist-optfile /f --cookie-file /c)
+b=$(before_extra "$out")
+printf '%s\n' "$b" | grep -A1 -x -- '-name' | grep -qx me@h || fail "name precedence"
+printf '%s\n' "$b" | grep -A1 -x -- '-proto_dist' | grep -qx inet_tcp \
+  || fail "proto precedence"
+printf '%s\n' "$b" | grep -A1 -x -- '-ssl_dist_optfile' | grep -qx /f \
+  || fail "optfile precedence"
+[ "$(after_extra "$out")" = "attach
+--cookie-file
+/c" ] || fail "cookie precedence"
+out=$(run attach --attach-dir "$D" --cookie-file=/c)
+after_extra "$out" | grep -qx "$D/.erlang.cookie" && fail "cookie default added"
+
+# After a bare -- the flag is the program's, not ours.
+out=$(run attach -- --attach-dir "$D")
+before_extra "$out" | grep -qx -- '-name' && fail "-- did not stop --attach-dir"
+
+# Missing or malformed directory contents are one-line errors that never print
+# file contents.
+if run attach --attach-dir "$TMP/nope" 2>"$TMP/err"; then fail "no dir accepted"; fi
+grep -q "does not exist" "$TMP/err" || fail "no dir message"
+for f in ssl_dist.conf node; do
+  mv "$D/$f" "$D/$f.bak"
+  if run attach --attach-dir "$D" 2>"$TMP/err"; then fail "missing $f accepted"; fi
+  grep -q "$f is missing or empty" "$TMP/err" || fail "no message for $f"
+  [ "$(wc -l < "$TMP/err")" -eq 1 ] || fail "error for $f is not one line"
+  mv "$D/$f.bak" "$D/$f"
+done
+printf 'a@h\nb@h\n' > "$D/node"
+if run attach --attach-dir "$D" 2>"$TMP/err"; then fail "two-line node accepted"; fi
+grep -q "exactly one line" "$TMP/err" || fail "no two-line message"
+grep -q "a@h" "$TMP/err" && fail "node contents leaked"
+echo "inspector@127.0.0.1" > "$D/node"
+if run attach --attach-dir 2>"$TMP/err"; then fail "missing value accepted"; fi
+
 echo "launcher tests passed"
