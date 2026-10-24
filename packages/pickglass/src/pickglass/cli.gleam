@@ -955,6 +955,7 @@ pub fn connect(
         endpoint.check_loopback(
           named.host,
           result.unwrap(ffi_dist.local_hostname(), ""),
+          ffi_dist.local_interface_addresses(),
         )
         |> result.map_error(endpoint.describe_error),
       )
