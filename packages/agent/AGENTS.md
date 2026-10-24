@@ -304,8 +304,16 @@ whose label advertises `<<"measure">>` is asked. Errors: `stale_pin`,
 **Stack sampling probe.** `{<<"start_stacks">>, Tokens, RateHz, DurationMs,
 MaxSamples}` (1 to 16 tokens, `RateHz` 1 to 1,000 and cut to `1000 /
 targets`, `DurationMs` 100 to 60,000, `MaxSamples` 1 to 200,000) gives
-`{<<"stacks_started">>, ProbeId, Targets, RateHz, DurationMs, MaxSamples}`
-with the values after clamping. `{<<"read_stacks">>, ProbeId}` and
+`{<<"stacks_started">>, ProbeId, Targets, RateHz, DurationMs, MaxSamples,
+Dropped}` with the values after clamping. A pin goes when its process exits,
+so a request over many processes of a busy node can find some gone at the
+start. With the five-element form, or a sixth element `<<"refuse">>`, any such
+pin refuses the whole probe with `stale_pin` and `Dropped` is `[]`. With a sixth
+element `<<"drop">>` the agent samples the processes whose pins remain,
+`Targets` counts them, and `Dropped` lists the pin numbers of the request's
+tokens that were gone; it never samples a process the request did not name,
+and it still refuses with `stale_pin` when no pin remains. The rate is cut by
+the number of tokens asked for, not the number left. `{<<"read_stacks">>, ProbeId}` and
 `{<<"stop_stacks">>, ProbeId}` give `{<<"stacks">>, ProbeId, State, Stop,
 Meter, Frames, Stacks}`:
 - `State` is `<<"running"|"finished"|"stopped">>`; `Stop` is

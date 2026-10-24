@@ -209,7 +209,7 @@ scenario_counter_set(Target, PinId) ->
 %% two-probe limit while it runs.
 scenario_stacks(Target, PinId) ->
     Pin = {<<"boot-1">>, PinId},
-    {<<"stacks_started">>, Id, 1, 200, 1000, 100000} =
+    {<<"stacks_started">>, Id, 1, 200, 1000, 100000, []} =
         ask(Target, {<<"start_stacks">>, [Pin], 200, 1000, 100000}),
     check("a stack probe starts and echoes its clamped parameters", true),
     {<<"error">>, <<"probe_limit">>, _} =
@@ -251,6 +251,24 @@ scenario_stacks(Target, PinId) ->
     check("stopping a finished probe returns its result", true),
     {<<"error">>, <<"no_such_probe">>, _} = ask(Target, {<<"read_stacks">>, Id}),
     check("a stopped probe is gone", true),
+    %% A pin whose process has exited is gone from the table, so an unknown
+    %% pin number stands for it. A request that says drop samples the rest
+    %% and names what it left out; one that says nothing, or refuse, keeps
+    %% the old all-or-nothing answer.
+    Gone = {<<"boot-1">>, PinId + 100},
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask(Target, {<<"start_stacks">>, [Pin, Gone], 100, 1000, 1000}),
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask(Target, {<<"start_stacks">>, [Pin, Gone], 100, 1000, 1000, <<"refuse">>}),
+    check("a stack probe over a gone pin is refused unless told to drop it", true),
+    {<<"error">>, <<"stale_pin">>, _} =
+        ask(Target, {<<"start_stacks">>, [Gone], 100, 1000, 1000, <<"drop">>}),
+    check("a stack probe with no live pin is refused even when told to drop", true),
+    {<<"stacks_started">>, Drop, 1, _, _, _, [Dropped]} =
+        ask(Target, {<<"start_stacks">>, [Pin, Gone], 100, 1000, 1000, <<"drop">>}),
+    check("a stack probe told to drop a gone pin samples the rest and names it",
+          Dropped =:= PinId + 100),
+    {<<"stacks">>, Drop, _, _, _, _, _} = ask(Target, {<<"stop_stacks">>, Drop}),
     ok.
 
 %% The call tree probe: it folds events into paths in the tracer, stops at its
@@ -698,7 +716,7 @@ scenario_viewer_killed(Target, Work) ->
     check("the viewer's probe is running", length(sessions(Target)) >= 2),
     check("scheduler wall time is on", is_list(statistics_on(Target))),
     {<<"pinned">>, <<"boot-2">>, SPin, _} = ask(Target, {<<"pin">>, pid_text(Target, Work)}),
-    {<<"stacks_started">>, _, _, _, _, _} =
+    {<<"stacks_started">>, _, _, _, _, _, _} =
         ask(Target, {<<"start_stacks">>, [{<<"boot-2">>, SPin}], 100, 60000, 1000000}),
     timer:sleep(200),
     check("a sampler process is running mid sample", length(agent_processes(Target)) >= 2),
@@ -940,7 +958,7 @@ scenario_shared_attach(Target, Work) ->
     {<<"counters_started">>, C1, _, _} =
         ask_as(Target, V1, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
                             {<<"pins">>, [{<<"boot-1">>, P1}]}, 60000}),
-    {<<"stacks_started">>, S1, 1, _, _, _} =
+    {<<"stacks_started">>, S1, 1, _, _, _, _} =
         ask_as(Target, V1, {<<"start_stacks">>, [{<<"boot-1">>, P1}], 200, 60000, 100000}),
     {<<"error">>, <<"probe_limit">>, _} =
         ask_as(Target, V2, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
@@ -1029,7 +1047,7 @@ scenario_shared_detach(Target, Work) ->
     {<<"counters_started">>, _, _, _} =
         ask_as(Target, V1, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,
                             {<<"pins">>, [{<<"boot-1">>, P1}]}, 60000}),
-    {<<"stacks_started">>, _, 1, _, _, _} =
+    {<<"stacks_started">>, _, 1, _, _, _, _} =
         ask_as(Target, V1, {<<"start_stacks">>, [{<<"boot-1">>, P1}], 100, 60000, 100000}),
     {<<"scheduler">>, <<"collecting">>, _} = ask_as(Target, V1, {<<"scheduler">>, <<"on">>}),
     check("the first viewer holds a trace session, a sampler and the flag",
@@ -1079,7 +1097,7 @@ scenario_shared_viewer_killed(Target, Work) ->
         ask_as(Target, Survivor, {<<"pin">>, pid_text(Target, Work)}),
     {<<"pinned">>, <<"boot-2">>, VPin, _} =
         ask_as(Target, VLink, {<<"pin">>, pid_text(Target, Work)}),
-    {<<"stacks_started">>, SId, 1, _, _, _} =
+    {<<"stacks_started">>, SId, 1, _, _, _, _} =
         ask_as(Target, Survivor, {<<"start_stacks">>, [{<<"boot-1">>, SPin}], 100, 60000, 1000000}),
     {<<"counters_started">>, _, _, _} =
         ask_as(Target, VLink, {<<"start_counters">>, <<"pg_e2e_work">>, <<"work">>,

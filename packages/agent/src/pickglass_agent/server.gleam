@@ -614,7 +614,7 @@ fn dispatch(envelope: Envelope, viewer: Viewer, state: State) -> Next(State) {
       targeted_gc(state, reply_to, reference, token, deadline_ms)
     request.SelfMeasure(token, budget_ms) ->
       self_measure(state, reply_to, reference, token, budget_ms)
-    request.StartStacks(tokens, rate_hz, duration_ms, max_samples) ->
+    request.StartStacks(tokens, rate_hz, duration_ms, max_samples, missing) ->
       start_stacks(
         state,
         reply_to,
@@ -623,6 +623,7 @@ fn dispatch(envelope: Envelope, viewer: Viewer, state: State) -> Next(State) {
         rate_hz,
         duration_ms,
         max_samples,
+        missing,
       )
     request.ReadStacks(id) -> read_stacks(state, reply_to, reference, id)
     request.StopStacks(id) -> stop_stacks(state, reply_to, reference, id)
@@ -1425,6 +1426,57 @@ fn select(
   }
 }
 
+// The processes behind a stack probe's tokens. With `DropMissing` a token
+// whose pin is gone is set aside and named in the reply, and the probe
+// samples the rest; the viewer's own plan is the upper bound, so the agent
+// never samples a process the request did not name. A request none of whose
+// pins survive is refused as a stale pin, which is also the answer when the
+// request did not ask to drop.
+fn live_pids_of(
+  state: State,
+  owner: Pid,
+  tokens: List(Token),
+  missing: request.Missing,
+) -> Result(#(List(Pid), List(Int)), Failure) {
+  case missing {
+    request.RefuseMissing -> {
+      use pids <- fallible.then(pids_of(state, owner, tokens, []))
+
+      Ok(#(pids, []))
+    }
+    request.DropMissing -> {
+      let #(pids, dropped) = split_live(state, owner, tokens, [], [])
+
+      case pids {
+        [] ->
+          Error(Failure(
+            "stale_pin",
+            "none of the targets' pins exist or their processes exited",
+          ))
+        _ -> Ok(#(pids, dropped))
+      }
+    }
+  }
+}
+
+fn split_live(
+  state: State,
+  owner: Pid,
+  tokens: List(Token),
+  live: List(Pid),
+  gone: List(Int),
+) -> #(List(Pid), List(Int)) {
+  case tokens {
+    [] -> #(seq.reverse(live), seq.reverse(gone))
+    [token, ..rest] ->
+      case find_pin(state, owner, token) {
+        Ok(entry) -> split_live(state, owner, rest, [entry.pid, ..live], gone)
+        Error(Nil) ->
+          split_live(state, owner, rest, live, [token.pin_id, ..gone])
+      }
+  }
+}
+
 fn pids_of(
   state: State,
   owner: Pid,
@@ -1588,11 +1640,17 @@ fn start_stacks(
   rate_hz: Int,
   duration_ms: Int,
   max_samples: Int,
+  missing: request.Missing,
 ) -> Next(State) {
   let started = {
     use _ <- fallible.then(check_probe_room(state))
     use _ <- fallible.then(check_stack_room(state))
-    use pids <- fallible.then(pids_of(state, reply_to, tokens, []))
+    use #(pids, dropped) <- fallible.then(live_pids_of(
+      state,
+      reply_to,
+      tokens,
+      missing,
+    ))
     use sampler_pid <- fallible.then(
       start_sampler(sampler.Config(
         agent: ffi_proc.self(),
@@ -1604,12 +1662,12 @@ fn start_stacks(
       )),
     )
 
-    Ok(#(sampler_pid, seq.length(pids)))
+    Ok(#(sampler_pid, seq.length(pids), dropped))
   }
 
   case started {
     Error(failure) -> answer(state, reply_to, reference, reply.failure(failure))
-    Ok(#(sampler_pid, targets)) -> {
+    Ok(#(sampler_pid, targets, dropped)) -> {
       let probe =
         StackProbe(
           id: state.next_probe,
@@ -1634,6 +1692,7 @@ fn start_stacks(
           rate_hz,
           duration_ms,
           max_samples,
+          dropped,
         ),
       )
     }

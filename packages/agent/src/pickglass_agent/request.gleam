@@ -31,7 +31,7 @@
 //// | node facts and allocator carriers | `{<<"system">>}` |
 //// | collect one process's garbage | `{<<"gc">>, Token, DeadlineMs}` |
 //// | ask a process to measure itself | `{<<"measure">>, Token, BudgetMs}` |
-//// | start a stack sampling probe | `{<<"start_stacks">>, [Token], RateHz, DurationMs, MaxSamples}` |
+//// | start a stack sampling probe | `{<<"start_stacks">>, [Token], RateHz, DurationMs, MaxSamples}`, or the same with a last element `<<"refuse">>` or `<<"drop">>` for what to do with a pin whose process has exited |
 //// | read or stop a stack probe | `{<<"read_stacks">>, Id}`, `{<<"stop_stacks">>, Id}` |
 //// | start a call tree probe | `{<<"start_calltrace">>, [Token], [{Module, Function}], DurationMs, MaxEvents, TimelineSlices}` |
 //// | read or stop a call tree probe | `{<<"read_calltrace">>, Id}`, `{<<"stop_calltrace">>, Id}` |
@@ -147,6 +147,19 @@ pub type Targets {
   PinnedProcesses(tokens: List(Token))
 }
 
+/// What a stack probe does with a pin that is gone when it starts. A pin goes
+/// when its process exits, so a probe over sixteen processes of a busy node
+/// can find some of them gone between the viewer's plan and its confirm.
+pub type Missing {
+  /// Refuse the whole probe with `stale_pin`. This is what the first wire
+  /// release did, and a request without the last element still gets it.
+  RefuseMissing
+
+  /// Sample the processes that remain and name the tokens that were gone in
+  /// the reply. A probe with no process left is still refused.
+  DropMissing
+}
+
 /// A decoded request.
 pub type Request {
   Ping
@@ -186,6 +199,7 @@ pub type Request {
     rate_hz: Int,
     duration_ms: Int,
     max_samples: Int,
+    missing: Missing,
   )
   ReadStacks(probe_id: Int)
   StopStacks(probe_id: Int)
@@ -329,7 +343,8 @@ fn by_tag(name: String, term: Term, size: Int) -> Result(Request, String) {
     "process_detail", 2 -> decode_token_request(term, ProcessDetail)
     "supervision", 3 -> decode_supervision(term)
     "system", 1 -> Ok(SystemReport)
-    "start_stacks", 5 -> decode_start_stacks(term)
+    "start_stacks", 5 -> decode_start_stacks(term, RefuseMissing)
+    "start_stacks", 6 -> decode_start_stacks_with(term)
     "read_stacks", 2 -> decode_probe(term, ReadStacks)
     "stop_stacks", 2 -> decode_probe(term, StopStacks)
     "start_calltrace", 6 -> decode_start_calltrace(term)
@@ -526,7 +541,24 @@ fn decode_wait(
 
 // The rate ceiling is a total across targets, so it is divided by how many
 // there are: sixteen pins sample at most 62 times a second each.
-fn decode_start_stacks(term: Term) -> Result(Request, String) {
+fn decode_start_stacks_with(term: Term) -> Result(Request, String) {
+  use missing <- fallible.then(decode_missing(ffi_term.element(6, term)))
+
+  decode_start_stacks(term, missing)
+}
+
+fn decode_missing(term: Term) -> Result(Missing, String) {
+  case name(term, "missing") {
+    Ok("refuse") -> Ok(RefuseMissing)
+    Ok("drop") -> Ok(DropMissing)
+    _ -> Error("missing is not refuse or drop")
+  }
+}
+
+fn decode_start_stacks(
+  term: Term,
+  missing: Missing,
+) -> Result(Request, String) {
   use tokens <- fallible.then(decode_token_list(
     ffi_term.element(2, term),
     max_targets,
@@ -540,6 +572,7 @@ fn decode_start_stacks(term: Term) -> Result(Request, String) {
     clamp(rate, 1, max_total_hz / seq.length(tokens)),
     clamp(duration, min_stack_ms, max_stack_ms),
     clamp(samples, 1, max_stack_samples),
+    missing,
   ))
 }
 
