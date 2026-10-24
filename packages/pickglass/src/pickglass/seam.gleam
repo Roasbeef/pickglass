@@ -37,6 +37,7 @@
 //// - The service authorizes, executes, and answers with a `Reply`.
 
 import gleam/erlang/process.{type Subject}
+import gleam/int
 import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option}
@@ -263,6 +264,17 @@ pub type Reply {
   /// A counters probe started.
   ProbeStarted(probe_id: String, matched_functions: Int)
 
+  /// A stack probe started over some of the processes its plan named. The
+  /// others, `left_out` as pid text, exited between the plan and the start.
+  /// `processes` counts the ones sampled, and the sampled and left-out sets
+  /// together are exactly the plan's.
+  ProbeStartedWithout(probe_id: String, processes: Int, left_out: List(String))
+
+  /// A probe was not started because every process its plan named had
+  /// exited. `left_out` is their pid text. Nothing is running, and the pins
+  /// the plan held are dead.
+  TargetsExited(left_out: List(String))
+
   /// A counters probe stopped, with its last reading.
   ProbeStopped(snapshot: wire.CountersSnapshot)
 
@@ -302,6 +314,31 @@ pub type Reply {
   /// The request was refused. The text is the gate's reason, a validation
   /// message, or what the agent said.
   Rejected(reason: String)
+}
+
+/// The sentence for a probe none of whose processes survived to its start.
+/// It is the whole of the refusal text, and the page offers a new profile
+/// beside it.
+///
+/// ## Examples
+///
+/// ```gleam
+/// seam.all_exited_sentence(["<0.5.0>"])
+/// // -> "The selected process <0.5.0> exited before the probe started, so
+/// //     nothing was sampled"
+/// ```
+pub fn all_exited_sentence(left_out: List(String)) -> String {
+  case left_out {
+    [only] ->
+      "The selected process "
+      <> only
+      <> " exited before the probe started, so nothing was sampled"
+    _ ->
+      "All "
+      <> int.to_string(list.length(left_out))
+      <> " selected processes exited before the probe started, so nothing was sampled: "
+      <> string.join(left_out, ", ")
+  }
 }
 
 /// What a targeted collection or a self-measure left behind, kept so the

@@ -1149,7 +1149,24 @@ pub fn stacks_started_decodes_test() {
         num(900),
       ]),
     )
-    == Ok(wire.StacksStarted(3, 2, 100, 5000, 900))
+    == Ok(wire.StacksStarted(3, 2, 100, 5000, 900, []))
+}
+
+// A reply of the first wire release has no sixth element, and one of the
+// current agent names the pins it left out.
+pub fn stacks_started_names_the_pins_it_dropped_test() {
+  assert wire.decode_reply(
+      tuple([
+        text("stacks_started"),
+        num(3),
+        num(2),
+        num(100),
+        num(5000),
+        num(900),
+        dynamic.list([num(4), num(9)]),
+      ]),
+    )
+    == Ok(wire.StacksStarted(3, 2, 100, 5000, 900, [4, 9]))
 }
 
 // ------------------------------------------- totality of the added replies
@@ -1421,7 +1438,7 @@ pub fn extended_requests_encode_to_the_agent_shape_test() {
     == envelope(tuple([text("gc"), token_term, num(3000)]))
   assert encode(wire.AskMeasure(token, 500))
     == envelope(tuple([text("measure"), token_term, num(500)]))
-  assert encode(wire.AskStartStacks([token], 100, 5000, 1000))
+  assert encode(wire.AskStartStacks([token], 100, 5000, 1000, wire.DropMissing))
     == envelope(
       tuple([
         text("start_stacks"),
@@ -1429,6 +1446,24 @@ pub fn extended_requests_encode_to_the_agent_shape_test() {
         num(100),
         num(5000),
         num(1000),
+        text("drop"),
+      ]),
+    )
+  assert encode(wire.AskStartStacks(
+      [token],
+      100,
+      5000,
+      1000,
+      wire.RefuseMissing,
+    ))
+    == envelope(
+      tuple([
+        text("start_stacks"),
+        dynamic.list([token_term]),
+        num(100),
+        num(5000),
+        num(1000),
+        text("refuse"),
       ]),
     )
   assert encode(wire.AskReadStacks(3))

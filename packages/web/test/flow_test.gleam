@@ -16,6 +16,7 @@ import pickglass_web/key
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/page
+import pickglass_web/replan
 import pickglass_web/state
 import pickglass_web/view/overview
 import pickglass_web/view/owners
@@ -243,6 +244,8 @@ pub fn a_refusal_is_said_where_the_button_was_test() {
       ready: None,
       collected: None,
       refused: Some("no live process carries that owner"),
+      notice: None,
+      again: None,
     )
   let model =
     app.init(app.Start(page: page.Owners, links: page.Files, feeds: []))
@@ -265,6 +268,8 @@ pub fn an_empty_flow_draws_nothing_test() {
       ready: None,
       collected: None,
       refused: None,
+      notice: None,
+      again: None,
     )
   let model =
     app.init(app.Start(page: page.Owners, links: page.Files, feeds: []))
@@ -276,4 +281,74 @@ pub fn an_empty_flow_draws_nothing_test() {
     )
 
   assert !string.contains(element.to_string(app.view(model)), "class=\"flow")
+}
+
+fn flow_html(data: model.FlowModel) -> String {
+  let model =
+    app.init(app.Start(page: page.Overview, links: page.Files, feeds: []))
+  let #(model, _) =
+    app.update(
+      fn(_) { panic as "no request" },
+      model,
+      msg.Fed(msg.FedFlow(data)),
+    )
+
+  element.to_string(app.view(model))
+}
+
+// The refusal for processes that all exited is a sentence with the button that
+// chooses again, not a bare error code.
+pub fn an_all_exited_refusal_offers_the_profile_again_test() {
+  let html =
+    flow_html(model.FlowModel(
+      pending: None,
+      running: [],
+      ready: None,
+      collected: None,
+      refused: Some(
+        "All 16 selected processes exited before the probe started, so nothing was sampled",
+      ),
+      notice: None,
+      again: Some(replan.AgainBusiest),
+    ))
+
+  assert string.contains(html, "All 16 selected processes exited")
+  assert string.contains(html, "Profile the busiest 16 again")
+  assert string.contains(html, "profile-again")
+  assert !string.contains(html, "stale_pin")
+}
+
+pub fn a_refusal_without_a_new_choice_has_no_button_test() {
+  let html =
+    flow_html(model.FlowModel(
+      pending: None,
+      running: [],
+      ready: None,
+      collected: None,
+      refused: Some("no live process carries that owner"),
+      notice: None,
+      again: None,
+    ))
+
+  assert !string.contains(html, "profile-again")
+}
+
+pub fn a_probe_over_the_survivors_says_who_was_left_out_test() {
+  let html =
+    flow_html(model.FlowModel(
+      pending: None,
+      running: [],
+      ready: None,
+      collected: None,
+      refused: None,
+      notice: Some(
+        "2 of 16 selected processes exited before the probe started and were left out: <0.5.0>, <0.9.0>",
+      ),
+      again: None,
+    ))
+
+  assert string.contains(html, "2 of 16 selected processes exited")
+  assert string.contains(html, "&lt;0.5.0&gt;, &lt;0.9.0&gt;")
+  assert string.contains(html, "profile-left-out")
+  assert !string.contains(html, "Refused")
 }

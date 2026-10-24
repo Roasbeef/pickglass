@@ -44,6 +44,7 @@ import pickglass_core/provenance
 import pickglass_core/unit.{type Unit}
 import pickglass_web/key.{type Key}
 import pickglass_web/memory_model
+import pickglass_web/replan
 
 // ------------------------------------------------------------ shared
 
@@ -748,9 +749,12 @@ pub type FlowModel {
     /// The newest targeted collection, while it is recent. Its result is two
     /// counters on the process page, which do not say that it ran.
     collected: Option(memory_model.Collected),
-    /// Why the last profile button planned nothing, when it did not: an
-    /// owner with no live process, a full pin table, a refusal by the gate.
+    /// Why the last profile button planned nothing, or its plan did not start.
     refused: Option(String),
+    /// Which processes a started probe left out because they had exited.
+    notice: Option(String),
+    /// The profile to offer again beside a refusal that all had exited.
+    again: Option(replan.Again),
   )
 }
 

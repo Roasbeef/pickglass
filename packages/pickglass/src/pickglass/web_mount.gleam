@@ -68,6 +68,7 @@ import pickglass_web/key.{type Key}
 import pickglass_web/model
 import pickglass_web/msg
 import pickglass_web/page as web_page
+import pickglass_web/replan
 import pickglass_web/view/profile as profile_view
 import weft/actor
 
@@ -115,6 +116,17 @@ pub opaque type State {
     /// first. A refused start has no probe id and so no row in the viewer's
     /// probe list; this is where the page that asked finds the reason.
     refused_starts: List(String),
+    /// What the last confirmed probe left out, when some of its processes
+    /// exited before it started. The next plan or confirm replaces it.
+    notice: Option(String),
+    /// The button the page's last profile used, and so the one a refusal
+    /// that every process exited offers again.
+    last_profile: Option(replan.Again),
+    /// The refusal text that offers `Again`. It is shown only while the
+    /// page's refusal is still this text, so a later refusal, which replaces
+    /// the text, drops the button without every site that sets a refusal
+    /// having to know about it.
+    again: Option(#(String, replan.Again)),
   )
 }
 
@@ -242,27 +254,28 @@ fn start_feeder(
 
       use _ <- result.try(page.subscribe(updates))
 
-      actor.initialised(
-        State(
-          page:,
-          slug:,
-          cadence_ms:,
-          runtime: None,
-          sort: model.ByMemory,
-          offset: 0,
-          baseline: None,
-          samples: activity.OnSchedulerOnly,
-          chain: [],
-          exports: [],
-          baseline_file: None,
-          candidate_file: None,
-          compared: None,
-          subject: opened,
-          supervision: None,
-          refusal: None,
-          refused_starts: [],
-        ),
-      )
+      actor.initialised(State(
+        page:,
+        slug:,
+        cadence_ms:,
+        runtime: None,
+        sort: model.ByMemory,
+        offset: 0,
+        baseline: None,
+        samples: activity.OnSchedulerOnly,
+        chain: [],
+        exports: [],
+        baseline_file: None,
+        candidate_file: None,
+        compared: None,
+        subject: opened,
+        supervision: None,
+        refusal: None,
+        refused_starts: [],
+        notice: None,
+        last_profile: None,
+        again: None,
+      ))
       |> actor.selecting(
         process.new_selector()
         |> process.select(subject)
@@ -332,12 +345,30 @@ pub fn new_state(
     supervision: None,
     refusal: None,
     refused_starts: [],
+    notice: None,
+    last_profile: None,
+    again: None,
   )
 }
 
 /// Why the last profile button of the page planned nothing, if it did not.
 pub fn refusal_of(state: State) -> Option(String) {
   state.refusal
+}
+
+/// What the page's last confirmed probe left out, when some of its processes
+/// exited before it started.
+pub fn notice_of(state: State) -> Option(String) {
+  state.notice
+}
+
+/// The profile the page offers again beside its refusal, when the refusal
+/// is that every selected process exited.
+pub fn again_of(state: State) -> Option(replan.Again) {
+  case state.again {
+    Some(#(text, offered)) if state.refusal == Some(text) -> Some(offered)
+    _ -> None
+  }
 }
 
 /// The probes this page confirmed that the agent refused at start, newest
@@ -414,6 +445,8 @@ fn inputs(state: State) -> feeds.Inputs {
     notes: page.profile_notes(),
     refusal: state.refusal,
     refused_starts: state.refused_starts,
+    notice: state.notice,
+    again: again_of(state),
     lost: page.lost(),
     cadence_ms: state.cadence_ms,
     sort: state.sort,
@@ -576,9 +609,18 @@ pub fn ask(state: State, request: msg.Request) -> State {
     msg.PlanBinaries(pin) ->
       submit_with(state, resolve_pin(current, pin), seam.PlanReadBinaries)
 
-    msg.ProfileOwner(owner) -> profile_owner(state, current, owner)
+    msg.ProfileOwner(owner) ->
+      profile_owner(
+        State(..state, last_profile: Some(replan.AgainOwner(owner))),
+        current,
+        owner,
+      )
     msg.ProfileBusiest -> profile_busiest(state, current)
-    msg.ProfileProcess(row) -> profile_process(state, current, row)
+
+    // One process has no choice to make again: the one the operator named has
+    // exited, and choosing from a census cannot bring it back.
+    msg.ProfileProcess(row) ->
+      profile_process(State(..state, last_profile: None), current, row)
     msg.AdjustProfile(plan, duration, rate) ->
       replan(
         state,
@@ -675,7 +717,7 @@ fn profile_busiest(state: State, current: feeds.Inputs) -> State {
       let #(others, own) = profile_scope.without_own(rows)
 
       choose_and_plan(
-        state,
+        State(..state, last_profile: Some(replan.AgainBusiest)),
         profile_scope.WholeNode,
         profile_scope.candidates_of(others),
         own,
@@ -808,7 +850,7 @@ fn choose_and_plan(
 // A plan the viewer made clears the page's refusal; a refusal replaces it.
 fn planned(state: State, reply: seam.Reply) -> State {
   case reply {
-    seam.PlanReady(..) -> State(..state, refusal: None)
+    seam.PlanReady(..) -> State(..state, refusal: None, notice: None)
     seam.Rejected(reason) -> State(..state, refusal: Some(reason))
     _ -> State(..state, refusal: Some("the viewer did not plan a profile"))
   }
@@ -878,7 +920,37 @@ fn confirm(state: State, current: feeds.Inputs, plan: Key) -> State {
             ),
           )
         }
-        _ -> State(..state, refusal: None)
+
+        // Some of the plan's processes exited before the probe started and
+        // the agent sampled the others. The probe is running, so nothing is
+        // refused, and the page says who was left out.
+        seam.ProbeStartedWithout(processes:, left_out:, ..) ->
+          State(
+            ..state,
+            refusal: None,
+            notice: Some(probe_book.left_out_sentence(processes, left_out)),
+          )
+
+        // Every process of the plan exited, so nothing runs. The words come
+        // with the profile that was last asked for, to run again.
+        seam.TargetsExited(left_out:) -> {
+          let sentence = seam.all_exited_sentence(left_out)
+
+          State(
+            ..state,
+            refusal: Some(sentence),
+            notice: None,
+            refused_starts: list.take(
+              [sentence, ..state.refused_starts],
+              max_refused_starts,
+            ),
+            again: option.map(state.last_profile, fn(offered) {
+              #(sentence, offered)
+            }),
+          )
+        }
+
+        _ -> State(..state, refusal: None, notice: None)
       }
     }
   }

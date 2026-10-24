@@ -66,6 +66,7 @@ import pickglass_web/key.{type Key}
 import pickglass_web/memory_model
 import pickglass_web/model
 import pickglass_web/msg
+import pickglass_web/replan
 import pickglass_web/timeline_model
 
 /// How many rows the processes page shows at once.
@@ -134,6 +135,12 @@ pub type Inputs {
     refusal: Option(String),
     /// The probes the page confirmed and the agent refused at start.
     refused_starts: List(String),
+    /// What the page's last confirmed probe left out, when it started over
+    /// fewer processes than its plan named.
+    notice: Option(String),
+    /// The profile to offer again beside the page's refusal, when there is
+    /// one.
+    again: Option(replan.Again),
     /// Why the target is gone, when it is.
     lost: Option(String),
     cadence_ms: Int,
@@ -1613,6 +1620,8 @@ fn flow(inputs: Inputs) -> model.FlowModel {
     ready: ready_profile(inputs),
     collected: newest_collection(inputs),
     refused: inputs.refusal,
+    notice: inputs.notice,
+    again: inputs.again,
   )
 }
 

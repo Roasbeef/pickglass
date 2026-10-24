@@ -81,10 +81,15 @@ pub type Reply {
   MeasureReport(MeasureSnapshot)
   StacksStarted(
     probe_id: Int,
+    /// How many processes the probe samples.
     targets: Int,
     rate_hz: Int,
     duration_ms: Int,
     max_samples: Int,
+    /// The serials of the request's pins that were gone and were left out,
+    /// when the request said to drop them. An agent of the first wire release
+    /// sends none.
+    dropped: List(Int),
   )
   StacksReport(StacksSnapshot)
   CalltraceStarted(
@@ -953,12 +958,19 @@ fn reply_decoder() -> Decoder(Reply) {
       use rate_hz <- decode.field(3, decode.int)
       use duration_ms <- decode.field(4, decode.int)
       use max_samples <- decode.field(5, decode.int)
+      use dropped <- decode.then(
+        decode.one_of(
+          decode.field(6, decode.list(decode.int), decode.success),
+          or: [decode.success([])],
+        ),
+      )
       decode.success(StacksStarted(
         probe_id:,
         targets:,
         rate_hz:,
         duration_ms:,
         max_samples:,
+        dropped:,
       ))
     }
     "stacks" -> stacks_decoder()
@@ -2160,6 +2172,18 @@ pub type SchedulerAction {
   SchedulerRead
 }
 
+/// What a stack probe does with a pin whose process exited since the pin was
+/// taken. A pin goes when its process exits, so a probe over many processes
+/// of a busy node can find some of them gone between its plan and its start.
+pub type Missing {
+  /// Refuse the whole probe with `stale_pin`.
+  RefuseMissing
+
+  /// Sample the processes that remain and say which pins were left out. A
+  /// probe with no process left is still refused.
+  DropMissing
+}
+
 /// Which processes a counters probe covers.
 pub type Targets {
   /// Every process on the node except the agent.
@@ -2335,12 +2359,14 @@ pub type ExtendedRequest {
   /// Ask a process that advertises the capability to measure itself.
   AskMeasure(token: PinToken, budget_ms: Int)
 
-  /// A stack sampling probe over pinned processes.
+  /// A stack sampling probe over pinned processes. `missing` is what the
+  /// agent does with a pin whose process exited since it was taken.
   AskStartStacks(
     tokens: List(PinToken),
     rate_hz: Int,
     duration_ms: Int,
     max_samples: Int,
+    missing: Missing,
   )
 
   /// Read a running or finished stack probe.
@@ -2445,12 +2471,16 @@ fn extended_body(request: ExtendedRequest) -> Dynamic {
       tagged("gc", [token_term(token), dynamic.int(deadline_ms)])
     AskMeasure(token, budget_ms) ->
       tagged("measure", [token_term(token), dynamic.int(budget_ms)])
-    AskStartStacks(tokens, rate_hz, duration_ms, max_samples) ->
+    AskStartStacks(tokens, rate_hz, duration_ms, max_samples, missing) ->
       tagged("start_stacks", [
         dynamic.list(list.map(tokens, token_term)),
         dynamic.int(rate_hz),
         dynamic.int(duration_ms),
         dynamic.int(max_samples),
+        dynamic.string(case missing {
+          RefuseMissing -> "refuse"
+          DropMissing -> "drop"
+        }),
       ])
     AskReadStacks(id) -> tagged("read_stacks", [dynamic.int(id)])
     AskStopStacks(id) -> tagged("stop_stacks", [dynamic.int(id)])

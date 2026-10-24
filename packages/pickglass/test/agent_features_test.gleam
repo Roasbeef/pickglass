@@ -55,7 +55,7 @@ fn stacks(state: wire.ProbeState) -> wire.StacksSnapshot {
 fn script(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
   case request {
     wire.Extended(wire.AskStartStacks(..)) ->
-      Ok(wire.StacksStarted(11, 1, 50, 10_000, 500))
+      Ok(wire.StacksStarted(11, 1, 50, 10_000, 500, []))
     wire.Extended(wire.AskReadStacks(11)) ->
       Ok(wire.StacksReport(stacks(wire.ProbeFinished)))
     wire.Extended(wire.AskStopStacks(11)) ->
@@ -332,6 +332,8 @@ fn base_inputs(page: seam.Page) -> feeds.Inputs {
     notes: [],
     refusal: None,
     refused_starts: [],
+    notice: None,
+    again: None,
     lost: None,
     cadence_ms: 2000,
     sort: model.ByMemory,
@@ -672,7 +674,7 @@ pub fn a_stack_probe_asks_for_twice_the_samples_its_duration_allows_test() {
   // reaching the deadline is not also reaching the budget.
   assert list.any(fixture.drain(rig.seen, 50), fn(request) {
     case request {
-      wire.Extended(wire.AskStartStacks(_, 50, 10_000, 1000)) -> True
+      wire.Extended(wire.AskStartStacks(_, 50, 10_000, 1000, _)) -> True
       _ -> False
     }
   })

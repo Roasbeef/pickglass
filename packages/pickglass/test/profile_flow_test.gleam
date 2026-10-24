@@ -37,7 +37,7 @@ fn script(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
       Ok(wire.Pinned(token, text))
     }
     wire.Extended(wire.AskStartStacks(..)) ->
-      Ok(wire.StacksStarted(11, 2, 100, 10_000, 8000))
+      Ok(wire.StacksStarted(11, 2, 100, 10_000, 8000, []))
     other -> fixture.healthy(other)
   }
 }
@@ -113,7 +113,7 @@ pub fn confirming_starts_one_stack_probe_over_the_pins_test() {
 
   let requests = fixture.drain(rig.seen, 50)
   let assert [
-    wire.Extended(wire.AskStartStacks(tokens, rate, duration, samples)),
+    wire.Extended(wire.AskStartStacks(tokens, rate, duration, samples, _)),
   ] =
     list.filter(requests, fn(request) {
       case request {

@@ -27,8 +27,9 @@
 ////
 //// ## Reading order
 ////
-//// `view` composes `refusal`, `plan`, `running` and `ready`.
+//// `view` composes `refusal`, `notice`, `plan`, `running` and `ready`.
 
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import lustre/attribute
@@ -42,6 +43,7 @@ import pickglass_web/memory_model
 import pickglass_web/model.{type FlowModel}
 import pickglass_web/msg.{type Msg}
 import pickglass_web/page.{type Links, type Page}
+import pickglass_web/replan
 import pickglass_web/view/probes
 import pickglass_web/wire
 
@@ -55,16 +57,18 @@ import pickglass_web/wire
 /// ```
 pub fn view(data: FlowModel, links: Links, current: Page) -> Element(Msg) {
   let parts = case current {
-    page.Probes -> [refusal(data.refused)]
+    page.Probes -> [refusal(data.refused, data.again), notice(data.notice)]
 
     // A page that shows the result a banner links to does not link to itself.
     page.Profile | page.Timeline -> [
-      refusal(data.refused),
+      refusal(data.refused, data.again),
+      notice(data.notice),
       plan(data.pending),
       running(data),
     ]
     _ -> [
-      refusal(data.refused),
+      refusal(data.refused, data.again),
+      notice(data.notice),
       plan(data.pending),
       running(data),
       collected(data.collected),
@@ -78,7 +82,13 @@ pub fn view(data: FlowModel, links: Links, current: Page) -> Element(Msg) {
   }
 }
 
-fn refusal(reason: Option(String)) -> Element(Msg) {
+// A refusal is a sentence. When every selected process had exited, it also
+// carries the button that chooses again from the current census, because the
+// processes it named are gone and clicking the original button is the fix.
+fn refusal(
+  reason: Option(String),
+  again: Option(replan.Again),
+) -> Element(Msg) {
   case reason {
     Some(text) ->
       html.div(
@@ -87,7 +97,49 @@ fn refusal(reason: Option(String)) -> Element(Msg) {
           attribute.role("status"),
           attribute.data("test-id", "profile-refused"),
         ],
-        [element.text("Refused: " <> text)],
+        [element.text("Refused: " <> text), again_button(again)],
+      )
+    None -> element.none()
+  }
+}
+
+fn again_button(again: Option(replan.Again)) -> Element(Msg) {
+  case again {
+    Some(replan.AgainBusiest) ->
+      replan_button(
+        "Profile the busiest " <> int.to_string(msg.profile_limit) <> " again",
+        msg.ProfileBusiest,
+      )
+    Some(replan.AgainOwner(owner:)) ->
+      replan_button("Profile this owner again", msg.ProfileOwner(owner))
+    None -> element.none()
+  }
+}
+
+fn replan_button(label: String, ask: msg.Request) -> Element(Msg) {
+  html.button(
+    [
+      attribute.class("btn btn-small"),
+      attribute.type_("button"),
+      attribute.data("test-id", "profile-again"),
+      wire.click(msg.Ask(ask)),
+    ],
+    [element.text(label)],
+  )
+}
+
+// A probe that is running over the survivors of its plan says who was left
+// out, so the result is never taken for a profile of the whole plan.
+fn notice(text: Option(String)) -> Element(Msg) {
+  case text {
+    Some(sentence) ->
+      html.div(
+        [
+          attribute.class("flow-notice notice"),
+          attribute.role("status"),
+          attribute.data("test-id", "profile-left-out"),
+        ],
+        [element.text(sentence)],
       )
     None -> element.none()
   }

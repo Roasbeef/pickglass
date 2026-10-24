@@ -677,11 +677,55 @@ fn apply(
             matched,
             deadline_ms,
             now,
+            [],
           ),
         ),
       ),
       seam.ProbeStarted(int.to_string(probe_id), matched),
     )
+
+    // The agent sampled the survivors of the plan. The processes that exited
+    // since the plan are named in the reply, in the probe's record and in the
+    // audit trail, and their pins are marked gone so nothing releases or
+    // reuses them. The survivors are a subset of the confirmed plan, because
+    // the agent only ever drops tokens the command named.
+    exec.ProbeStartedWithout(probe_id, targets, deadline_ms, dropped) -> {
+      let left_out = pid_texts_of(state.gate, dropped)
+
+      audit.append(
+        state.config.audit,
+        audit.Host(
+          now,
+          audit.PinsInvalidated(probe_book.left_out_sentence(targets, left_out)),
+        ),
+      )
+
+      #(
+        keep_probes(
+          State(
+            ..state,
+            gate: list.fold(dropped, state.gate, fn(current, token) {
+              gate.invalidate_pin(
+                current,
+                token,
+                "exited before the probe started",
+                now,
+              )
+            }),
+            probes: record_started(
+              state.probes,
+              command,
+              probe_id,
+              targets,
+              deadline_ms,
+              now,
+              left_out,
+            ),
+          ),
+        ),
+        seam.ProbeStartedWithout(int.to_string(probe_id), targets, left_out),
+      )
+    }
 
     exec.ProbeStopped(snapshot) -> #(
       State(..state, probes: close_probe(state.probes, snapshot, now)),
@@ -740,21 +784,62 @@ fn apply(
 
     exec.Unsupported(reason) -> #(state, seam.Rejected(reason))
 
-    exec.Failed(failure) -> #(
-      invalidate_if_dead(
-        remember_refused_binaries(state, command, failure, now),
-        command,
-        failure,
-        now,
-      ),
-      seam.Rejected(remote.describe(failure)),
-    )
+    exec.Failed(failure) -> {
+      let next =
+        invalidate_if_dead(
+          remember_refused_binaries(state, command, failure, now),
+          command,
+          failure,
+          now,
+        )
+
+      #(next, refusal_reply(next, command, failure))
+    }
 
     exec.Unexpected(reply) -> #(
       state,
       seam.Rejected("the agent answered with something unexpected: " <> reply),
     )
   }
+}
+
+// What a failed command answers. A stack probe is started with the agent
+// told to leave out pins whose processes exited, so a `stale_pin` for one
+// means none of the plan's processes was left, and the answer says that in
+// words and names them, for the page to offer a new profile beside it. Every
+// other failure is the agent's own refusal.
+fn refusal_reply(
+  state: State,
+  command: Command,
+  failure: remote.Failure,
+) -> Reply {
+  case command, failure {
+    policy.StartProbe(spec:), remote.Refusal("stale_pin", _) ->
+      case spec.kind {
+        policy.Sampling ->
+          seam.TargetsExited(pid_texts_of(state.gate, spec.targets))
+        policy.Counters
+        | policy.CallMemory
+        | policy.CallTree
+        | policy.SchedulingGc -> seam.Rejected(remote.describe(failure))
+      }
+    _, _ -> seam.Rejected(remote.describe(failure))
+  }
+}
+
+// The pid text the viewer recorded when each pin was issued, in the order
+// given. A pin the gate has no record of is named by its token.
+fn pid_texts_of(gate: Gate, tokens: List(identity.PinToken)) -> List(String) {
+  let known = gate.pins(gate)
+
+  list.map(tokens, fn(token) {
+    case
+      list.find(known, fn(pin) { pin.token == token && pin.pid_text != "" })
+    {
+      Ok(pin) -> pin.pid_text
+      Error(Nil) -> identity.pin_to_string(token)
+    }
+  })
 }
 
 // A confirmed binaries read the agent refused leaves its reason beside the
@@ -958,6 +1043,7 @@ fn record_started(
   matched: Int,
   deadline_ms: Int,
   now: Int,
+  left_out: List(String),
 ) -> List(ProbeRecord) {
   case command {
     policy.StartProbe(spec:) -> [
@@ -968,8 +1054,9 @@ fn record_started(
         now,
         deadline_ms,
         matched,
-        list.length(spec.targets),
-      ),
+        list.length(spec.targets) - list.length(left_out),
+      )
+        |> probe_book.with_left_out(left_out),
       ..probes
     ]
     _ -> probes
@@ -1333,6 +1420,20 @@ fn settle(
               case outcome {
                 exec.ProbeStarted(probe_id, ..) ->
                   Held(..entry, stage: Sampling(int.to_string(probe_id)))
+
+                // A pin the agent dropped is gone from its table, so
+                // releasing it later would only be refused.
+                exec.ProbeStartedWithout(probe_id, dropped:, ..) ->
+                  Held(
+                    ..entry,
+                    taken: list.filter(entry.taken, fn(text) {
+                      !list.contains(
+                        list.map(dropped, identity.pin_to_string),
+                        text,
+                      )
+                    }),
+                    stage: Sampling(int.to_string(probe_id)),
+                  )
                 _ -> Held(..entry, stage: Planned)
               }
           }
