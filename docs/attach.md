@@ -312,6 +312,31 @@ the directory when the flag is absent; the flag wins over the variable, and an
 explicit `--proto-dist`, `--ssl-dist-optfile`, `--name` or `--cookie-file`
 wins over the directory. A bare `--` ends the scan, as for the other options.
 
+#### The attach root and `--attach NAME`
+
+A tool that issues credentials can write several attach directories under one
+attach root and let you pick by name. The root is `$PICKGLASS_ATTACH_HOME` if
+set, else `$HOME/.pickglass/attach`; each child directory `ROOT/NAME` is an
+attach directory as above.
+
+```sh
+pickglass attach --attach NAME
+```
+
+`--attach NAME` is the same as `--attach-dir ROOT/NAME`. NAME may hold only
+letters, digits, `.`, `_` and `-`, and may not start with `.`, so it cannot
+leave the root. An unknown NAME is an error that lists the available names.
+An explicit `--attach-dir`, `PICKGLASS_ATTACH_DIR`, `--proto-dist`,
+`--ssl-dist-optfile` or `--name` wins over `--attach`.
+
+Nothing is chosen for you: without `--attach` the root is never read, even
+when it holds exactly one directory, and a plain attach behaves as it always
+has. Pickglass never creates the root. Any tool may write there, including the
+one that issued the credentials; pickglass does not know which.
+
+The directory holds a private key's optfile and the target's cookie, so make
+the root and each child owner-only (mode 0700, files 0600).
+
 The launcher checks the directory before the VM starts. A missing directory,
 an absent or empty `ssl_dist.conf` or `node`, or a `node` of more than one
 line is a one-line error naming the path. The error never prints a file's

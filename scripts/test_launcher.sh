@@ -151,4 +151,75 @@ grep -q "a@h" "$TMP/err" && fail "node contents leaked"
 echo "inspector@127.0.0.1" > "$D/node"
 if run attach --attach-dir 2>"$TMP/err"; then fail "missing value accepted"; fi
 
+# The attach root: HOME is pointed at a scratch tree so nothing real is read.
+H="$TMP/home"
+mkdir -p "$H"
+root_run() { HOME="$H" PICKGLASS_ATTACH_HOME="" "$TMP/rel/bin/pickglass" "$@"; }
+mkchild() {
+  mkdir -p "$1"
+  echo conf > "$1/ssl_dist.conf"
+  echo cookie > "$1/.erlang.cookie"
+  echo "$2" > "$1/node"
+}
+
+# No root: plain distribution, and the root is never created.
+out=$(root_run attach --node app@127.0.0.1)
+before_extra "$out" | grep -qx -- '-proto_dist' && fail "root absent: TLS flags"
+[ ! -e "$H/.pickglass" ] || fail "root was created"
+if root_run attach --attach x 2>"$TMP/err"; then fail "--attach with no root"; fi
+grep -q "no attach directory named x" "$TMP/err" || fail "no root message"
+[ ! -e "$H/.pickglass" ] || fail "root was created by --attach"
+
+# A root with one child changes nothing when no flag is given.
+R="$H/.pickglass/attach"
+mkchild "$R/solo" solo@127.0.0.1
+for sub in attach open profile; do
+  out=$(root_run $sub --node app@127.0.0.1)
+  before_extra "$out" | grep -qx -- '-proto_dist' && fail "$sub: implicit root"
+  [ "$(after_extra "$out")" = "$sub
+--node
+app@127.0.0.1" ] || fail "$sub: arguments changed"
+done
+
+# PICKGLASS_ATTACH_HOME moves the root.
+out=$(HOME="$TMP/nowhere" PICKGLASS_ATTACH_HOME="$R" "$TMP/rel/bin/pickglass" attach --attach solo)
+before_extra "$out" | grep -qx solo@127.0.0.1 || fail "attach home"
+
+mkchild "$R/duo" duo@127.0.0.1
+mkdir -p "$R/.hidden"
+
+# --attach NAME picks a child, in both spellings, and the program never sees it.
+out=$(root_run attach --attach duo --node app@127.0.0.1)
+before_extra "$out" | grep -qx duo@127.0.0.1 || fail "--attach NAME"
+after_extra "$out" | grep -qx -- '--attach' && fail "program saw --attach"
+out=$(root_run attach --attach=solo)
+before_extra "$out" | grep -qx solo@127.0.0.1 || fail "--attach=NAME"
+if root_run attach --attach nope 2>"$TMP/err"; then fail "unknown name accepted"; fi
+grep -q "available: " "$TMP/err" || fail "available names not listed"
+grep -q duo "$TMP/err" || fail "duo not listed"
+grep -q hidden "$TMP/err" && fail "hidden dir listed"
+
+# Bad names are refused, including path escapes.
+for bad in ../x .hidden a/b "" "a b"; do
+  if root_run attach --attach "$bad" 2>"$TMP/err"; then fail "bad name '$bad'"; fi
+  grep -q "invalid attach name" "$TMP/err" || fail "no message for '$bad'"
+done
+
+# Explicit flags win over the root.
+out=$(root_run attach --attach duo --name me@h)
+before_extra "$out" | grep -qx duo@127.0.0.1 && fail "--name lost to root"
+out=$(root_run attach --attach duo --attach-dir "$D")
+before_extra "$out" | grep -qx inspector@127.0.0.1 || fail "--attach-dir lost to root"
+out=$(PICKGLASS_ATTACH_DIR="$D" root_run attach --attach duo)
+before_extra "$out" | grep -qx inspector@127.0.0.1 || fail "env dir lost to root"
+out=$(root_run attach --proto-dist inet_tcp)
+before_extra "$out" | grep -qx solo@127.0.0.1 && fail "--proto-dist lost to root"
+out=$(root_run attach --ssl-dist-optfile /f)
+before_extra "$out" | grep -qx duo@127.0.0.1 && fail "optfile lost to root"
+
+# A named child that fails the directory checks is an error naming the path.
+rm "$R/solo/node"
+if root_run attach --attach solo 2>"$TMP/err"; then fail "broken child accepted"; fi
+grep -q "solo/node is missing or empty" "$TMP/err" || fail "broken child message"
+
 echo "launcher tests passed"
