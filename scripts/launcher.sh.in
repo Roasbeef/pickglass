@@ -128,10 +128,12 @@ if [[ -n "$attach_dir" ]]; then
   fi
   proto=${proto:-inet_tls}
 
-  # The cookie default goes in front of the program's arguments, where the
-  # Gleam parser reads `--cookie-file` like any other.
-  if [[ -z "$cookie_given" ]]; then
-    passed=(--cookie-file "$attach_dir/.erlang.cookie" ${passed[@]+"${passed[@]}"})
+  # The cookie default goes right after the subcommand, the first program
+  # argument, because the Gleam parser reads the subcommand first and takes
+  # `--cookie-file` as one of that command's options. In front of it, the
+  # program would see an unknown command.
+  if [[ -z "$cookie_given" ]] && (( ${#passed[@]} > 0 )); then
+    passed=("${passed[0]}" --cookie-file "$attach_dir/.erlang.cookie" "${passed[@]:1}")
   fi
 fi
 
