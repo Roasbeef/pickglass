@@ -99,9 +99,9 @@ printf '%s\n' "$b" | grep -A1 -x -- '-name' | grep -qx inspector@127.0.0.1 \
 printf '%s\n' "$b" | grep -qx -- '-hidden' || fail "attach dir: not hidden"
 printf '%s\n' "$b" | grep -A1 -x -- '-dist_listen' | grep -qx false \
   || fail "attach dir: listens"
-[ "$(after_extra "$out")" = "--cookie-file
+[ "$(after_extra "$out")" = "attach
+--cookie-file
 $D/.erlang.cookie
-attach
 --node
 app@127.0.0.1" ] || fail "attach dir: program arguments"
 
