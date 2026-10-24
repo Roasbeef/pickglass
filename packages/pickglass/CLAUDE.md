@@ -31,7 +31,8 @@ Attach: `cli.Selector` says how the target is found (`LoomTarget` or
 `NamedNode`); `endpoint.Endpoint` is a node name split at the `@`, its naming
 mode (chosen from the host: a dot or colon is a long name) and its cookie
 file, and `endpoint.check_loopback` is the single place that scopes targets to
-this machine. `discover.Target` is a node with its OS pid and cookie file.
+this machine: loopback, the host name, or an address in the list that
+`ffi_dist.local_interface_addresses` reads with `inet:getifaddrs/0`. `discover.Target` is a node with its OS pid and cookie file.
 `attach.AttachError` is the typed failure of an attach (node not running,
 cookie mismatch, naming-mode mismatch, OTP too old, an agent of another build
 already running, an agent that is full), with `attach.describe`

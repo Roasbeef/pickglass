@@ -372,3 +372,133 @@ fn result_to_nil(result: Result(a, b)) -> Result(a, Nil) {
     Error(_) -> Error(Nil)
   }
 }
+
+@external(erlang, "inet", "getifaddrs")
+fn getifaddrs() -> Dynamic
+
+/// The most interface addresses read from the operating system. A machine
+/// with more is unusual, and the cap bounds what one call can return.
+const interface_address_limit = 256
+
+/// The addresses currently assigned to this machine's own network interfaces,
+/// as text: dotted decimal for IPv4 and eight colon-separated hex groups for
+/// IPv6. `inet:getifaddrs/0` is the only way to ask the operating system for
+/// them; the standard library offers no pure alternative, and `gleam_erlang`
+/// and weft do not bind it. An error from the call, or a reply of an
+/// unexpected shape, yields an empty list, so the caller then accepts no
+/// interface address rather than failing.
+///
+/// ## Examples
+///
+/// ```gleam
+/// local_interface_addresses()
+/// // -> ["127.0.0.1", "100.75.241.68", "0:0:0:0:0:0:0:1"]
+/// ```
+pub fn local_interface_addresses() -> List(String) {
+  interface_addresses_of(getifaddrs())
+}
+
+/// Read the addresses out of an `inet:getifaddrs/0` reply, which is
+/// `{ok, [{InterfaceName, Flags}]}`. Each flag is an atom or a tuple, and the
+/// `{addr, Address}` flags carry a 4-tuple or an 8-tuple of integers. Flags
+/// of any other shape, entries that do not decode, and `{error, _}` replies
+/// are skipped, and the result holds at most 256 addresses.
+///
+/// ## Examples
+///
+/// ```gleam
+/// interface_addresses_of(reply)
+/// // -> ["100.75.241.68"]
+/// ```
+pub fn interface_addresses_of(reply: Dynamic) -> List(String) {
+  let entries = {
+    use tag <- decode.field(0, atom.decoder())
+    case atom.to_string(tag) {
+      "ok" -> decode.field(1, decode.list(decode.dynamic), decode.success)
+      _ -> decode.failure([], "ok")
+    }
+  }
+
+  case decode.run(reply, entries) {
+    Error(_) -> []
+    Ok(interfaces) ->
+      interfaces
+      |> list.flat_map(fn(interface) {
+        case
+          decode.run(
+            interface,
+            decode.field(1, decode.list(decode.dynamic), decode.success),
+          )
+        {
+          Ok(flags) -> list.filter_map(flags, address_of_flag)
+          Error(_) -> []
+        }
+      })
+      |> list.take(interface_address_limit)
+  }
+}
+
+fn address_of_flag(flag: Dynamic) -> Result(String, Nil) {
+  let addr_flag = {
+    use tag <- decode.field(0, atom.decoder())
+    case atom.to_string(tag) {
+      "addr" -> decode.field(1, address_decoder(), decode.success)
+      _ -> decode.failure("", "addr")
+    }
+  }
+
+  decode.run(flag, addr_flag) |> result.replace_error(Nil)
+}
+
+// An eight-tuple is tried first because a four-element decoder would also
+// accept it.
+fn address_decoder() -> decode.Decoder(String) {
+  decode.one_of(group_tuple(8, 65_535, ":", int.to_base16), [
+    group_tuple(4, 255, ".", int.to_string),
+  ])
+}
+
+fn group_tuple(
+  size: Int,
+  largest: Int,
+  separator: String,
+  show: fn(Int) -> String,
+) -> decode.Decoder(String) {
+  let group =
+    decode.int
+    |> decode.then(fn(value) {
+      case value >= 0 && value <= largest {
+        True -> decode.success(value)
+        False -> decode.failure(0, "address group")
+      }
+    })
+
+  fields_decoder(size, group, separator, show)
+}
+
+fn fields_decoder(
+  size: Int,
+  group: decode.Decoder(Int),
+  separator: String,
+  show: fn(Int) -> String,
+) -> decode.Decoder(String) {
+  fields_from(0, size, group, [])
+  |> decode.map(fn(values) {
+    values |> list.reverse |> list.map(show) |> string.join(separator)
+  })
+}
+
+fn fields_from(
+  index: Int,
+  size: Int,
+  group: decode.Decoder(Int),
+  seen: List(Int),
+) -> decode.Decoder(List(Int)) {
+  case index == size {
+    True -> decode.success(seen)
+    False -> {
+      use value <- decode.field(index, group)
+      fields_from(index + 1, size, group, [value, ..seen])
+    }
+  }
+}

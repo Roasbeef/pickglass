@@ -325,8 +325,15 @@ allowed).
 ## Which targets are allowed
 
 For now pickglass attaches to nodes on the same machine only. The host in
-`--node` must be `127.0.0.1`, `::1`, `localhost`, or this machine's own host
-name. Any other host is refused with a message. The check is one function
+`--node` must be `127.0.0.1`, `::1`, `localhost`, this machine's own host
+name, or an IPv4 or IPv6 address currently assigned to one of this machine's
+own network interfaces, such as the Tailscale address of a node named
+`app@100.75.241.68` that runs here. Pickglass reads the interface addresses
+with `inet:getifaddrs/0` and compares addresses by value, so `::1` and
+`0:0:0:0:0:0:0:1` are the same address. An IPv6 zone id (`fe80::1%en0`) is not
+accepted. No name is resolved: a DNS name that merely points at a local
+address is refused, as is any address that belongs to another machine. Any
+other host is refused with a message. The check is one function
 (`check_loopback` in the `endpoint` module), so it can be relaxed later. Note
 that `::1` passes the check but needs both nodes to run IPv6 distribution
 (`-proto_dist inet6_tcp`), which pickglass does not set up; not re-verified.
