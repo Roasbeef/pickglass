@@ -22,11 +22,18 @@ root=$(dirname "$here")
 # optfile), `.erlang.cookie` (the target's cookie) and `node` (one line, the
 # viewer's own node name). It supplies defaults for the three options above and
 # for `--cookie-file`, so any of them given explicitly wins over the directory.
+#
+# `--attach NAME` names a child of the attach root, `$PICKGLASS_ATTACH_HOME` or
+# else `$HOME/.pickglass/attach`, and is the same as `--attach-dir ROOT/NAME`.
+# Nothing reads the root unless `--attach` is given, so a plain attach never
+# depends on it, and the root is never created.
 proto=""
 optfile=""
 name=""
 cookie_given=""
 attach_dir="${PICKGLASS_ATTACH_DIR:-}"
+attach_name=""
+attach_given=""
 passed=()
 while (( $# > 0 )); do
   case "$1" in
@@ -34,6 +41,17 @@ while (( $# > 0 )); do
       # Everything after a bare `--` belongs to the program.
       passed+=("$@")
       break
+      ;;
+    --attach)
+      (( $# >= 2 )) || { echo "pickglass: $1 needs a value" >&2; exit 2; }
+      attach_name=$2
+      attach_given=1
+      shift 2
+      ;;
+    --attach=*)
+      attach_name=${1#*=}
+      attach_given=1
+      shift
       ;;
     --proto-dist | --ssl-dist-optfile | --name | --attach-dir)
       (( $# >= 2 )) || { echo "pickglass: $1 needs a value" >&2; exit 2; }
@@ -67,6 +85,26 @@ while (( $# > 0 )); do
       ;;
   esac
 done
+
+# `--attach NAME` is the only thing that reads the attach root, and only when
+# no explicit flag or variable has chosen the transport. A name is checked even
+# when it is then unused, so a typo or a path escape is never silently ignored.
+if [[ -n "$attach_given" ]]; then
+  [[ "$attach_name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] \
+    || { echo "pickglass: invalid attach name $attach_name" >&2; exit 2; }
+  if [[ -z "$attach_dir$proto$optfile$name" ]]; then
+    attach_root="${PICKGLASS_ATTACH_HOME:-${HOME:-}/.pickglass/attach}"
+    if [[ ! -d "$attach_root/$attach_name" ]]; then
+      avail=""
+      for d in "$attach_root"/[!.]*/; do
+        if [[ -d "$d" ]]; then avail+=" $(basename "$d")"; fi
+      done
+      echo "pickglass: no attach directory named $attach_name in $attach_root (available:${avail:- none})" >&2
+      exit 2
+    fi
+    attach_dir="$attach_root/$attach_name"
+  fi
+fi
 
 # The directory is checked before the emulator starts. An error names a path
 # and never prints a file's contents, because the directory also holds the
