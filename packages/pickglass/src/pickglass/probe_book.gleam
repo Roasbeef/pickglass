@@ -104,6 +104,11 @@ pub type ProbeRecord {
     /// How many processes the probe traced or sampled, when it is known. A
     /// probe read back from a capture knows it only if the capture kept it.
     processes: Option(Int),
+    /// The pid text of the processes the plan named that had exited by the
+    /// time the probe started, and so were not sampled. Empty for every probe
+    /// that sampled all it was planned over, and for one read back from a
+    /// capture.
+    left_out: List(String),
     state: ProbeState,
     /// What the probe measured besides its profile. Empty until the probe
     /// finishes.
@@ -135,9 +140,27 @@ pub fn started(
     duration_ms:,
     matched:,
     processes: Some(processes),
+    left_out: [],
     state: Running,
     detail: NoDetail,
   )
+}
+
+/// Record the processes a probe was planned over and did not sample because
+/// they had exited before it started. The finished probe says so in its notes,
+/// so the result never reads as a profile of the whole plan.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probe_book.started(7, policy.Sampling, [], 1000, 10_000, 14, 14)
+/// |> probe_book.with_left_out(["<0.5.0>", "<0.9.0>"])
+/// ```
+pub fn with_left_out(
+  probe: ProbeRecord,
+  left_out: List(String),
+) -> ProbeRecord {
+  ProbeRecord(..probe, left_out:)
 }
 
 /// Whether a probe is still counting.
@@ -770,10 +793,38 @@ fn recorded(probe: ProbeRecord) -> ProbeRecord {
             matched: Some(probe.matched),
           ),
           profile:,
-          notes:,
+          notes: case probe.left_out, probe.processes {
+            [], _ -> notes
+            left_out, Some(sampled) -> [
+              left_out_sentence(sampled, left_out),
+              ..notes
+            ]
+            left_out, None -> [left_out_sentence(0, left_out), ..notes]
+          },
         ),
       )
   }
+}
+
+/// The sentence a page, a result and the audit trail give for the processes a
+/// probe left out because they exited before it started. `sampled` is how
+/// many it went on to sample.
+///
+/// ## Examples
+///
+/// ```gleam
+/// probe_book.left_out_sentence(14, ["<0.5.0>", "<0.9.0>"])
+/// // -> "2 of 16 selected processes exited before the probe started and were
+/// //     left out: <0.5.0>, <0.9.0>"
+/// ```
+pub fn left_out_sentence(sampled: Int, left_out: List(String)) -> String {
+  let gone = list.length(left_out)
+
+  int.to_string(gone)
+  <> " of "
+  <> int.to_string(sampled + gone)
+  <> " selected processes exited before the probe started and were left out: "
+  <> string.join(left_out, ", ")
 }
 
 /// Keep every running probe and the newest `keep` finished ones, from a list
@@ -981,6 +1032,7 @@ fn probe_of(
       None -> 0
     }),
     processes: option.then(cost.counters, fn(facts) { facts.processes }),
+    left_out: [],
     state: Finished(
       ended_ms: 0,
       outcome: cost.outcome,

@@ -152,6 +152,7 @@ pub fn stack_probes_clamp_their_budgets_test() {
       request.max_total_hz,
       request.min_stack_ms,
       1,
+      request.RefuseMissing,
     ))
   assert decoded_request(
       envelope(#("start_stacks", one, 0, 999_999_999, 999_999_999)),
@@ -161,14 +162,47 @@ pub fn stack_probes_clamp_their_budgets_test() {
       1,
       request.max_stack_ms,
       request.max_stack_samples,
+      request.RefuseMissing,
     ))
   assert case
     decoded_request(envelope(#("start_stacks", sixteen, 999_999, 1000, 10)))
   {
-    Ok(request.StartStacks(tokens, rate, _, _)) ->
+    Ok(request.StartStacks(tokens, rate, _, _, _)) ->
       list.length(tokens) == 16 && rate == request.max_total_hz / 16
     _ -> False
   }
+}
+
+// The last element is what a probe does with a pin whose process exited. A
+// request without it refuses, as the first wire release did, so an older
+// viewer is not changed by the newer agent.
+pub fn a_stack_probe_says_what_to_do_with_a_gone_pin_test() {
+  let one = [#("boot-1", 1)]
+
+  assert decoded_request(envelope(#("start_stacks", one, 10, 1000, 10, "drop")))
+    == Ok(request.StartStacks(
+      [request.Token("boot-1", 1)],
+      10,
+      1000,
+      10,
+      request.DropMissing,
+    ))
+  assert decoded_request(
+      envelope(#("start_stacks", one, 10, 1000, 10, "refuse")),
+    )
+    == Ok(request.StartStacks(
+      [request.Token("boot-1", 1)],
+      10,
+      1000,
+      10,
+      request.RefuseMissing,
+    ))
+  assert decoded_request(
+      envelope(#("start_stacks", one, 10, 1000, 10, "maybe")),
+    )
+    |> is_error
+  assert decoded_request(envelope(#("start_stacks", one, 10, 1000, 10, 1)))
+    |> is_error
 }
 
 pub fn malformed_stack_probes_are_refused_test() {

@@ -568,13 +568,17 @@ fn heap_reading(reading: Result(detail.Heap, Nil)) -> Term {
 }
 
 /// The answer to `start_stacks`, with the rate, duration and budget the
-/// agent settled on after clamping.
+/// agent settled on after clamping. `targets` counts the processes sampled.
+/// `dropped` are the pin numbers of the request's tokens whose pin was gone
+/// and which the request said to leave out; it is empty for a probe that
+/// refuses such a pin.
 pub fn stacks_started(
   probe_id: Int,
   targets: Int,
   rate_hz: Int,
   duration_ms: Int,
   max_samples: Int,
+  dropped: List(Int),
 ) -> Term {
   ffi_term.coerce(#(
     "stacks_started",
@@ -583,6 +587,7 @@ pub fn stacks_started(
     rate_hz,
     duration_ms,
     max_samples,
+    dropped,
   ))
 }
 

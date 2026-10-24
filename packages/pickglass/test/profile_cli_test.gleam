@@ -191,14 +191,17 @@ fn agent(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
 
       Ok(wire.Pinned(token, text))
     }
-    wire.Extended(wire.AskStartStacks(tokens, rate, _, _)) ->
-      Ok(wire.StacksStarted(
-        11,
-        list.length(tokens),
-        int.min(rate, 1000 / list.length(tokens)),
-        1000,
-        100_000,
-      ))
+    wire.Extended(wire.AskStartStacks(tokens, rate, _, _, _)) ->
+      Ok(
+        wire.StacksStarted(
+          11,
+          list.length(tokens),
+          int.min(rate, 1000 / list.length(tokens)),
+          1000,
+          100_000,
+          [],
+        ),
+      )
     wire.Extended(wire.AskReadStacks(11))
     | wire.Extended(wire.AskStopStacks(11)) -> Ok(wire.StacksReport(finished()))
     other -> fixture.healthy(other)

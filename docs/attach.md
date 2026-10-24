@@ -42,6 +42,19 @@ move your browser itself, so you follow the link. The pins the button took are
 released when the probe ends, the plan is cancelled or it lapses; a process you
 had pinned yourself stays pinned.
 
+On a busy node some of the chosen processes can exit while you read the plan
+card. The probe does not fail for that. At Confirm the agent samples the
+processes that are still alive and the page says which were left out ("2 of 16
+selected processes exited before the probe started and were left out: <0.123.0>,
+<0.131.0>"); the finished profile carries the same sentence among its caveats,
+and the audit log records it. The survivors are always a subset of the plan you
+confirmed, never a new choice. Only when none of the chosen processes is alive
+does Confirm refuse, and the page then says that all of them exited and offers
+"Profile the busiest 16 again" (or "Profile this owner again") to choose afresh
+from the current census. This applies to stack profiles; a call trace, an
+allocation profile or a recording over a process that has exited is still
+refused as a whole.
+
 From a terminal:
 
 ```sh

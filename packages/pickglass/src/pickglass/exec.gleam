@@ -60,6 +60,18 @@ pub type Outcome {
   /// A counters probe started.
   ProbeStarted(probe_id: Int, matched: Int, deadline_ms: Int)
 
+  /// A stack probe started over some of the pins it was planned over. The
+  /// agent found `dropped` already gone, because their processes exited
+  /// between the plan and the start, and sampled the rest. `targets` counts
+  /// the processes sampled. The dropped tokens are always a subset of the
+  /// plan's, never a token the plan did not name.
+  ProbeStartedWithout(
+    probe_id: Int,
+    targets: Int,
+    deadline_ms: Int,
+    dropped: List(PinToken),
+  )
+
   /// A counters probe stopped, with its last reading.
   ProbeStopped(snapshot: wire.CountersSnapshot)
 
@@ -291,15 +303,45 @@ fn stacks_started(remote: Remote, spec: policy.ProbeSpec) -> Outcome {
         spec.rate_hz,
         spec.duration_ms,
         samples,
+        wire.DropMissing,
       )),
       ask_deadline_ms,
     )
   {
-    Ok(wire.StacksStarted(probe_id, targets, _, duration, _)) ->
+    Ok(wire.StacksStarted(probe_id, targets, _, duration, _, [])) ->
       ProbeStarted(probe_id, targets, duration)
+    Ok(wire.StacksStarted(probe_id, targets, _, duration, _, dropped)) ->
+      ProbeStartedWithout(
+        probe_id,
+        targets,
+        duration,
+        planned_among(spec.targets, dropped),
+      )
     Ok(other) -> Unexpected(string.inspect(other))
     Error(failure) -> Failed(failure)
   }
+}
+
+/// The planned pins the agent says it left out, in plan order.
+///
+/// The agent names pins by serial only, so the plan's tokens are what turn a
+/// serial back into a token. A serial the plan did not name is ignored, which
+/// keeps the dropped set a subset of what the operator confirmed, whatever
+/// the agent sent.
+///
+/// ## Examples
+///
+/// ```gleam
+/// exec.planned_among([token_3, token_4, token_9], [4, 7])
+/// // -> [token_4]
+/// ```
+pub fn planned_among(
+  planned: List(PinToken),
+  dropped: List(Int),
+) -> List(PinToken) {
+  list.filter(planned, fn(token) {
+    list.contains(dropped, identity.pin_serial(token))
+  })
 }
 
 fn stop_probe(

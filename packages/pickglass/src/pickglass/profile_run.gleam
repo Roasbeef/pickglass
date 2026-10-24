@@ -439,6 +439,17 @@ fn sample(
       case page.submit(seam.ConfirmPlan(id)) {
         seam.ProbeStarted(probe_id, _) ->
           wait_for_probe(page, probe_id, options.seconds + grace_s)
+
+        // Some of the processes exited between the plan and the start. The
+        // probe samples the others, and its notes carry the sentence naming
+        // the ones left out, so the summary the command prints says so.
+        seam.ProbeStartedWithout(probe_id, processes, left_out) -> {
+          io.println(probe_book.left_out_sentence(processes, left_out))
+
+          wait_for_probe(page, probe_id, options.seconds + grace_s)
+        }
+        seam.TargetsExited(left_out) ->
+          Error(StartRefused(seam.all_exited_sentence(left_out)))
         seam.Rejected(reason) -> Error(StartRefused(reason))
         _ -> Error(StartRefused("the viewer did not start the probe"))
       }

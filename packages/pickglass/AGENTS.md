@@ -114,6 +114,21 @@ lapses, when the start fails, and when the probe ends; a pin the operator held
 first is never in `Held`. `seam.Page.profile` and `profile_notes` carry it to
 the pages, and `feeds.flow` is what every page but Probes draws above its body.
 
+Churn between plan and start: processes of a busy node exit while the operator
+reads the plan card. `exec` starts a stack probe with `wire.DropMissing`, so the
+agent samples the processes whose pins remain and names the pins it left out.
+`service` answers `seam.ProbeStartedWithout` (the survivors started; the left-out
+pid texts are named), records them in `ProbeRecord.left_out` (the finished
+probe's notes and the Profile page's caveats carry the sentence), appends a
+`PinsInvalidated` audit entry, marks those pins gone in the gate and drops them
+from `Held.taken`, because the agent no longer has them. When no pin remains the
+agent refuses with `stale_pin`, and the service answers `seam.TargetsExited`
+for a stack probe: `web_mount` words it with `seam.all_exited_sentence` and
+offers the button that planned it again (`model.Again`, kept as
+`last_profile`). The survivors are always a subset of the confirmed plan
+(`exec.planned_among`), and only stack probes drop; a call trace, allocation
+profile or recording over a dead pin still refuses as a whole.
+
 the five probe kinds are run by `exec`. `policy.CallMemory` is a counter set in
 the `time_and_memory` mode: `exec` reads its allocation apart from its counters
 (`PolledAllocation` when a poll finds it ended, `AllocationStopped` on an

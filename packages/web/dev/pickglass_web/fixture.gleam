@@ -1271,6 +1271,8 @@ pub fn flow() -> model.FlowModel {
     )),
     collected: None,
     refused: None,
+    notice: None,
+    again: None,
   )
 }
 

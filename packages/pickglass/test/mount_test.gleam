@@ -68,6 +68,7 @@ fn sampled() -> probe_book.ProbeRecord {
     duration_ms: 10_000,
     matched: 0,
     processes: Some(1),
+    left_out: [],
     state: probe_book.Finished(
       ended_ms: 11_000,
       outcome: measure.Complete,

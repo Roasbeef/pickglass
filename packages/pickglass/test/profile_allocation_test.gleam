@@ -890,8 +890,8 @@ pub fn captures_with_different_word_sizes_state_no_direction_test() {
 
 fn stack_agent(request: wire.Request) -> Result(wire.Reply, remote.Failure) {
   case request {
-    wire.Extended(wire.AskStartStacks(tokens, _, _, _)) ->
-      Ok(wire.StacksStarted(11, list.length(tokens), 100, 1000, 100_000))
+    wire.Extended(wire.AskStartStacks(tokens, _, _, _, _)) ->
+      Ok(wire.StacksStarted(11, list.length(tokens), 100, 1000, 100_000, []))
     wire.Extended(wire.AskReadStacks(11))
     | wire.Extended(wire.AskStopStacks(11)) ->
       Ok(wire.StacksReport(finished_stacks()))
